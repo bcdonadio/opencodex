@@ -13,6 +13,11 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
     externalSqliteHome: "Externer SQLite-Speicher",
     inspectionUnavailable: "Die Diagnoseprotokoll-Inspektion ist nicht verfügbar.",
   },
+  fr: {
+    inspectionOnly: "Inspection uniquement",
+    externalSqliteHome: "Stockage SQLite externe",
+    inspectionUnavailable: "L’inspection des journaux de diagnostic est indisponible.",
+  },
   ko: {
     inspectionOnly: "검사 전용",
     externalSqliteHome: "외부 SQLite 저장소",
