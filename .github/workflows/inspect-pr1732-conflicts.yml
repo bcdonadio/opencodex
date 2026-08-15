@@ -1,0 +1,23 @@
+name: Inspect PR 1732 conflicts
+
+on:
+  push:
+    branches: [pr-assets]
+    paths:
+      - .github/workflows/inspect-pr1732-conflicts.yml
+      - .github/scripts/inspect-pr1732-conflicts.sh
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+      - name: Inspect conflicts
+        run: bash .github/scripts/inspect-pr1732-conflicts.sh
