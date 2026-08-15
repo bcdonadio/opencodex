@@ -135,7 +135,7 @@ for file in "${resolved_files[@]}"; do
     exit 1
   fi
 done
-git diff --check --cached
+git diff --check --cached -- "${resolved_files[@]}"
 
 bun install --frozen-lockfile
 (cd gui && bun install --frozen-lockfile)
