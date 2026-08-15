@@ -5,6 +5,7 @@ on:
     branches: [pr-assets]
     paths:
       - .github/workflows/resolve-pr1729-conflicts.yml
+      - .github/scripts/resolve-pr1729.sh
 
 permissions:
   contents: write
