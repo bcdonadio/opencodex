@@ -9,6 +9,7 @@ import { useMemo, useState } from "react";
 import { IconChevron, IconHardDrive } from "../../icons";
 import { useT, type TFn, type TKey, type Locale } from "../../i18n/shared";
 import { logGuardLabel } from "../../i18n/log-guard-labels";
+import { logGuardOperationLabel } from "../../i18n/log-guard-operation-labels";
 import {
   logGuardProtectionModeLabel,
   logGuardProtectionStateLabel,
@@ -87,7 +88,8 @@ export interface StorageReport {
 export type CodexLogGuardAction =
   | { action: "protect"; mode: "compat" | "quiet" }
   | { action: "unprotect" }
-  | { action: "repair" };
+  | { action: "repair" }
+  | { action: "compact" };
 
 // Known scanner bucket keys -> localized labels; unknown future keys fall back to the API label.
 const BUCKET_TKEYS: Record<string, TKey> = {
@@ -117,15 +119,15 @@ function rowsDisplay(bucket: StorageBucket, locale: Locale, t: TFn): string {
 
 function mutationErrorLabel(locale: Locale, code: unknown): string {
   switch (code) {
-    case "codex_running": return logGuardLabel(locale, "error.codex_running");
-    case "process_enumeration_failed": return logGuardLabel(locale, "error.process_enumeration_failed");
-    case "busy": return logGuardLabel(locale, "error.busy");
-    case "unsupported_schema": return logGuardLabel(locale, "error.unsupported_schema");
+    case "codex_running": return logGuardOperationLabel(locale, "error.codex_running");
+    case "process_enumeration_failed": return logGuardOperationLabel(locale, "error.process_enumeration_failed");
+    case "busy": return logGuardOperationLabel(locale, "error.busy");
+    case "unsupported_schema": return logGuardOperationLabel(locale, "error.unsupported_schema");
     case "trigger_collision": return logGuardLabel(locale, "error.trigger_collision");
-    case "unsafe_path": return logGuardLabel(locale, "error.unsafe_path");
-    case "database_error": return logGuardLabel(locale, "error.database_error");
+    case "unsafe_path": return logGuardOperationLabel(locale, "error.unsafe_path");
+    case "database_error": return logGuardOperationLabel(locale, "error.database_error");
     case "config_write_failed": return logGuardLabel(locale, "error.config_write_failed");
-    default: return logGuardLabel(locale, "error.generic");
+    default: return logGuardOperationLabel(locale, "error.generic");
   }
 }
 
@@ -149,6 +151,10 @@ function CodexLogGuardPanel({
     || report.capabilities.reclaim.state === "unsupported";
   const protection = report.protection;
   const mutationDisabled = busy || report.capabilities.protection.state !== "supported";
+  const reclaimAvailable = protection !== undefined
+    && report.capabilities.reclaim.state === "supported"
+    && (metrics?.reclaimableBytes ?? 0) > 0;
+  const [confirmCompact, setConfirmCompact] = useState(false);
 
   return (
     <div className="stw-section" data-testid="codex-log-guard">
@@ -248,9 +254,50 @@ function CodexLogGuardPanel({
                 {logGuardLabel(locale, "repair")}
               </button>
             )}
-            {busy && <span className="muted" role="status">{logGuardLabel(locale, "applying")}</span>}
+            {busy && <span className="muted" role="status">{logGuardOperationLabel(locale, "applying")}</span>}
           </div>
           {error && <p className="err" role="alert">{error}</p>}
+        </div>
+      )}
+
+      {reclaimAvailable && (
+        <div className="stw-section" data-testid="log-guard-reclaim">
+          <div className="storage-policy-actions">
+            {!confirmCompact ? (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                data-testid="log-guard-compact"
+                disabled={busy}
+                onClick={() => setConfirmCompact(true)}
+              >
+                {logGuardLabel(locale, "compact")}
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  data-testid="log-guard-compact-confirm"
+                  disabled={busy}
+                  onClick={() => {
+                    setConfirmCompact(false);
+                    onAction({ action: "compact" });
+                  }}
+                >
+                  {logGuardLabel(locale, "confirmCompact")}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onClick={() => setConfirmCompact(false)}
+                >
+                  {logGuardLabel(locale, "cancel")}
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
 
@@ -359,10 +406,22 @@ export default function StorageWorkspace({
           setLogGuardError({ generation, message: mutationErrorLabel(locale, errorPayload.error) });
           return;
         }
+        if (action.action === "compact") {
+          // The mutation has already succeeded. Refresh is deliberately best effort so
+          // a transient GET/JSON failure cannot be presented as a failed compaction.
+          try {
+            const refreshed = await fetch(`${API_BASE}/api/storage/codex-logs`);
+            if (refreshed.ok) {
+              const payload = await refreshed.json() as CodexLogGuardReport;
+              setLogGuardOverride({ generation, report: payload });
+            }
+          } catch { /* keep the existing report after successful compaction */ }
+          return;
+        }
         const payload = await response.json() as CodexLogGuardReport;
         setLogGuardOverride({ generation, report: payload });
       } catch {
-        setLogGuardError({ generation, message: logGuardLabel(locale, "error.generic") });
+        setLogGuardError({ generation, message: logGuardOperationLabel(locale, "error.generic") });
       } finally {
         setInternalLogGuardBusy(false);
       }
