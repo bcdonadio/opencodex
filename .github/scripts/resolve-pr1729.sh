@@ -112,24 +112,29 @@ if "codexLogGuardProtectionDeps?:" not in text:
 p.write_text(text)
 PY
 
-git add \
-  docs-site/src/content/docs/guides/codex-log-guard.md \
-  gui/src/components/storage-workspace/StorageWorkspace.tsx \
-  gui/src/i18n/log-guard-labels.ts \
-  src/cli/codex-log-guard-doctor.ts \
-  src/cli/observe.ts \
-  src/server/management/context.ts \
+resolved_files=(
+  docs-site/src/content/docs/guides/codex-log-guard.md
+  gui/src/components/storage-workspace/StorageWorkspace.tsx
+  gui/src/i18n/log-guard-labels.ts
+  src/cli/codex-log-guard-doctor.ts
+  src/cli/observe.ts
+  src/server/management/context.ts
   src/server/management/storage-log-guard-routes.ts
+)
+
+git add "${resolved_files[@]}"
 
 if git diff --name-only --diff-filter=U | grep -q .; then
   echo "Unresolved conflicts remain:"
   git diff --name-only --diff-filter=U
   exit 1
 fi
-if git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- ':!bun.lock' ':!gui/bun.lock'; then
-  echo "Conflict markers remain."
-  exit 1
-fi
+for file in "${resolved_files[@]}"; do
+  if grep -n -E '^(<<<<<<<|=======|>>>>>>>)' "$file"; then
+    echo "Conflict markers remain in ${file}."
+    exit 1
+  fi
+done
 git diff --check --cached
 
 bun install --frozen-lockfile
