@@ -1,0 +1,49 @@
+name: Resolve PR 1729 conflicts
+
+on:
+  push:
+    branches: [pr-assets]
+    paths:
+      - .github/workflows/resolve-pr1729-conflicts.yml
+
+permissions:
+  contents: write
+
+jobs:
+  inspect-conflicts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Inspect real three-way merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin feat/codex-log-guard-inspect feat/codex-log-guard-protect
+          git checkout -B feat/codex-log-guard-protect origin/feat/codex-log-guard-protect
+          set +e
+          git merge --no-commit --no-ff origin/feat/codex-log-guard-inspect
+          merge_status=$?
+          set -e
+          echo "merge_status=${merge_status}"
+          echo "--- conflicted paths ---"
+          git diff --name-only --diff-filter=U || true
+          echo "--- status ---"
+          git status --short
+          echo "--- conflict marker context ---"
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            echo "===== ${file} ====="
+            grep -n -C 8 -E '^(<<<<<<<|=======|>>>>>>>)' "$file" || true
+          done < <(git diff --name-only --diff-filter=U)
+          if [ "$merge_status" -eq 0 ]; then
+            echo "Merge is clean; no manual resolution needed."
+          else
+            exit 1
+          fi
