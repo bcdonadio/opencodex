@@ -15,6 +15,12 @@ const SCHEMA_LABELS: Record<Locale, Record<LogGuardSchemaState, string>> = {
     unreadable: "Datenbank nicht lesbar",
     unsupported: "Nicht unterstützt",
   },
+  fr: {
+    compatible: "Compatible",
+    missing: "Base de données introuvable",
+    unreadable: "Base de données indisponible",
+    unsupported: "Non pris en charge",
+  },
   ko: {
     compatible: "호환됨",
     missing: "데이터베이스 없음",
