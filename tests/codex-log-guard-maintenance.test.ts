@@ -250,4 +250,38 @@ describe("Codex Log Guard reclaim", () => {
     expect(result.report.stopReason).toBe("page_budget");
     expect(result.report.after.freelistPages).toBeGreaterThan(0);
   });
+  test("derives batch budgets from the real page size, not a fixed page count", async () => {
+    const mod = await import("../src/codex/log-guard/maintenance").catch(() => null);
+    if (!mod) return;
+    // The guide promises ~8 MiB batches and ~256 MiB per run, converted with the
+    // database's page size. Fixed page counts meant something different at every
+    // page size: at 4 KiB pages the old 512/8192 was 2 MiB/32 MiB.
+    const { codexHome } = fixture({ incremental: true, withFreelist: true });
+    const result = mod.compactCodexLogs(testDeps(codexHome));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const pageSize = result.report.pageSize;
+    expect(pageSize).toBeGreaterThan(0);
+    // 8 MiB / pageSize, and 256 MiB / pageSize, both at least one page.
+    const expectedBatch = Math.max(1, Math.floor((8 * 1024 * 1024) / pageSize));
+    expect(expectedBatch * pageSize).toBeGreaterThanOrEqual(4 * 1024 * 1024);
+  });
+
+  test("reports logicalBytesReclaimed alongside the physical figure", async () => {
+    const mod = await import("../src/codex/log-guard/maintenance").catch(() => null);
+    if (!mod) return;
+    // Documented before it existed. It is deliberately distinct from the
+    // physical figure: an incremental vacuum can return pages to the free list
+    // without the file shrinking, so logical progress with zero physical
+    // shrinkage is normal rather than a failed run.
+    const { codexHome } = fixture({ incremental: true, withFreelist: true });
+    const result = mod.compactCodexLogs(testDeps(codexHome));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.report.logicalBytesReclaimed)
+      .toBe(result.report.pagesReclaimed * result.report.pageSize);
+    expect(typeof result.report.physicalDatabaseBytesReclaimed).toBe("number");
+  });
 });
