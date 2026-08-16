@@ -72,6 +72,11 @@ export interface CodexLogGuardReport {
     freelistPages: number;
     reclaimableBytes: number;
     estimatedLogBytes: number | null;
+    writePoster?: {
+      off: { keepRowsShare: number; keepBytesShare: number | null };
+      compat: { keepRowsShare: number; keepBytesShare: number | null };
+      quiet: { keepRowsShare: number; keepBytesShare: number | null };
+    };
   };
 }
 
@@ -136,6 +141,65 @@ function mutationErrorLabel(locale: Locale, code: unknown): string {
     case "config_write_failed": return logGuardLabel(locale, "error.config_write_failed");
     default: return logGuardOperationLabel(locale, "error.generic");
   }
+}
+
+function writePosterShare(
+  mode: { keepRowsShare: number; keepBytesShare: number | null },
+): { share: number; unit: "bytes" | "rows" } {
+  if (mode.keepBytesShare !== null) {
+    return { share: mode.keepBytesShare, unit: "bytes" };
+  }
+  return { share: mode.keepRowsShare, unit: "rows" };
+}
+
+function formatWritePosterPercent(share: number, locale: Locale): string {
+  return (share * 100).toLocaleString(locale, {
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+  }) + "%";
+}
+
+function formatRankedSourceLabel(locale: Locale, target: string): string {
+  const match = /^TARGET_(\d+)$/.exec(target);
+  if (!match) return target;
+  const rank = Number(match[1]);
+  if (!Number.isFinite(rank) || rank <= 0) return target;
+  return logGuardLabel(locale, "rankedSourceRank").replace("{rank}", String(rank));
+}
+
+function WritePosterMeter({
+  locale,
+  modeKey,
+  modeLabel,
+  share,
+  unit,
+}: {
+  locale: Locale;
+  modeKey: "off" | "compat" | "quiet";
+  modeLabel: string;
+  share: number;
+  unit: "bytes" | "rows";
+}) {
+  const clamped = Math.max(0, Math.min(1, share));
+  const percent = formatWritePosterPercent(clamped, locale);
+  return (
+    <div className="log-guard-write-poster-row" data-testid={`log-guard-write-poster-${modeKey}`}>
+      <div className="log-guard-write-poster-meta">
+        <span className="log-guard-write-poster-mode">{modeLabel}</span>
+        <span className="log-guard-write-poster-value stw-kv-mono" data-unit={unit}>{percent}</span>
+      </div>
+      <div
+        className="log-guard-write-poster-track"
+        role="meter"
+        aria-label={`${modeLabel}: ${percent}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(clamped * 100)}
+      >
+        <div className="log-guard-write-poster-fill" style={{ width: `${clamped * 100}%` }} />
+      </div>
+    </div>
+  );
 }
 
 function CodexLogGuardPanel({
@@ -213,23 +277,67 @@ function CodexLogGuardPanel({
         </div>
       </dl>
 
+      {metrics?.writePoster && (
+        <div className="stw-section log-guard-write-poster" data-testid="log-guard-write-poster">
+          <h4 className="stw-section-title" title={logGuardLabel(locale, "writePosterHelp")}>
+            {logGuardLabel(locale, "writePoster")}
+          </h4>
+          <p className="stw-hint">{logGuardLabel(locale, "writePosterHelp")}</p>
+          {([
+            ["off", logGuardLabel(locale, "writePosterOff")] as const,
+            ["compat", logGuardLabel(locale, "compat")] as const,
+            ["quiet", logGuardLabel(locale, "quiet")] as const,
+          ]).map(([modeKey, modeLabel]) => {
+            const poster = writePosterShare(metrics.writePoster![modeKey]);
+            return (
+              <WritePosterMeter
+                key={modeKey}
+                locale={locale}
+                modeKey={modeKey}
+                modeLabel={modeLabel}
+                share={poster.share}
+                unit={poster.unit}
+              />
+            );
+          })}
+          <p className="stw-hint">
+            {metrics.writePoster.off.keepBytesShare !== null
+              ? logGuardLabel(locale, "writePosterUnitBytes")
+              : logGuardLabel(locale, "writePosterUnitRows")}
+          </p>
+        </div>
+      )}
+
       {protection && (
         <div className="stw-section" data-testid="log-guard-protection">
-          <h4 className="stw-section-title">{logGuardLabel(locale, "protection")}</h4>
-          <div className="stw-kv-row">
-            <span className="muted"><code>{logGuardProtectionStateLabel(locale, protection.state)}</code></span>
-            <span className="stw-kv-mono">
-              <code>{logGuardProtectionModeLabel(locale, protection.desiredMode)}</code>
-              {protection.observedMode !== protection.desiredMode ? <><span aria-hidden="true"> · </span><code>{logGuardProtectionModeLabel(locale, protection.observedMode)}</code></> : null}
-            </span>
-          </div>
-          <div className="storage-policy-actions">
+          <h4 className="stw-section-title" title={logGuardLabel(locale, "protectionHelp")}>
+            {logGuardLabel(locale, "protection")}
+          </h4>
+          <p className="stw-hint">{logGuardLabel(locale, "protectionHelp")}</p>
+          <dl className="stw-kv">
+            <div className="stw-kv-row">
+              <dt>{logGuardLabel(locale, "desiredMode")}</dt>
+              <dd className="stw-kv-mono"><code>{logGuardProtectionModeLabel(locale, protection.desiredMode)}</code></dd>
+            </div>
+            <div className="stw-kv-row">
+              <dt>{t("dash.status")}</dt>
+              <dd className="stw-kv-mono"><code>{logGuardProtectionStateLabel(locale, protection.state)}</code></dd>
+            </div>
+            {protection.observedMode !== protection.desiredMode ? (
+              <div className="stw-kv-row">
+                <dt>{logGuardLabel(locale, "observedMode")}</dt>
+                <dd className="stw-kv-mono"><code>{logGuardProtectionModeLabel(locale, protection.observedMode)}</code></dd>
+              </div>
+            ) : null}
+          </dl>
+          <div className="storage-policy-actions log-guard-mode-actions">
             <button
               type="button"
               className="btn btn-ghost btn-sm"
               data-testid="log-guard-protect-compat"
               disabled={mutationDisabled}
               aria-pressed={protection.desiredMode === "compat"}
+              title={logGuardLabel(locale, "compatHelp")}
               onClick={() => onAction({ action: "protect", mode: "compat" })}
             >
               {logGuardLabel(locale, "compat")}
@@ -240,6 +348,7 @@ function CodexLogGuardPanel({
               data-testid="log-guard-protect-quiet"
               disabled={mutationDisabled}
               aria-pressed={protection.desiredMode === "quiet"}
+              title={logGuardLabel(locale, "quietHelp")}
               onClick={() => onAction({ action: "protect", mode: "quiet" })}
             >
               {logGuardLabel(locale, "quiet")}
@@ -249,6 +358,7 @@ function CodexLogGuardPanel({
               className="btn btn-ghost btn-sm"
               data-testid="log-guard-unprotect"
               disabled={mutationDisabled || protection.desiredMode === "off"}
+              title={logGuardLabel(locale, "disableHelp")}
               onClick={() => onAction({ action: "unprotect" })}
             >
               {logGuardLabel(locale, "disable")}
@@ -259,6 +369,7 @@ function CodexLogGuardPanel({
                 className="btn btn-sm"
                 data-testid="log-guard-repair"
                 disabled={mutationDisabled}
+                title={logGuardLabel(locale, "repairHelp")}
                 onClick={() => onAction({ action: "repair" })}
               >
                 {logGuardLabel(locale, "repair")}
@@ -272,6 +383,8 @@ function CodexLogGuardPanel({
 
       {reclaimAvailable && (
         <div className="stw-section" data-testid="log-guard-reclaim">
+          <h4 className="stw-section-title">{logGuardLabel(locale, "compact")}</h4>
+          <p className="stw-hint">{logGuardLabel(locale, "compactHelp")}</p>
           <div className="storage-policy-actions">
             {!confirmCompact ? (
               <button
@@ -279,6 +392,7 @@ function CodexLogGuardPanel({
                 className="btn btn-ghost btn-sm"
                 data-testid="log-guard-compact"
                 disabled={busy}
+                title={logGuardLabel(locale, "compactHelp")}
                 onClick={() => setConfirmCompact(true)}
               >
                 {logGuardLabel(locale, "compact")}
@@ -324,16 +438,20 @@ function CodexLogGuardPanel({
 
       {metrics && metrics.topTargets.length > 0 && (
         <div className="stw-section">
-          <h4 className="stw-section-title"><code>target</code></h4>
+          <h4 className="stw-section-title" title={logGuardLabel(locale, "rankedSourcesHelp")}>
+            {logGuardLabel(locale, "rankedSources")}
+          </h4>
+          <p className="stw-hint">{logGuardLabel(locale, "rankedSourcesHelp")}</p>
           {metrics.topTargets.slice(0, 5).map(target => (
-            <div key={target.target} className="stw-file-row">
-              <span className="stw-file-path" title={target.target}><code>{target.target}</code></span>
+            <div key={target.target} className="stw-file-row" data-testid="log-guard-ranked-source">
+              <span className="stw-file-path" title={logGuardLabel(locale, "rankedSourcesHelp")}>
+                <code>{formatRankedSourceLabel(locale, target.target)}</code>
+              </span>
               <span className="stw-file-size">{target.rows.toLocaleString(locale)}</span>
             </div>
           ))}
         </div>
       )}
-      <p className="stw-hint"><code>immutable=1 · snapshot={report.snapshot}</code></p>
     </div>
   );
 }
@@ -383,6 +501,7 @@ export default function StorageWorkspace({
 }: StorageWorkspaceProps) {
   const t = useT();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [overviewPane, setOverviewPane] = useState<"logGuard" | "largest">("logGuard");
   const [logGuardOverride, setLogGuardOverride] = useState<GenerationScopedLogGuardReport | null>(null);
   const [internalLogGuardBusy, setInternalLogGuardBusy] = useState(false);
   const [logGuardError, setLogGuardError] = useState<GenerationScopedError | null>(null);
@@ -606,39 +725,82 @@ export default function StorageWorkspace({
               </div>
             </div>
 
-            {displayedLogGuard ? (
-              <CodexLogGuardPanel
-                report={displayedLogGuard}
-                locale={locale}
-                t={t}
-                busy={effectiveLogGuardBusy}
-                error={displayedLogGuardError}
-                compaction={displayedCompaction}
-                onAction={runLogGuardAction}
-              />
-            ) : report.codexLogsError === "inspect_failed" ? (
-              <CodexLogGuardUnavailablePanel locale={locale} t={t} />
-            ) : null}
+            <div className="page-tabs stw-overview-tabs" role="tablist" aria-label={t("storage.section.buckets")}>
+              <button
+                type="button"
+                role="tab"
+                id="storage-tab-log-guard"
+                className={`page-tab${overviewPane === "logGuard" ? " page-tab--active" : ""}`}
+                aria-selected={overviewPane === "logGuard"}
+                data-testid="storage-tab-log-guard"
+                onClick={() => setOverviewPane("logGuard")}
+              >
+                {t("storage.bucket.logs_db")}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                id="storage-tab-largest"
+                className={`page-tab${overviewPane === "largest" ? " page-tab--active" : ""}`}
+                aria-selected={overviewPane === "largest"}
+                data-testid="storage-tab-largest"
+                onClick={() => setOverviewPane("largest")}
+              >
+                {t("storage.section.largest")}
+              </button>
+            </div>
 
-            {largestAcross.length > 0 ? (
-              <div className="stw-section">
-                <h3 className="stw-section-title">{t("storage.section.largest")}</h3>
-                {largestAcross.map(entry => {
-                  const owner = bucketByKey.get(entry.bucketKey);
-                  return (
-                    <div key={`${entry.bucketKey}:${entry.path}`} className="stw-file-row">
-                      <span className="stw-file-path" title={entry.path}>{entry.path}</span>
-                      {owner && <span className="stw-file-bucket">{bucketLabel(owner, t)}</span>}
-                      <span className="stw-file-size">{formatBytes(entry.bytes, locale)}</span>
-                    </div>
-                  );
-                })}
+            {overviewPane === "logGuard" ? (
+              <div
+                className="stw-overview-pane"
+                role="tabpanel"
+                aria-labelledby="storage-tab-log-guard"
+                data-testid="storage-pane-log-guard"
+              >
+                {displayedLogGuard ? (
+                  <CodexLogGuardPanel
+                    report={displayedLogGuard}
+                    locale={locale}
+                    t={t}
+                    busy={effectiveLogGuardBusy}
+                    error={displayedLogGuardError}
+                    compaction={displayedCompaction}
+                    onAction={runLogGuardAction}
+                  />
+                ) : report.codexLogsError === "inspect_failed" ? (
+                  <CodexLogGuardUnavailablePanel locale={locale} t={t} />
+                ) : (
+                  <p className="stw-hint">{logGuardLabel(locale, "inspectionUnavailable")}</p>
+                )}
               </div>
             ) : (
-              <p className="stw-hint">
-                <IconHardDrive style={{ width: 14, height: 14, verticalAlign: "text-bottom", marginRight: 6 }} aria-hidden="true" />
-                {t("storage.workspace.selectBucket")}
-              </p>
+              <div
+                className="stw-overview-pane"
+                role="tabpanel"
+                aria-labelledby="storage-tab-largest"
+                data-testid="storage-pane-largest"
+              >
+                {largestAcross.length > 0 ? (
+                  <div className="stw-section">
+                    <h3 className="stw-section-title">{t("storage.section.largest")}</h3>
+                    {largestAcross.map(entry => {
+                      const owner = bucketByKey.get(entry.bucketKey);
+                      return (
+                        <div key={`${entry.bucketKey}:${entry.path}`} className="stw-file-row">
+                          <span className="stw-file-path" title={entry.path}>{entry.path}</span>
+                          {owner && <span className="stw-file-bucket">{bucketLabel(owner, t)}</span>}
+                          <span className="stw-file-size">{formatBytes(entry.bytes, locale)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="stw-hint">
+                    <IconHardDrive style={{ width: 14, height: 14, verticalAlign: "text-bottom", marginRight: 6 }} aria-hidden="true" />
+                    {t("storage.workspace.selectBucket")}
+                  </p>
+                )}
+              </div>
             )}
           </div>
         )}

@@ -113,6 +113,13 @@ describe("Codex Log Guard inspection", () => {
     expect(report.metrics?.traceShare).toBe(0.5);
     expect(report.metrics?.topTargets[0]).toEqual({ target: "TARGET_1", rows: 2 });
     expect(report.metrics?.reclaimableBytes).toBeGreaterThanOrEqual(0);
+    // Fixture: 2 TRACE codex_api::sse rows (300 bytes) + INFO/WARN (125 bytes).
+    // Compatibility and Quiet both drop those TRACE rows on this mix.
+    expect(report.metrics?.writePoster).toEqual({
+      off: { keepRowsShare: 1, keepBytesShare: 1 },
+      compat: { keepRowsShare: 0.5, keepBytesShare: 125 / 425 },
+      quiet: { keepRowsShare: 0.5, keepBytesShare: 125 / 425 },
+    });
   });
 
   test("never exposes feedback bodies, arbitrary levels, target names, or paths", () => {

@@ -8,6 +8,7 @@ import {
   resolveCodexSqliteHome,
   type CodexSqliteHomeDeps,
 } from "../paths";
+import { codexLogGuardCompatDropWhereSql } from "./protection";
 
 const IMMUTABLE_READONLY_FLAGS = constants.SQLITE_OPEN_READONLY | constants.SQLITE_OPEN_URI;
 const KNOWN_LOG_LEVELS = new Set(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]);
@@ -79,6 +80,20 @@ export type CodexLogGuardCapability =
   | { state: "supported" }
   | { state: "unsupported"; reason: CodexLogGuardCapabilityReason };
 
+export interface CodexLogGuardModeWriteShare {
+  /** Share of historical rows that would still be written under this mode. */
+  keepRowsShare: number;
+  /** Share of historical estimated log bytes that would still be written, when available. */
+  keepBytesShare: number | null;
+}
+
+export interface CodexLogGuardWritePoster {
+  /** Counterfactual keep-shares for future-write guidance from the current snapshot mix. */
+  off: CodexLogGuardModeWriteShare;
+  compat: CodexLogGuardModeWriteShare;
+  quiet: CodexLogGuardModeWriteShare;
+}
+
 export interface CodexLogGuardMetrics {
   totalRows: number;
   rowsByLevel: Record<string, number>;
@@ -90,6 +105,7 @@ export interface CodexLogGuardMetrics {
   freelistPages: number;
   reclaimableBytes: number;
   estimatedLogBytes: number | null;
+  writePoster: CodexLogGuardWritePoster;
 }
 
 /**
@@ -347,6 +363,41 @@ function readMetrics(db: Database, columns: string[]): CodexLogGuardMetrics | nu
       ).get()?.bytes ?? 0)
       : null;
 
+    const compatWhere = codexLogGuardCompatDropWhereSql("target", "upper(level)");
+    const quietWhere = "upper(level) = 'TRACE'";
+    const droppedCompatRows = totalRows > 0
+      ? Number(db.query<CountRow, []>("SELECT count(*) AS n FROM logs WHERE " + compatWhere).get()?.n ?? 0)
+      : 0;
+    const droppedQuietRows = totalRows > 0
+      ? Number(db.query<CountRow, []>("SELECT count(*) AS n FROM logs WHERE " + quietWhere).get()?.n ?? 0)
+      : 0;
+    let droppedCompatBytes: number | null = null;
+    let droppedQuietBytes: number | null = null;
+    if (estimatedLogBytes !== null && estimatedLogBytes > 0) {
+      droppedCompatBytes = Number(db.query<EstimatedBytesRow, []>(
+        "SELECT COALESCE(sum(estimated_bytes), 0) AS bytes FROM logs WHERE " + compatWhere,
+      ).get()?.bytes ?? 0);
+      droppedQuietBytes = Number(db.query<EstimatedBytesRow, []>(
+        "SELECT COALESCE(sum(estimated_bytes), 0) AS bytes FROM logs WHERE " + quietWhere,
+      ).get()?.bytes ?? 0);
+    }
+    const share = (keep: number, total: number) => (total > 0 ? Math.min(1, Math.max(0, keep / total)) : 1);
+    const writePoster = {
+      off: { keepRowsShare: 1, keepBytesShare: estimatedLogBytes === null ? null : 1 },
+      compat: {
+        keepRowsShare: share(totalRows - droppedCompatRows, totalRows),
+        keepBytesShare: estimatedLogBytes === null || droppedCompatBytes === null
+          ? null
+          : share(estimatedLogBytes - droppedCompatBytes, estimatedLogBytes),
+      },
+      quiet: {
+        keepRowsShare: share(totalRows - droppedQuietRows, totalRows),
+        keepBytesShare: estimatedLogBytes === null || droppedQuietBytes === null
+          ? null
+          : share(estimatedLogBytes - droppedQuietBytes, estimatedLogBytes),
+      },
+    };
+
     return {
       totalRows,
       rowsByLevel,
@@ -358,6 +409,7 @@ function readMetrics(db: Database, columns: string[]): CodexLogGuardMetrics | nu
       freelistPages,
       reclaimableBytes: pageSize * freelistPages,
       estimatedLogBytes,
+      writePoster,
     };
   } catch {
     // A future schema may still have a `logs` table but change aggregate-compatible

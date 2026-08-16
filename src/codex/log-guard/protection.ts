@@ -79,6 +79,36 @@ function anyTargetOrDescendant(targets: readonly string[]): string {
   return `(${targets.map(targetOrDescendant).join(" OR ")})`;
 }
 
+
+/**
+ * SQL boolean predicate (no leading WHERE) matching the Compatibility trigger.
+ * Used by Inspect for privacy-safe historical impact meters without leaking target names.
+ */
+export function codexLogGuardCompatDropWhereSql(
+  targetExpr = "target",
+  levelExpr = "upper(level)",
+): string {
+  const desc = (base) =>
+    "(" + targetExpr + " = '" + base + "' OR substr(" + targetExpr + ", 1, " + (base.length + 2) + ") = '" + base + "::')";
+  const anyDesc = (bases) => "(" + bases.map(desc).join(" OR ") + ")";
+  return [
+    targetExpr + " = 'log'",
+    targetExpr + " = 'codex_otel.log_only'",
+    targetExpr + " = 'codex_otel.trace_safe'",
+    targetExpr + " = 'codex_api::responses_websocket_timing'",
+    targetExpr + " = 'codex_core::post_sampling_token_estimate'",
+    "(" + desc("hyper_util") + " AND " + levelExpr + " IN ('TRACE', 'DEBUG', 'INFO'))",
+    "(" + anyDesc(["codex_rmcp_client", "rmcp"]) + " AND " + levelExpr + " IN ('TRACE', 'DEBUG'))",
+    "(" + anyDesc([
+      "codex_http_client::transport",
+      "codex_api::sse",
+      "codex_tui::streaming::controller",
+      "codex_tui::streaming::table_holdback",
+    ]) + " AND " + levelExpr + " = 'TRACE')",
+    "(" + targetExpr + " = 'opentelemetry_sdk' AND " + levelExpr + " IN ('TRACE', 'DEBUG'))",
+  ].join("\n  OR ");
+}
+
 const COMPAT_TRIGGER_SQL = `CREATE TRIGGER ${COMPAT_TRIGGER}
 BEFORE INSERT ON logs
 WHEN

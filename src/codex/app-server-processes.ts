@@ -384,7 +384,7 @@ export function listWindowsSnapshots(): ProcessSnapshot[] {
     "-NoProfile", "-NoLogo", "-NonInteractive",
     "-Command",
     psCommand,
-  ], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 8_000, windowsHide: true });
+  ], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 30_000, windowsHide: true });
   for (const line of output.split(/\r?\n/)) {
     // A candidate whose owner could not be verified makes the whole
     // enumeration incomplete — the staleness collector must not read the

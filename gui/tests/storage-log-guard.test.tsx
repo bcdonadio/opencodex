@@ -33,6 +33,11 @@ function report(): StorageReport {
         freelistPages: 1,
         reclaimableBytes: 4096,
         estimatedLogBytes: 350,
+        writePoster: {
+          off: { keepRowsShare: 1, keepBytesShare: 1 },
+          compat: { keepRowsShare: 0.82, keepBytesShare: 0.05 },
+          quiet: { keepRowsShare: 0.56, keepBytesShare: 0.04 },
+        },
       },
     },
   };
@@ -61,13 +66,29 @@ test("Storage overview renders read-only Codex diagnostic log health", () => {
   expect(html).toContain("WAL");
   expect(html).toContain("SHM");
   expect(html).toContain("0 B");
-  expect(html).toContain("TARGET_1");
+  expect(html).not.toContain("TARGET_1");
+  expect(html).toContain("Noisiest sources");
+  expect(html).toContain("Rank 1");
+  expect(html).toContain("Real source names stay private");
   expect(html).not.toContain("codex_api::sse");
+  expect(html).toContain('data-testid="storage-tab-log-guard"');
+  expect(html).toContain('data-testid="storage-tab-largest"');
+  expect(html).toContain('data-testid="storage-pane-log-guard"');
+  expect(html).not.toContain('data-testid="storage-pane-largest"');
+  expect(html).toContain('data-testid="log-guard-write-poster"');
+  expect(html).toContain("Future write load");
+  expect(html).toContain("Off (stock Codex)");
+  expect(html).toContain("100%");
+  expect(html).toContain("5%");
+  expect(html).toContain("4%");
+  expect(html).toContain('style="width:100%"');
+  expect(html).toContain('style="width:5%"');
+  expect(html).toContain('style="width:4%"');
+  expect(html).toContain("Bars show estimated payload size");
   expect(html).toContain("External SQLite storage");
-  expect(html).toContain("snapshot=checkpointed");
   expect(html).not.toContain("/state/codex");
-  expect(html).not.toContain("Protect");
-  expect(html).not.toContain("Compact");
+  expect(html).not.toContain('data-testid="log-guard-protect-compat"');
+  expect(html).not.toContain('data-testid="log-guard-compact"');
   expect(html).not.toContain("High write activity");
 });
 
