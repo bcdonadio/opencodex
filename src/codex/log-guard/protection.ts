@@ -303,9 +303,14 @@ function mutateOwnedTrigger(
     db.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
     transactionOpen = true;
     if (!exactCurrentSchema(db)) {
-      db.exec("ROLLBACK");
-      transactionOpen = false;
-      return { ok: false, error: "unsupported_schema" };
+      // Same reasoning as the caller's gate: installing into an unrecognized
+      // schema is refused, but removing a trigger we installed ourselves stays
+      // available so a schema upgrade cannot strand it.
+      if (mode !== "off") {
+        db.exec("ROLLBACK");
+        transactionOpen = false;
+        return { ok: false, error: "unsupported_schema" };
+      }
     }
 
     const rows = queryReservedTriggers(db);
@@ -396,7 +401,14 @@ function performMutation(
   const codexHome = deps.codexHome ?? getCodexHome();
   const inspection = inspectCodexLogs({ codexHome });
   const databasePath = resolveCodexLogsDbPath({ codexHome });
-  if (inspection.capabilities.protection.state !== "supported") {
+  // Removal must not be gated on the schema still being recognized. A Codex
+  // upgrade that changes the logs schema would otherwise strand an installed
+  // trigger: Protect is refused (correctly), but so is Disable, leaving the
+  // user with an active OpenCodex trigger and no in-product way to remove it.
+  // Installing into an unknown schema stays refused; taking our own trigger
+  // back out is always allowed.
+  const removingProtection = typeof requestedMode !== "function" && requestedMode === "off";
+  if (!removingProtection && inspection.capabilities.protection.state !== "supported") {
     return { ok: false, error: "unsupported_schema" };
   }
   if (!databasePathIsSafe(databasePath)) return { ok: false, error: "unsafe_path" };

@@ -69,8 +69,25 @@ function resolveLogGuardLockDatabase(
   }
   if (process.platform !== "win32") {
     const uid = process.getuid?.();
-    if (uid === undefined || dirStat.uid !== uid || (dirStat.mode & 0o777) !== 0o700) {
+    // `mkdirSync` applies `mode` only when it CREATES the directory, so a
+    // directory left by an earlier build (or a permissive umask on a older
+    // version) keeps its old permissions forever and every Log Guard mutation
+    // fails `unsafe_path` with no in-product way out. Tighten it ourselves when
+    // we own it, and only refuse if that cannot be achieved.
+    if (uid === undefined || dirStat.uid !== uid) {
       throw new CodexUserIdentityRefusal("Codex Log Guard lock directory is not private to the effective user.");
+    }
+    if ((dirStat.mode & 0o777) !== 0o700) {
+      try {
+        chmodSync(locksDir, 0o700);
+      } catch {
+        throw new CodexUserIdentityRefusal("Codex Log Guard lock directory is not private to the effective user.");
+      }
+      // Re-read rather than trusting the chmod: a filesystem that ignores mode
+      // bits must still fail closed.
+      if ((lstatSync(locksDir).mode & 0o777) !== 0o700) {
+        throw new CodexUserIdentityRefusal("Codex Log Guard lock directory is not private to the effective user.");
+      }
     }
   }
 

@@ -307,4 +307,24 @@ describe("Codex Log Guard protection", () => {
     expect(protectCodexLogs("compat", deps)).toEqual({ ok: false, error: "config_write_failed" });
     expect(triggers(databasePath)).toEqual([]);
   });
+  test("Disable still works after the Codex schema moves out from under us", async () => {
+    // Protect is correctly refused on an unrecognized schema, but gating Disable
+    // the same way stranded an installed trigger: the user kept an active
+    // OpenCodex trigger with no in-product way to remove it.
+    const { codexHome, databasePath } = fixture();
+    const deps = testDeps(codexHome);
+    expect(protectCodexLogs("compat", deps).ok).toBe(true);
+    expect(triggers(databasePath).map(row => row.name)).toEqual(["opencodex_log_guard_compat_v1"]);
+
+    // Simulate a Codex upgrade adding a column, so the exact-schema check fails.
+    const db = new Database(databasePath);
+    db.exec("ALTER TABLE logs ADD COLUMN future_field TEXT");
+    db.close();
+
+    // Installing into the unknown schema stays refused...
+    expect(protectCodexLogs("quiet", deps)).toEqual({ ok: false, error: "unsupported_schema" });
+    // ...but taking our own trigger back out is always available.
+    expect(unprotectCodexLogs(deps).ok).toBe(true);
+    expect(triggers(databasePath)).toEqual([]);
+  });
 });
