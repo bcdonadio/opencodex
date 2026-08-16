@@ -90,8 +90,15 @@ describe("collectCodexAppServerCatalogState (#857)", () => {
       join(import.meta.dir, "../src/codex/app-server-processes.ts"),
       "utf8",
     );
-    expect(source).toMatch(/timeout:\s*30_000/);
     expect(source).toContain("export function listWindowsSnapshots");
+    const start = source.indexOf("export function listWindowsSnapshots");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const nextExport = source.indexOf("\nexport function", start + 1);
+    const windowsSource = source.slice(
+      start,
+      nextExport === -1 ? source.length : nextExport,
+    );
+    expect(windowsSource).toMatch(/execFileSync\([\s\S]*timeout:\s*30_000/);
   });
 
   test("enumeration failure reports unknown, never not_running", () => {
