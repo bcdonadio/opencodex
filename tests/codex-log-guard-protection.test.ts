@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  codexLogGuardCompatDropWhereSql,
   getCodexLogGuardProtectionStatus,
   protectCodexLogs,
   repairCodexLogGuardProtection,
@@ -327,6 +328,20 @@ describe("Codex Log Guard protection", () => {
     expect(unprotectCodexLogs(deps).ok).toBe(true);
     expect(triggers(databasePath)).toEqual([]);
   });
+  test("compat trigger WHEN clause is generated from the inspect drop helper", () => {
+    // Write-poster impact meters use codexLogGuardCompatDropWhereSql(); the
+    // installed trigger must use that same predicate so reported shares match
+    // the rows Compatibility actually drops.
+    const { codexHome, databasePath } = fixture();
+    const deps = testDeps(codexHome);
+    expect(protectCodexLogs("compat", deps).ok).toBe(true);
+    const sql = triggers(databasePath).find((row) => row.name === "opencodex_log_guard_compat_v1")?.sql ?? "";
+    const expected = codexLogGuardCompatDropWhereSql("NEW.target", "upper(NEW.level)");
+    // SQLite may reformat whitespace when storing CREATE TRIGGER SQL.
+    const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+    expect(normalize(sql)).toContain(normalize(expected));
+  });
+
   test("a schema change between inspection and the locked write is refused", () => {
     // TOCTOU: the lock serializes OpenCodex against itself, not against Codex or
     // another SQLite writer. The locked recheck used to compare column NAMES

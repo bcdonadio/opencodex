@@ -122,6 +122,26 @@ describe("Codex Log Guard inspection", () => {
     });
   });
 
+  test("write poster byte shares stay null when estimated bytes total zero", () => {
+    const root = makeRoot();
+    const codexHome = join(root, "codex-home");
+    const databasePath = join(codexHome, "logs_2.sqlite");
+    mkdirSync(codexHome);
+    writeFileSync(join(codexHome, "config.toml"), "");
+    createCurrentLogsDb(databasePath);
+
+    const db = new Database(databasePath);
+    db.exec("UPDATE logs SET estimated_bytes = 0");
+    db.close();
+
+    const report = inspectCodexLogs({ codexHome });
+    expect(report.metrics?.writePoster).toEqual({
+      off: { keepRowsShare: 1, keepBytesShare: null },
+      compat: { keepRowsShare: 0.5, keepBytesShare: null },
+      quiet: { keepRowsShare: 0.5, keepBytesShare: null },
+    });
+  });
+
   test("never exposes feedback bodies, arbitrary levels, target names, or paths", () => {
     const root = makeRoot();
     const codexHome = join(root, "codex-home");

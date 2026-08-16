@@ -112,20 +112,7 @@ export function codexLogGuardCompatDropWhereSql(
 const COMPAT_TRIGGER_SQL = `CREATE TRIGGER ${COMPAT_TRIGGER}
 BEFORE INSERT ON logs
 WHEN
-  NEW.target = 'log'
-  OR NEW.target = 'codex_otel.log_only'
-  OR NEW.target = 'codex_otel.trace_safe'
-  OR NEW.target = 'codex_api::responses_websocket_timing'
-  OR NEW.target = 'codex_core::post_sampling_token_estimate'
-  OR (${targetOrDescendant("hyper_util")} AND upper(NEW.level) IN ('TRACE', 'DEBUG', 'INFO'))
-  OR (${anyTargetOrDescendant(["codex_rmcp_client", "rmcp"])} AND upper(NEW.level) IN ('TRACE', 'DEBUG'))
-  OR (${anyTargetOrDescendant([
-    "codex_http_client::transport",
-    "codex_api::sse",
-    "codex_tui::streaming::controller",
-    "codex_tui::streaming::table_holdback",
-  ])} AND upper(NEW.level) = 'TRACE')
-  OR (NEW.target = 'opentelemetry_sdk' AND upper(NEW.level) IN ('TRACE', 'DEBUG'))
+  ${codexLogGuardCompatDropWhereSql("NEW.target", "upper(NEW.level)")}
 BEGIN
   SELECT RAISE(IGNORE);
 END`;

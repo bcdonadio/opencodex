@@ -383,7 +383,12 @@ function readMetrics(db: Database, columns: string[]): CodexLogGuardMetrics | nu
     }
     const share = (keep: number, total: number) => (total > 0 ? Math.min(1, Math.max(0, keep / total)) : 1);
     const writePoster = {
-      off: { keepRowsShare: 1, keepBytesShare: estimatedLogBytes === null ? null : 1 },
+      off: {
+        keepRowsShare: 1,
+        // Keep unit selection consistent with compat/quiet: when estimated bytes
+        // exist but total 0, byte shares stay null so the GUI uses row shares.
+        keepBytesShare: estimatedLogBytes !== null && estimatedLogBytes > 0 ? 1 : null,
+      },
       compat: {
         keepRowsShare: share(totalRows - droppedCompatRows, totalRows),
         keepBytesShare: estimatedLogBytes === null || droppedCompatBytes === null

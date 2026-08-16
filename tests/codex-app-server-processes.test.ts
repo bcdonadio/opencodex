@@ -83,6 +83,17 @@ describe("collectCodexAppServerCatalogState (#857)", () => {
     expect(status.state).toBe("not_running");
   });
 
+  test("Windows snapshot enumeration uses a 30s PowerShell timeout", () => {
+    // Log Guard apply waits for Codex process exit; a short PowerShell timeout
+    // previously made "Codex is still running" look like "enumeration failed".
+    const source = readFileSync(
+      join(import.meta.dir, "../src/codex/app-server-processes.ts"),
+      "utf8",
+    );
+    expect(source).toMatch(/timeout:\s*30_000/);
+    expect(source).toContain("export function listWindowsSnapshots");
+  });
+
   test("enumeration failure reports unknown, never not_running", () => {
     // On macOS the win32 enumeration path has no powershell.exe → it throws,
     // which must surface as unknown rather than "nothing is running".

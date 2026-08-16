@@ -142,8 +142,8 @@ test("Storage write poster prefers payload bytes and never shows raw targets", (
   expect(html).toContain("Future write load");
   expect(html).toContain("12%");
   expect(html).toContain("8%");
-  expect(html).toContain('value="12"');
-  expect(html).toContain('value="8"');
+  expect(html).toMatch(/data-testid="log-guard-write-poster-compat"[\s\S]*?value="12"/);
+  expect(html).toMatch(/data-testid="log-guard-write-poster-quiet"[\s\S]*?value="8"/);
   expect(html).toContain("Rank 1");
   // Ranked sources stay redacted; help copy may mention class names abstractly.
   expect(html).toContain("<code>Rank 1</code>");
