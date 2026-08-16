@@ -150,6 +150,56 @@ function fileSize(path: string): number {
   }
 }
 
+/**
+ * Memoized inspection, keyed by the database and WAL identity.
+ *
+ * `readMetrics` runs four unbounded aggregates (`count(*)`, two `GROUP BY`s and
+ * a `sum`) over the whole `logs` table. `bun:sqlite` is synchronous, so that
+ * work occupies the proxy thread for its full duration — measured at ~49s on a
+ * 15.6 GB / 302k-row database, exactly the large fragmented case this feature
+ * exists to diagnose. Both `/api/storage` and `/api/storage/codex-logs` call it
+ * inline, so merely opening or refreshing the Storage page could stall routing
+ * and health responses.
+ *
+ * A dashboard refresh, a page that renders both panels, and a poll loop all
+ * repeat an identical scan. Keying on size+mtime of the database and WAL means a
+ * repeat inspection is free until Codex actually writes, which removes the
+ * repeated stalls without ever serving stale numbers: any write changes the WAL
+ * and invalidates the entry.
+ *
+ * This bounds the repeat cost, not the first one. A cold inspection of a huge
+ * database still blocks; moving that work off-thread needs a Worker and is
+ * tracked separately.
+ */
+type InspectionCacheEntry = {
+  key: string;
+  value: CodexLogGuardInspection;
+};
+
+let inspectionCache: InspectionCacheEntry | null = null;
+
+function inspectionCacheKey(databasePath: string): string {
+  const stamp = (path: string): string => {
+    try {
+      const stat = statSync(path);
+      return `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return "-";
+    }
+  };
+  return [
+    databasePath,
+    stamp(databasePath),
+    stamp(`${databasePath}-wal`),
+    stamp(`${databasePath}-shm`),
+  ].join("|");
+}
+
+/** Drop the memoized inspection. Exported for tests and for post-mutation refresh. */
+export function resetCodexLogGuardInspectionCache(): void {
+  inspectionCache = null;
+}
+
 function capabilityFor(schema: CodexLogGuardSchemaState): CodexLogGuardCapability {
   if (schema.state === "compatible") return { state: "supported" };
   return { state: "unsupported", reason: schema.reason };
@@ -294,6 +344,22 @@ function readMetrics(db: Database, columns: string[]): CodexLogGuardMetrics | nu
  * This is a zero-write health view, not an SSD/NAND write-rate measurement.
  */
 export function inspectCodexLogs(deps: CodexSqliteHomeDeps = {}): CodexLogGuardInspection {
+  let cacheKey: string | null = null;
+  try {
+    const home = deps.codexHome ?? getCodexHome();
+    cacheKey = inspectionCacheKey(join(resolveCodexSqliteHome({ ...deps, codexHome: home }), "logs_2.sqlite"));
+    if (inspectionCache?.key === cacheKey) return inspectionCache.value;
+  } catch {
+    cacheKey = null;
+  }
+  const value = inspectCodexLogsUncached(deps);
+  // `generatedAt` is part of the memoized value, so a cached response reports the
+  // time the numbers were actually measured rather than the time they were served.
+  if (cacheKey !== null) inspectionCache = { key: cacheKey, value };
+  return value;
+}
+
+function inspectCodexLogsUncached(deps: CodexSqliteHomeDeps = {}): CodexLogGuardInspection {
   let codexHome: string;
   let sqliteHome: string;
   try {

@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { inspectCodexLogs } from "../src/codex/log-guard/inspect";
+import { inspectCodexLogs, resetCodexLogGuardInspectionCache } from "../src/codex/log-guard/inspect";
 
 const roots: string[] = [];
 
@@ -407,5 +407,42 @@ describe("Codex Log Guard inspection", () => {
     expect(report.capabilities.inspection).toEqual({ state: "supported" });
     expect(report.capabilities.protection).toEqual({ state: "unsupported", reason: "database_unreadable" });
     expect(report.capabilities.reclaim).toEqual({ state: "unsupported", reason: "database_unreadable" });
+  });
+  test("repeat inspection is memoized and invalidated by a write", () => {
+    // readMetrics runs four unbounded aggregates over the whole logs table, and
+    // bun:sqlite is synchronous, so every repeat scan occupies the proxy thread.
+    // A dashboard refresh, a page rendering both panels, and a poll loop all
+    // repeat an identical scan; memoizing on database+WAL identity removes that.
+    const root = makeRoot();
+    const databasePath = join(root, "logs_2.sqlite");
+    createCurrentLogsDb(databasePath);
+
+    resetCodexLogGuardInspectionCache();
+    const first = inspectCodexLogs({ codexHome: root });
+    const second = inspectCodexLogs({ codexHome: root });
+    // Same object identity proves the aggregates did not run a second time.
+    expect(second).toBe(first);
+
+    // A write must invalidate: a cached answer is never staler than
+    // "nothing has been written since".
+    const db = new Database(databasePath);
+    db.run("INSERT INTO logs (ts, ts_nanos, level, target, estimated_bytes) VALUES (1, 1, 'INFO', 'later', 64)");
+    db.close();
+
+    const third = inspectCodexLogs({ codexHome: root });
+    expect(third).not.toBe(first);
+    expect(third.metrics?.totalRows).toBe((first.metrics?.totalRows ?? 0) + 1);
+  });
+
+  test("resetCodexLogGuardInspectionCache forces a fresh scan", () => {
+    const root = makeRoot();
+    createCurrentLogsDb(join(root, "logs_2.sqlite"));
+
+    resetCodexLogGuardInspectionCache();
+    const first = inspectCodexLogs({ codexHome: root });
+    expect(inspectCodexLogs({ codexHome: root })).toBe(first);
+
+    resetCodexLogGuardInspectionCache();
+    expect(inspectCodexLogs({ codexHome: root })).not.toBe(first);
   });
 });
