@@ -88,9 +88,9 @@ export function codexLogGuardCompatDropWhereSql(
   targetExpr = "target",
   levelExpr = "upper(level)",
 ): string {
-  const desc = (base) =>
+  const desc = (base: string) =>
     "(" + targetExpr + " = '" + base + "' OR substr(" + targetExpr + ", 1, " + (base.length + 2) + ") = '" + base + "::')";
-  const anyDesc = (bases) => "(" + bases.map(desc).join(" OR ") + ")";
+  const anyDesc = (bases: readonly string[]) => "(" + bases.map(desc).join(" OR ") + ")";
   return [
     targetExpr + " = 'log'",
     targetExpr + " = 'codex_otel.log_only'",

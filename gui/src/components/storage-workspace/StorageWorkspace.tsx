@@ -188,16 +188,13 @@ function WritePosterMeter({
         <span className="log-guard-write-poster-mode">{modeLabel}</span>
         <span className="log-guard-write-poster-value stw-kv-mono" data-unit={unit}>{percent}</span>
       </div>
-      <div
+      <meter
         className="log-guard-write-poster-track"
-        role="meter"
+        min={0}
+        max={100}
+        value={Math.round(clamped * 100)}
         aria-label={`${modeLabel}: ${percent}`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(clamped * 100)}
-      >
-        <div className="log-guard-write-poster-fill" style={{ width: `${clamped * 100}%` }} />
-      </div>
+      />
     </div>
   );
 }

@@ -775,17 +775,37 @@
 }
 
 .log-guard-write-poster-track {
+  display: block;
+  width: 100%;
   height: 0.55rem;
+  border: 0;
   border-radius: 999px;
   background: color-mix(in srgb, var(--border, #2a3340) 70%, transparent);
   overflow: hidden;
+  appearance: none;
 }
 
-.log-guard-write-poster-fill {
+.log-guard-write-poster-track::-webkit-meter-inner-element {
+  display: block;
+}
+
+.log-guard-write-poster-track::-webkit-meter-bar {
+  background: color-mix(in srgb, var(--border, #2a3340) 70%, transparent);
+  border: 0;
+  border-radius: 999px;
   height: 100%;
-  border-radius: inherit;
+}
+
+.log-guard-write-poster-track::-webkit-meter-optimum-value,
+.log-guard-write-poster-track::-webkit-meter-suboptimum-value,
+.log-guard-write-poster-track::-webkit-meter-even-less-good-value {
   background: var(--accent, #3b82f6);
-  min-width: 0;
+  border-radius: 999px;
+}
+
+.log-guard-write-poster-track::-moz-meter-bar {
+  background: var(--accent, #3b82f6);
+  border-radius: 999px;
 }
 
 

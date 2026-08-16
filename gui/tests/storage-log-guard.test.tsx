@@ -81,9 +81,9 @@ test("Storage overview renders read-only Codex diagnostic log health", () => {
   expect(html).toContain("100%");
   expect(html).toContain("5%");
   expect(html).toContain("4%");
-  expect(html).toContain('style="width:100%"');
-  expect(html).toContain('style="width:5%"');
-  expect(html).toContain('style="width:4%"');
+  expect(html).toContain('value="100"');
+  expect(html).toContain('value="5"');
+  expect(html).toContain('value="4"');
   expect(html).toContain("Bars show estimated payload size");
   expect(html).toContain("External SQLite storage");
   expect(html).not.toContain("/state/codex");
