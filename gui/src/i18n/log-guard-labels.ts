@@ -160,7 +160,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   "zh-TW": {
     compact: '壓縮',
     compactComplete: "压缩完成（逻辑 / 磁盘回收）",
-    pagesUnit: "页",
+    pagesUnit: "頁",
     compactPartial: "压缩部分完成（逻辑 / 磁盘回收）",
     confirmCompact: '確認壓縮',
     cancel: '取消',

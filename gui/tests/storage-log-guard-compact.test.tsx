@@ -277,3 +277,37 @@ test("the compaction report survives a refresh that retires the reclaim section"
   expect(result).not.toBeNull();
   expect(result?.textContent).toContain("512");
 });
+
+test("a failed retry clears the previous success receipt", async () => {
+  // A stale receipt rendered alongside the current error made the section
+  // misreport the latest attempt.
+  let call = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/api/storage/codex-logs/compact")) {
+      call += 1;
+      return call === 1
+        ? Response.json({ report: { pagesReclaimed: 7, logicalBytesReclaimed: 28672, physicalDatabaseBytesReclaimed: 0, complete: false, stopReason: "page_budget" } })
+        : Response.json({ error: "busy" }, { status: 409 });
+    }
+    return new Response("refresh unavailable", { status: 503 });
+  }) as typeof fetch;
+
+  const container = await mount(report());
+  const runCompact = async () => {
+    const compact = container.querySelector<HTMLElement>('[data-testid="log-guard-compact"]');
+    if (!compact) throw new Error("compact button missing");
+    await click(compact);
+    const confirm = container.querySelector<HTMLElement>('[data-testid="log-guard-compact-confirm"]');
+    if (!confirm) throw new Error("confirm button missing");
+    await click(confirm);
+    await settle();
+  };
+
+  await runCompact();
+  expect(container.querySelector('[data-testid="log-guard-compact-result"]')).not.toBeNull();
+
+  await runCompact();
+  expect(container.querySelector('[role="alert"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="log-guard-compact-result"]')).toBeNull();
+});

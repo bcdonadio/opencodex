@@ -427,6 +427,10 @@ export default function StorageWorkspace({
     void (async () => {
       setInternalLogGuardBusy(true);
       setLogGuardError(null);
+      // A new attempt invalidates the previous receipt. Leaving it up meant a
+      // failed retry could render a stale success alongside the current error,
+      // so the section misreported the latest attempt.
+      if (action.action === "compact") setLogGuardCompaction(null);
       try {
         const suffix = action.action === "protect" ? "protect" : action.action;
         const init: RequestInit = {
