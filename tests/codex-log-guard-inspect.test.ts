@@ -4,8 +4,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
+  utimesSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -444,5 +446,29 @@ describe("Codex Log Guard inspection", () => {
 
     resetCodexLogGuardInspectionCache();
     expect(inspectCodexLogs({ codexHome: root })).not.toBe(first);
+  });
+  test("an atomic replacement at identical size and mtime still invalidates", () => {
+    // size:mtimeMs is not an identity. Writing a new file and renaming it over
+    // the old one can preserve both, and the cache then served the previous
+    // schema verdict indefinitely - a persistent wrong answer, which is worse
+    // than the repeated scan the cache exists to avoid.
+    const root = makeRoot();
+    const databasePath = join(root, "logs_2.sqlite");
+    createCurrentLogsDb(databasePath);
+
+    resetCodexLogGuardInspectionCache();
+    const before = inspectCodexLogs({ codexHome: root });
+    expect(before.schema.state).toBe("compatible");
+
+    const original = statSync(databasePath);
+    const replacement = join(root, "replacement.tmp");
+    // A file of the same byte length that is NOT a usable database.
+    writeFileSync(replacement, Buffer.alloc(original.size, 0x41));
+    renameSync(replacement, databasePath);
+    utimesSync(databasePath, original.atime, original.mtime);
+
+    const after = inspectCodexLogs({ codexHome: root });
+    expect(after).not.toBe(before);
+    expect(after.schema.state).not.toBe("compatible");
   });
 });

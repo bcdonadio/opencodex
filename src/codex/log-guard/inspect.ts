@@ -181,8 +181,21 @@ let inspectionCache: InspectionCacheEntry | null = null;
 function inspectionCacheKey(databasePath: string): string {
   const stamp = (path: string): string => {
     try {
-      const stat = statSync(path);
-      return `${stat.size}:${stat.mtimeMs}`;
+      // `size:mtimeMs` alone is not an identity. An atomic replace (write a new
+      // file, rename over the old one) can preserve both, and the cache then
+      // served the previous schema/capability verdict indefinitely — trading a
+      // repeated-scan cost for a persistent wrong answer. Include the inode and
+      // device so a replaced file is a different key even at identical size and
+      // mtime, plus nanosecond ctime/mtime so an in-place rewrite inside one
+      // millisecond still invalidates.
+      const stat = statSync(path, { bigint: true });
+      return [
+        stat.dev,
+        stat.ino,
+        stat.size,
+        stat.mtimeNs,
+        stat.ctimeNs,
+      ].join(":");
     } catch {
       return "-";
     }
