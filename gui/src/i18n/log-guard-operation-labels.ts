@@ -8,7 +8,9 @@ export type LogGuardOperationLabelKey =
   | "error.busy"
   | "error.unsupported_schema"
   | "error.unsafe_path"
-  | "error.database_error";
+  | "error.database_error"
+  | "error.auto_vacuum_not_incremental"
+  | "error.integrity_check_failed";
 
 const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
   en: {
@@ -20,6 +22,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "This Codex logs schema is not supported for this operation.",
     "error.unsafe_path": "The Codex logs database path failed the safety check.",
     "error.database_error": "Could not update the Codex logs database.",
+    "error.auto_vacuum_not_incremental": "This Codex logs database is not configured for incremental vacuum, so space cannot be reclaimed without a full rebuild.",
+    "error.integrity_check_failed": "The Codex logs database failed its integrity check. No space was reclaimed.",
   },
   de: {
     applying: "Log-Guard-Änderung wird angewendet…",
@@ -30,6 +34,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "Dieses Schema der Codex-Protokolldatenbank wird für diesen Vorgang nicht unterstützt.",
     "error.unsafe_path": "Der Pfad der Codex-Protokolldatenbank hat die Sicherheitsprüfung nicht bestanden.",
     "error.database_error": "Die Codex-Protokolldatenbank konnte nicht aktualisiert werden.",
+    "error.auto_vacuum_not_incremental": "Diese Codex-Protokolldatenbank ist nicht fuer inkrementelles Vacuum konfiguriert; ohne vollstaendigen Neuaufbau kann kein Speicher freigegeben werden.",
+    "error.integrity_check_failed": "Die Integritaetspruefung der Codex-Protokolldatenbank ist fehlgeschlagen. Es wurde kein Speicher freigegeben.",
   },
   fr: {
     applying: "Application de la modification Log Guard…",
@@ -40,6 +46,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "Ce schéma de journaux Codex n’est pas pris en charge pour cette opération.",
     "error.unsafe_path": "Le chemin de la base de données des journaux Codex a échoué au contrôle de sécurité.",
     "error.database_error": "Impossible de mettre à jour la base de données des journaux Codex.",
+    "error.auto_vacuum_not_incremental": "Cette base de donnees de journaux Codex n'est pas configuree pour le vacuum incrementiel : l'espace ne peut pas etre recupere sans reconstruction complete.",
+    "error.integrity_check_failed": "La verification d'integrite de la base de donnees de journaux Codex a echoue. Aucun espace n'a ete recupere.",
   },
   ko: {
     applying: "Log Guard 변경 적용 중…",
@@ -50,6 +58,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "이 Codex 로그 스키마는 이 작업을 지원하지 않습니다.",
     "error.unsafe_path": "Codex 로그 데이터베이스 경로가 안전성 검사를 통과하지 못했습니다.",
     "error.database_error": "Codex 로그 데이터베이스를 업데이트하지 못했습니다.",
+    "error.auto_vacuum_not_incremental": "이 Codex 로그 데이터베이스는 증분 정리로 구성되어 있지 않아, 전체 재구축 없이는 공간을 회수할 수 없습니다.",
+    "error.integrity_check_failed": "Codex 로그 데이터베이스 무결성 검사에 실패했습니다. 공간이 회수되지 않았습니다.",
   },
   zh: {
     applying: "正在应用 Log Guard 更改…",
@@ -60,6 +70,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "此 Codex 日志数据库结构不支持此操作。",
     "error.unsafe_path": "Codex 日志数据库路径未通过安全检查。",
     "error.database_error": "无法更新 Codex 日志数据库。",
+    "error.auto_vacuum_not_incremental": "此 Codex 日志数据库未配置增量清理，因此不完整重建就无法回收空间。",
+    "error.integrity_check_failed": "Codex 日志数据库完整性检查失败，未回收任何空间。",
   },
   "zh-TW": {
     applying: "正在套用 Log Guard 變更…",
@@ -70,6 +82,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "此 Codex 日誌資料庫結構不支援此操作。",
     "error.unsafe_path": "Codex 日誌資料庫路徑未通過安全檢查。",
     "error.database_error": "無法更新 Codex 日誌資料庫。",
+    "error.auto_vacuum_not_incremental": "此 Codex 日志数据库未配置增量清理，因此不完整重建就无法回收空间。",
+    "error.integrity_check_failed": "Codex 日志数据库完整性检查失败，未回收任何空间。",
   },
   ru: {
     applying: "Применение изменения Log Guard…",
@@ -80,6 +94,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "Эта схема базы журналов Codex не поддерживает эту операцию.",
     "error.unsafe_path": "Путь к базе журналов Codex не прошёл проверку безопасности.",
     "error.database_error": "Не удалось обновить базу журналов Codex.",
+    "error.auto_vacuum_not_incremental": "Эта база данных журналов Codex не настроена на инкрементальную очистку, поэтому освободить место без полной перестройки невозможно.",
+    "error.integrity_check_failed": "Проверка целостности базы данных журналов Codex не пройдена. Место не освобождено.",
   },
   ja: {
     applying: "Log Guard の変更を適用中…",
@@ -90,6 +106,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "この Codex ログスキーマではこの操作を使用できません。",
     "error.unsafe_path": "Codex ログデータベースのパスが安全性チェックに失敗しました。",
     "error.database_error": "Codex ログデータベースを更新できませんでした。",
+    "error.auto_vacuum_not_incremental": "この Codex ログ データベースは増分バキューム用に構成されていないため、完全な再構築なしに領域を解放できません。",
+    "error.integrity_check_failed": "Codex ログ データベースの整合性チェックに失敗しました。領域は解放されていません。",
   },
   tr: {
     applying: "Log Guard değişikliği uygulanıyor…",
@@ -100,6 +118,8 @@ const LABELS: Record<Locale, Record<LogGuardOperationLabelKey, string>> = {
     "error.unsupported_schema": "Bu Codex günlük şeması bu işlem için desteklenmiyor.",
     "error.unsafe_path": "Codex günlük veritabanı yolu güvenlik denetimini geçemedi.",
     "error.database_error": "Codex günlük veritabanı güncellenemedi.",
+    "error.auto_vacuum_not_incremental": "Bu Codex gunluk veritabani artimli vacuum icin yapilandirilmamis; tam yeniden olusturma olmadan alan geri kazanilamaz.",
+    "error.integrity_check_failed": "Codex gunluk veritabani butunluk denetiminden gecemedi. Alan geri kazanilmadi.",
   },
 };
 

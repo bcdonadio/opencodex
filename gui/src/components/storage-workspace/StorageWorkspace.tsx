@@ -126,6 +126,13 @@ function mutationErrorLabel(locale: Locale, code: unknown): string {
     case "trigger_collision": return logGuardLabel(locale, "error.trigger_collision");
     case "unsafe_path": return logGuardOperationLabel(locale, "error.unsafe_path");
     case "database_error": return logGuardOperationLabel(locale, "error.database_error");
+    // Two distinct situations that previously collapsed into the generic
+    // message: an unsupported auto-vacuum configuration (nothing can be
+    // reclaimed without a full rebuild) versus a failed integrity check
+    // (the database itself is suspect). A user cannot act on "something
+    // went wrong".
+    case "auto_vacuum_not_incremental": return logGuardOperationLabel(locale, "error.auto_vacuum_not_incremental");
+    case "integrity_check_failed": return logGuardOperationLabel(locale, "error.integrity_check_failed");
     case "config_write_failed": return logGuardLabel(locale, "error.config_write_failed");
     default: return logGuardOperationLabel(locale, "error.generic");
   }
@@ -137,6 +144,7 @@ function CodexLogGuardPanel({
   t,
   busy,
   error,
+  compaction,
   onAction,
 }: {
   report: CodexLogGuardReport;
@@ -144,6 +152,8 @@ function CodexLogGuardPanel({
   t: TFn;
   busy: boolean;
   error: string | null;
+  /** Outcome of the last compaction POST, retained independently of the status refresh. */
+  compaction: string | null;
   onAction: (action: CodexLogGuardAction) => void;
 }) {
   const metrics = report.metrics;
@@ -298,6 +308,12 @@ function CodexLogGuardPanel({
               </>
             )}
           </div>
+          {compaction && (
+            // The POST's own result, shown even when the follow-up status refresh
+            // failed. Previously a successful compaction could complete with no
+            // visible outcome at all, which invited a needless repeat.
+            <p className="stw-kv-mono" role="status" data-testid="log-guard-compact-result">{compaction}</p>
+          )}
         </div>
       )}
 
@@ -343,6 +359,17 @@ type GenerationScopedError = {
   message: string;
 };
 
+/**
+ * The compaction POST's own report. Kept separately from the periodic status
+ * refresh: the mutation already succeeded, so its outcome must survive even if
+ * the follow-up GET fails. Without this, a successful compact whose refresh
+ * failed showed the user nothing and invited them to run it again.
+ */
+type GenerationScopedCompaction = {
+  generation: number;
+  summary: string;
+};
+
 export default function StorageWorkspace({
   report,
   locale,
@@ -354,6 +381,7 @@ export default function StorageWorkspace({
   const [logGuardOverride, setLogGuardOverride] = useState<GenerationScopedLogGuardReport | null>(null);
   const [internalLogGuardBusy, setInternalLogGuardBusy] = useState(false);
   const [logGuardError, setLogGuardError] = useState<GenerationScopedError | null>(null);
+  const [logGuardCompaction, setLogGuardCompaction] = useState<GenerationScopedCompaction | null>(null);
 
   const sortedBuckets = useMemo(
     () => report.buckets.toSorted((a, b) => b.bytes - a.bytes),
@@ -365,6 +393,9 @@ export default function StorageWorkspace({
     : report.codexLogs ?? null;
   const displayedLogGuardError = logGuardError?.generation === report.generatedAt
     ? logGuardError.message
+    : null;
+  const displayedCompaction = logGuardCompaction?.generation === report.generatedAt
+    ? logGuardCompaction.summary
     : null;
   const effectiveLogGuardBusy = logGuardBusy || internalLogGuardBusy;
 
@@ -407,6 +438,35 @@ export default function StorageWorkspace({
           return;
         }
         if (action.action === "compact") {
+          // Read the POST's own report FIRST. It is the authoritative record of
+          // what this mutation reclaimed; discarding it meant a successful
+          // compaction whose refresh then failed showed the user nothing at all,
+          // hiding pagesReclaimed/complete/stopReason and inviting them to
+          // repeat a mutation that already worked.
+          const posted = await response.json().catch(() => null) as {
+            report?: {
+              logicalBytesReclaimed?: number;
+              physicalDatabaseBytesReclaimed?: number;
+              complete?: boolean;
+              stopReason?: string;
+            };
+          } | null;
+          const postedReport = posted?.report;
+          if (postedReport) {
+            // Both figures are shown because they answer different questions: an
+            // incremental vacuum can return pages to the free list without the
+            // file shrinking, so "logical > 0, physical 0" is normal progress
+            // rather than a failed run.
+            const logical = formatBytes(postedReport.logicalBytesReclaimed ?? 0, locale);
+            const physical = formatBytes(postedReport.physicalDatabaseBytesReclaimed ?? 0, locale);
+            const state = postedReport.complete
+              ? logGuardLabel(locale, "compactComplete")
+              : logGuardLabel(locale, "compactPartial");
+            setLogGuardCompaction({
+              generation,
+              summary: `${state} — ${logical} / ${physical}`,
+            });
+          }
           // The mutation has already succeeded. Refresh is deliberately best effort so
           // a transient GET/JSON failure cannot be presented as a failed compaction.
           try {
@@ -531,6 +591,7 @@ export default function StorageWorkspace({
                 t={t}
                 busy={effectiveLogGuardBusy}
                 error={displayedLogGuardError}
+                compaction={displayedCompaction}
                 onAction={runLogGuardAction}
               />
             ) : report.codexLogsError === "inspect_failed" ? (

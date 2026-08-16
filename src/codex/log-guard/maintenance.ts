@@ -24,9 +24,22 @@ const CURRENT_LOG_COLUMNS = [
   "estimated_bytes",
 ] as const;
 
-const DEFAULT_BATCH_PAGES = 512;
-const DEFAULT_MAX_PAGES_PER_RUN = 8_192;
+/**
+ * Budgets are expressed in BYTES and converted with the database's real page
+ * size, because that is what the guide promises: ~8 MiB per batch and ~256 MiB
+ * per run. Fixed page counts silently meant something different on every page
+ * size — at the 4 KiB pages the fixtures use, 512/8192 pages is 2 MiB/32 MiB,
+ * a quarter of the documented budget.
+ */
+const DEFAULT_BATCH_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_BYTES_PER_RUN = 256 * 1024 * 1024;
 const MAX_ITERATIONS = 64;
+
+/** Convert a byte budget to whole pages, never returning zero pages. */
+function pagesForBytes(bytes: number, pageSize: number): number {
+  if (!Number.isFinite(pageSize) || pageSize <= 0) return 1;
+  return Math.max(1, Math.floor(bytes / pageSize));
+}
 
 type CompactStopReason = "complete" | "page_budget" | "no_progress" | "busy";
 
@@ -44,6 +57,14 @@ export interface CodexLogGuardCompactionReport {
   before: CodexLogGuardCompactionMeasure;
   after: CodexLogGuardCompactionMeasure;
   pagesReclaimed: number;
+  /**
+   * Logical space returned to the free list, in bytes (`pagesReclaimed * pageSize`).
+   * Distinct from `physicalDatabaseBytesReclaimed`: an incremental vacuum can
+   * reclaim pages without the file shrinking, so a run that reports logical
+   * progress and zero physical shrinkage is normal rather than a failure. The
+   * guide documented this field before it existed.
+   */
+  logicalBytesReclaimed: number;
   physicalDatabaseBytesReclaimed: number;
   iterations: number;
   complete: boolean;
@@ -242,8 +263,11 @@ function runCompaction(
 
     const pageSize = pragmaNumber(db, "PRAGMA page_size");
     const before = measure(databasePath, db, pageSize);
-    const batchPages = Math.max(1, Math.floor(deps.batchPages ?? DEFAULT_BATCH_PAGES));
-    const maxPages = Math.max(batchPages, Math.floor(deps.maxPagesPerRun ?? DEFAULT_MAX_PAGES_PER_RUN));
+    // Derived from the byte budgets AFTER reading the real page size, so the
+    // documented ~8 MiB batch / ~256 MiB run hold at any page size. Explicit
+    // page-count overrides still win, which is what the tests use.
+    const batchPages = Math.max(1, Math.floor(deps.batchPages ?? pagesForBytes(DEFAULT_BATCH_BYTES, pageSize)));
+    const maxPages = Math.max(batchPages, Math.floor(deps.maxPagesPerRun ?? pagesForBytes(DEFAULT_MAX_BYTES_PER_RUN, pageSize)));
     let previousFreelist = before.freelistPages;
     let pagesReclaimed = 0;
     let iterations = 0;
@@ -269,6 +293,7 @@ function runCompaction(
           before,
           after,
           pagesReclaimed: observedPagesReclaimed,
+          logicalBytesReclaimed: observedPagesReclaimed * pageSize,
           physicalDatabaseBytesReclaimed: Math.max(0, before.databaseBytes - after.databaseBytes),
           iterations,
           complete,
