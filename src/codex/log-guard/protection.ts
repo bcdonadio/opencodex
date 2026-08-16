@@ -44,6 +44,33 @@ const CURRENT_LOG_COLUMNS = [
  * log filters researched for Log Guard v1. It intentionally preserves unrelated
  * TRACE rows rather than assuming all TRACE diagnostics are disposable.
  */
+/**
+ * Upstream configures these filters with `Targets::with_target`, which matches a
+ * target and every module path BENEATH it: `hyper_util` also covers
+ * `hyper_util::client::legacy::pool`, and `codex_api::sse` also covers
+ * `codex_api::sse::responses`. Exact equality reproduced only the parent, so the
+ * high-volume child targets — the ones that actually fill the database — kept
+ * writing while compat mode reported itself active.
+ *
+ * The comparison is `target = X OR target LIKE X || '::%' ESCAPE '\\'`. The
+ * ESCAPE clause is load-bearing: `_` is a single-character LIKE wildcard, so an
+ * unescaped `hyper_util` would also match `hyperXutil`, and `hyper_utilities`
+ * would slip past the boundary. Every `_`, `%` and `\\` in the literal is
+ * escaped before interpolation. The trailing `'::'` keeps a sibling crate whose
+ * name merely starts with the same letters from matching.
+ *
+ * `opentelemetry_sdk` stays exact because upstream registers it with exact
+ * equality rather than a prefix filter.
+ */
+function targetOrDescendant(target: string): string {
+  const escaped = target.replace(/[\\%_]/g, ch => `\\${ch}`);
+  return `(NEW.target = '${target}' OR NEW.target LIKE '${escaped}::%' ESCAPE '\\')`;
+}
+
+function anyTargetOrDescendant(targets: readonly string[]): string {
+  return `(${targets.map(targetOrDescendant).join(" OR ")})`;
+}
+
 const COMPAT_TRIGGER_SQL = `CREATE TRIGGER ${COMPAT_TRIGGER}
 BEFORE INSERT ON logs
 WHEN
@@ -52,14 +79,14 @@ WHEN
   OR NEW.target = 'codex_otel.trace_safe'
   OR NEW.target = 'codex_api::responses_websocket_timing'
   OR NEW.target = 'codex_core::post_sampling_token_estimate'
-  OR (NEW.target = 'hyper_util' AND upper(NEW.level) IN ('TRACE', 'DEBUG', 'INFO'))
-  OR (NEW.target IN ('codex_rmcp_client', 'rmcp') AND upper(NEW.level) IN ('TRACE', 'DEBUG'))
-  OR (NEW.target IN (
-    'codex_http_client::transport',
-    'codex_api::sse',
-    'codex_tui::streaming::controller',
-    'codex_tui::streaming::table_holdback'
-  ) AND upper(NEW.level) = 'TRACE')
+  OR (${targetOrDescendant("hyper_util")} AND upper(NEW.level) IN ('TRACE', 'DEBUG', 'INFO'))
+  OR (${anyTargetOrDescendant(["codex_rmcp_client", "rmcp"])} AND upper(NEW.level) IN ('TRACE', 'DEBUG'))
+  OR (${anyTargetOrDescendant([
+    "codex_http_client::transport",
+    "codex_api::sse",
+    "codex_tui::streaming::controller",
+    "codex_tui::streaming::table_holdback",
+  ])} AND upper(NEW.level) = 'TRACE')
   OR (NEW.target = 'opentelemetry_sdk' AND upper(NEW.level) IN ('TRACE', 'DEBUG'))
 BEGIN
   SELECT RAISE(IGNORE);
@@ -355,7 +382,7 @@ function restoreOwnedTriggers(databasePath: string, previousTriggers: readonly O
 }
 
 function performMutation(
-  requestedMode: CodexLogGuardMode,
+  requestedMode: CodexLogGuardMode | (() => CodexLogGuardMode),
   deps: CodexLogGuardProtectionDeps,
 ): CodexLogGuardMutationResult {
   const codexHome = deps.codexHome ?? getCodexHome();
@@ -373,6 +400,11 @@ function performMutation(
   const withLock = deps.withLock ?? withCodexLogGuardLock;
   const writeDesired = deps.writeDesiredMode ?? writeCodexLogGuardMode;
   let locked: CodexLogGuardLockOutcome<LockedMutationResult>;
+  // Repair passes a resolver instead of a value: its target mode must be read
+  // INSIDE L. Reading it before acquiring the lock let a Disable complete in
+  // the gap, after which the stale Repair reinstalled protection and reported
+  // success — the caller saw an honest "off" and got "compat".
+  let effectiveMode: CodexLogGuardMode = typeof requestedMode === "function" ? "off" : requestedMode;
   try {
     locked = withLock(codexHome, databasePath, () => {
       // Recheck after acquiring L so a Codex process that starts during lock
@@ -380,14 +412,15 @@ function performMutation(
       const secondRefusal = processRefusal(checkProcesses());
       if (secondRefusal) return { ok: false, error: secondRefusal };
 
-      const mutation = mutateOwnedTrigger(databasePath, requestedMode);
+      effectiveMode = typeof requestedMode === "function" ? requestedMode() : requestedMode;
+      const mutation = mutateOwnedTrigger(databasePath, effectiveMode);
       if (!mutation.ok) return mutation;
 
       // Desired state belongs to the same logical transition as the trigger.
       // Keep L held through this write so another OpenCodex process cannot
       // interleave a different mode between the DB commit and config commit.
       try {
-        writeDesired(requestedMode);
+        writeDesired(effectiveMode);
       } catch {
         restoreOwnedTriggers(databasePath, mutation.previousTriggers);
         return { ok: false, error: "config_write_failed" as const };
@@ -407,7 +440,9 @@ function performMutation(
   }
   if (!locked.value.ok) return locked.value;
 
-  return { ok: true, status: successfulMutationStatus(codexHome, requestedMode) };
+  // Report the mode that was actually applied under the lock, not the one the
+  // caller guessed before acquiring it.
+  return { ok: true, status: successfulMutationStatus(codexHome, effectiveMode) };
 }
 
 export function protectCodexLogs(
@@ -426,6 +461,7 @@ export function unprotectCodexLogs(
 export function repairCodexLogGuardProtection(
   deps: CodexLogGuardProtectionDeps = {},
 ): CodexLogGuardMutationResult {
-  const desired = (deps.readDesiredMode ?? readCodexLogGuardMode)();
-  return performMutation(desired, deps);
+  // Resolve the desired mode under the lock (see performMutation): a Disable
+  // that lands between the read and the lock must win, not be silently undone.
+  return performMutation(() => (deps.readDesiredMode ?? readCodexLogGuardMode)(), deps);
 }

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   getCodexLogGuardProtectionStatus,
   protectCodexLogs,
+  repairCodexLogGuardProtection,
   unprotectCodexLogs,
 } from "../src/codex/log-guard/protection";
 
@@ -129,6 +130,61 @@ describe("Codex Log Guard protection", () => {
     expect(triggers(databasePath).map(row => row.name)).toEqual(["opencodex_log_guard_compat_v1"]);
   });
 
+  test("compat suppresses descendant targets, matching upstream Targets prefix semantics", async () => {
+    // Upstream registers these with `Targets::with_target`, which matches the
+    // target AND every module beneath it. Exact equality caught only the parent,
+    // so the high-volume children that actually fill the database kept writing
+    // while compat reported itself active.
+    const { codexHome, databasePath } = fixture();
+    const deps = testDeps(codexHome);
+    expect(protectCodexLogs("compat", deps).ok).toBe(true);
+
+    insert(databasePath, "TRACE", "hyper_util::client::legacy::pool");
+    insert(databasePath, "TRACE", "codex_api::sse::responses");
+    insert(databasePath, "TRACE", "rmcp::service");
+    insert(databasePath, "TRACE", "codex_http_client::transport::wire");
+    // A near-prefix must NOT match: the '::' boundary is what separates a child
+    // module from an unrelated crate that merely starts with the same letters.
+    insert(databasePath, "TRACE", "hyper_utilities");
+    // opentelemetry_sdk stays exact upstream, so its children are preserved.
+    insert(databasePath, "TRACE", "opentelemetry_sdk::trace");
+
+    expect(rows(databasePath)).toEqual([
+      { level: "TRACE", target: "hyper_utilities" },
+      { level: "TRACE", target: "opentelemetry_sdk::trace" },
+    ]);
+  });
+
+  test("a Disable that lands during Repair is not silently undone", async () => {
+    // Repair used to read the desired mode BEFORE acquiring the lock. A Disable
+    // completing in that gap was reported successful and then reinstalled by the
+    // stale Repair, so the caller saw 'off' and got 'compat'.
+    const { codexHome, databasePath } = fixture();
+    const deps = testDeps(codexHome);
+    expect(protectCodexLogs("compat", deps).ok).toBe(true);
+    expect(deps.desired()).toBe("compat");
+
+    let interleaved = false;
+    const repair = repairCodexLogGuardProtection({
+      ...deps,
+      readDesiredMode: () => {
+        // Runs inside the lock now; the Disable below already committed.
+        return deps.desired() as never;
+      },
+      withLock: (home, path, run) => {
+        if (!interleaved) {
+          interleaved = true;
+          expect(unprotectCodexLogs(deps).ok).toBe(true);
+          expect(deps.desired()).toBe("off");
+        }
+        return deps.withLock(home, path, run);
+      },
+    });
+
+    expect(repair.ok).toBe(true);
+    expect(deps.desired()).toBe("off");
+    expect(triggers(databasePath)).toEqual([]);
+  });
   test("quiet suppresses all TRACE while preserving DEBUG INFO WARN and ERROR", async () => {
     const { codexHome, databasePath } = fixture();
     const deps = testDeps(codexHome);
