@@ -10,6 +10,7 @@ export type LogGuardLabelKey =
   | "disable"
   | "repair"
   | "compact"
+  | "pagesUnit"
   | "compactComplete"
   | "compactPartial"
   | "confirmCompact"
@@ -29,6 +30,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   en: {
     compact: 'Compact',
     compactComplete: "Compaction complete (logical / on-disk reclaimed)",
+    pagesUnit: "pages",
     compactPartial: "Compaction partial (logical / on-disk reclaimed)",
     confirmCompact: 'Confirm compaction',
     cancel: 'Cancel',
@@ -54,6 +56,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   de: {
     compact: 'Komprimieren',
     compactComplete: "Komprimierung abgeschlossen (logisch / auf Datentraeger freigegeben)",
+    pagesUnit: "Seiten",
     compactPartial: "Komprimierung teilweise (logisch / auf Datentraeger freigegeben)",
     confirmCompact: 'Komprimierung bestätigen',
     cancel: 'Abbrechen',
@@ -79,6 +82,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   fr: {
     compact: "Compacter",
     compactComplete: "Compactage termine (logique / recupere sur disque)",
+    pagesUnit: "pages",
     compactPartial: "Compactage partiel (logique / recupere sur disque)",
     confirmCompact: "Confirmer le compactage",
     cancel: "Annuler",
@@ -104,6 +108,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   ko: {
     compact: '압축',
     compactComplete: "압축 완료 (논리 / 디스크 회수량)",
+    pagesUnit: "페이지",
     compactPartial: "압축 부분 완료 (논리 / 디스크 회수량)",
     confirmCompact: '압축 확인',
     cancel: '취소',
@@ -129,6 +134,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   zh: {
     compact: '压缩',
     compactComplete: "压缩完成（逻辑 / 磁盘回收）",
+    pagesUnit: "页",
     compactPartial: "压缩部分完成（逻辑 / 磁盘回收）",
     confirmCompact: '确认压缩',
     cancel: '取消',
@@ -154,6 +160,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   "zh-TW": {
     compact: '壓縮',
     compactComplete: "压缩完成（逻辑 / 磁盘回收）",
+    pagesUnit: "页",
     compactPartial: "压缩部分完成（逻辑 / 磁盘回收）",
     confirmCompact: '確認壓縮',
     cancel: '取消',
@@ -179,6 +186,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   ru: {
     compact: 'Сжать',
     compactComplete: "Сжатие завершено (логически / освобождено на диске)",
+    pagesUnit: "страниц",
     compactPartial: "Сжатие частичное (логически / освобождено на диске)",
     confirmCompact: 'Подтвердить сжатие',
     cancel: 'Отмена',
@@ -204,6 +212,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   ja: {
     compact: '圧縮',
     compactComplete: "圧縮完了（論理 / ディスク解放）",
+    pagesUnit: "ページ",
     compactPartial: "圧縮は部分的に完了（論理 / ディスク解放）",
     confirmCompact: '圧縮を確認',
     cancel: 'キャンセル',
@@ -229,6 +238,7 @@ const LABELS: Record<Locale, Record<LogGuardLabelKey, string>> = {
   tr: {
     compact: 'Sıkıştır',
     compactComplete: "Sikistirma tamamlandi (mantiksal / diskte geri kazanilan)",
+    pagesUnit: "sayfa",
     compactPartial: "Sikistirma kismi (mantiksal / diskte geri kazanilan)",
     confirmCompact: 'Sıkıştırmayı onayla',
     cancel: 'İptal',

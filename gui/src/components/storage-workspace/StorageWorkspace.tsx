@@ -308,12 +308,17 @@ function CodexLogGuardPanel({
               </>
             )}
           </div>
-          {compaction && (
-            // The POST's own result, shown even when the follow-up status refresh
-            // failed. Previously a successful compaction could complete with no
-            // visible outcome at all, which invited a needless repeat.
-            <p className="stw-kv-mono" role="status" data-testid="log-guard-compact-result">{compaction}</p>
-          )}
+        </div>
+      )}
+
+      {compaction && (
+        // Rendered OUTSIDE `reclaimAvailable` on purpose. A fully successful
+        // compaction drives reclaimableBytes to 0, which retires the reclaim
+        // section — so nesting the result inside it hid the outcome in exactly
+        // the best case. The POST's own result is also shown when the follow-up
+        // status refresh fails, since the mutation had already succeeded.
+        <div className="stw-section">
+          <p className="stw-kv-mono" role="status" data-testid="log-guard-compact-result">{compaction}</p>
         </div>
       )}
 
@@ -445,6 +450,7 @@ export default function StorageWorkspace({
           // repeat a mutation that already worked.
           const posted = await response.json().catch(() => null) as {
             report?: {
+              pagesReclaimed?: number;
               logicalBytesReclaimed?: number;
               physicalDatabaseBytesReclaimed?: number;
               complete?: boolean;
@@ -462,9 +468,21 @@ export default function StorageWorkspace({
             const state = postedReport.complete
               ? logGuardLabel(locale, "compactComplete")
               : logGuardLabel(locale, "compactPartial");
+            // stopReason is what distinguishes page_budget from no_progress from
+            // busy, and pagesReclaimed is the unit the budget is actually spent
+            // in. Reporting only bytes left a partial run indistinguishable from
+            // any other partial run.
+            const pages = postedReport.pagesReclaimed ?? 0;
+            const reason = !postedReport.complete && postedReport.stopReason
+              ? ` (${postedReport.stopReason})`
+              : "";
             setLogGuardCompaction({
               generation,
-              summary: `${state} — ${logical} / ${physical}`,
+              summary: [
+                `${state}${reason}`,
+                `${pages.toLocaleString(locale)} ${logGuardLabel(locale, "pagesUnit")}`,
+                `${logical} / ${physical}`,
+              ].join(" — "),
             });
           }
           // The mutation has already succeeded. Refresh is deliberately best effort so

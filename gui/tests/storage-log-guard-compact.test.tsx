@@ -206,3 +206,74 @@ test("compact is hidden when reclaim is unsupported", async () => {
   const container = await mount(value, () => {});
   expect(container.querySelector('[data-testid="log-guard-compact"]')).toBeNull();
 });
+
+test("a successful compaction shows its report even when the refresh fails", async () => {
+  // The mutation already succeeded, so its outcome must survive a failed GET.
+  // pagesReclaimed and stopReason are included because bytes alone leave one
+  // partial run indistinguishable from another (page_budget vs no_progress vs busy).
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/api/storage/codex-logs/compact")) {
+      return Response.json({
+        report: {
+          pagesReclaimed: 318,
+          logicalBytesReclaimed: 1302528,
+          physicalDatabaseBytesReclaimed: 0,
+          complete: false,
+          stopReason: "page_budget",
+        },
+      });
+    }
+    return new Response("refresh unavailable", { status: 503 });
+  }) as typeof fetch;
+
+  const container = await mount(report());
+  const compact = container.querySelector<HTMLElement>('[data-testid="log-guard-compact"]');
+  if (!compact) throw new Error("compact button missing");
+  await click(compact);
+  const confirm = container.querySelector<HTMLElement>('[data-testid="log-guard-compact-confirm"]');
+  if (!confirm) throw new Error("confirm button missing");
+  await click(confirm);
+  await settle();
+
+  const result = container.querySelector('[data-testid="log-guard-compact-result"]');
+  expect(result).not.toBeNull();
+  expect(result?.textContent).toContain("318");
+  expect(result?.textContent).toContain("page_budget");
+});
+
+test("the compaction report survives a refresh that retires the reclaim section", async () => {
+  // A fully successful compaction drives reclaimableBytes to 0, which removes
+  // the reclaim section. Nesting the result inside it hid the outcome in exactly
+  // the best case.
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/api/storage/codex-logs/compact")) {
+      return Response.json({
+        report: {
+          pagesReclaimed: 512,
+          logicalBytesReclaimed: 2097152,
+          physicalDatabaseBytesReclaimed: 2097152,
+          complete: true,
+          stopReason: "complete",
+        },
+      });
+    }
+    return Response.json(report(0).codexLogs);
+  }) as typeof fetch;
+
+  const container = await mount(report());
+  const compact = container.querySelector<HTMLElement>('[data-testid="log-guard-compact"]');
+  if (!compact) throw new Error("compact button missing");
+  await click(compact);
+  const confirm = container.querySelector<HTMLElement>('[data-testid="log-guard-compact-confirm"]');
+  if (!confirm) throw new Error("confirm button missing");
+  await click(confirm);
+  await settle();
+
+  // The reclaim section is gone, but the result must not be.
+  expect(container.querySelector('[data-testid="log-guard-reclaim"]')).toBeNull();
+  const result = container.querySelector('[data-testid="log-guard-compact-result"]');
+  expect(result).not.toBeNull();
+  expect(result?.textContent).toContain("512");
+});
