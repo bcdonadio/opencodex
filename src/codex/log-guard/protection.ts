@@ -52,19 +52,27 @@ const CURRENT_LOG_COLUMNS = [
  * high-volume child targets — the ones that actually fill the database — kept
  * writing while compat mode reported itself active.
  *
- * The comparison is `target = X OR target LIKE X || '::%' ESCAPE '\\'`. The
- * ESCAPE clause is load-bearing: `_` is a single-character LIKE wildcard, so an
- * unescaped `hyper_util` would also match `hyperXutil`, and `hyper_utilities`
- * would slip past the boundary. Every `_`, `%` and `\\` in the literal is
- * escaped before interpolation. The trailing `'::'` keeps a sibling crate whose
- * name merely starts with the same letters from matching.
+ * The comparison uses `substr`, not `LIKE`. SQLite's `LIKE` is ASCII
+ * case-insensitive by default, so a `LIKE` form would also suppress
+ * `HYPER_UTIL::child` — Rust target paths are case-sensitive, and silently
+ * dropping a differently-cased target is a wrong answer, not a safe default.
+ * `substr(NEW.target, 1, N) = 'X::'` is a plain case-sensitive comparison with
+ * no wildcard metacharacters to escape, which also removes the `_`/`%` hazard
+ * that `LIKE` would have required an ESCAPE clause to contain.
+ *
+ * The `'::'` boundary is deliberate and NARROWER than upstream's raw prefix
+ * rule: `Targets::with_target("hyper_util")` would also match a sibling crate
+ * named `hyper_utilities`. Suppressing an unrelated crate's logs is worse for
+ * a guard that silently discards rows, so this matches the module-descendant
+ * relation instead. The existing regression pins `hyper_utilities` as
+ * preserved.
  *
  * `opentelemetry_sdk` stays exact because upstream registers it with exact
  * equality rather than a prefix filter.
  */
 function targetOrDescendant(target: string): string {
-  const escaped = target.replace(/[\\%_]/g, ch => `\\${ch}`);
-  return `(NEW.target = '${target}' OR NEW.target LIKE '${escaped}::%' ESCAPE '\\')`;
+  const prefix = `${target}::`;
+  return `(NEW.target = '${target}' OR substr(NEW.target, 1, ${prefix.length}) = '${prefix}')`;
 }
 
 function anyTargetOrDescendant(targets: readonly string[]): string {

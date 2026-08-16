@@ -146,11 +146,16 @@ describe("Codex Log Guard protection", () => {
     // A near-prefix must NOT match: the '::' boundary is what separates a child
     // module from an unrelated crate that merely starts with the same letters.
     insert(databasePath, "TRACE", "hyper_utilities");
+    // Rust target paths are case-sensitive. SQLite LIKE is ASCII
+    // case-insensitive, so a LIKE-based prefix would have suppressed this
+    // unrelated target too; substr() keeps the comparison exact.
+    insert(databasePath, "TRACE", "HYPER_UTIL::child");
     // opentelemetry_sdk stays exact upstream, so its children are preserved.
     insert(databasePath, "TRACE", "opentelemetry_sdk::trace");
 
     expect(rows(databasePath)).toEqual([
       { level: "TRACE", target: "hyper_utilities" },
+      { level: "TRACE", target: "HYPER_UTIL::child" },
       { level: "TRACE", target: "opentelemetry_sdk::trace" },
     ]);
   });
