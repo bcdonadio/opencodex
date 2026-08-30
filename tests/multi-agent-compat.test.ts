@@ -281,6 +281,7 @@ describe("multiAgentGuidanceText", () => {
 
     expect(text).toContain("When the active spawn_agent tool supports optional");
     expect(text).toContain("use only models listed for this collaboration surface");
+    expect(text).toContain("However, an **explicit** user request can override any of those parameters");
     expect(text).toContain("fork_turns");
     expect(text).toContain('"none"');
     expect(text).not.toMatch(/hidden/i);

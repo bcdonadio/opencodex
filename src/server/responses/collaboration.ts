@@ -407,6 +407,7 @@ export async function multiAgentGuidanceText(
     if (!preferred && roster === "" && fallbackGuidance === "") return null;
     let text = "When the active spawn_agent tool supports optional \"model\" or \"reasoning_effort\" overrides, "
       + "use only models listed for this collaboration surface. "
+      + "However, an **explicit** user request can override any of those parameters. "
       + "When setting either override, set fork_turns to \"none\" "
       + "(or a positive turn count such as \"3\"; full-history forks reject overrides) "
       + "and make the task message self-contained.";
