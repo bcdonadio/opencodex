@@ -373,22 +373,39 @@ describe("agent task recovery security", () => {
     expect(fetchCalls).toBe(0);
   });
 
-  test("non-Codex originators keep the typed fail-fast error", async () => {
-    let recoveryFetches = 0;
-    globalThis.fetch = (async (input) => {
-      if (String(input).includes("chatgpt.com")) recoveryFetches += 1;
-      return new Response("event: error\ndata: {}\n\n", { status: 200 });
-    }) as typeof fetch;
+  test("recovers arbitrary and missing inbound originators with a fixed recovery originator", async () => {
+    for (const [label, inboundOriginator] of [
+      ["future", "codex_future_client"],
+      ["missing", undefined],
+    ] as const) {
+      resetAgentTaskRecoveryState();
+      let recoveryFetches = 0;
+      let recoveryOriginator = "";
+      globalThis.fetch = (async (input, init) => {
+        if (String(input).includes("chatgpt.com")) {
+          recoveryFetches += 1;
+          recoveryOriginator = new Headers(init?.headers).get("originator") ?? "";
+          return new Response(recoverySse(`Recover the ${label} originator task.`), { status: 200 });
+        }
+        return providerResponse();
+      }) as typeof fetch;
 
-    const response = await post(
-      routedConfig(),
-      "xai/grok-4.5",
-      encryptedInput(),
-      { ...codexHeaders(), originator: "other" },
-    );
+      const headers = codexHeaders(`acct-originator-${label}`);
+      if (inboundOriginator === undefined) headers.delete("originator");
+      else headers.set("originator", inboundOriginator);
 
-    expect(response.status).toBe(400);
-    expect(recoveryFetches).toBe(0);
+      const response = await post(
+        routedConfig(),
+        "xai/grok-4.5",
+        encryptedInput({ taskName: `/root/${label}` }),
+        headers,
+      );
+
+      expect(response.status).toBe(200);
+      expect(recoveryFetches).toBe(1);
+      expect(recoveryOriginator).toBe("codex_cli_rs");
+      if (inboundOriginator !== undefined) expect(recoveryOriginator).not.toBe(inboundOriginator);
+    }
   });
 
   test("accepts the current Codex Work desktop originator", async () => {
@@ -411,6 +428,6 @@ describe("agent task recovery security", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(recoveryOriginator).toBe("codex_work_desktop");
+    expect(recoveryOriginator).toBe("codex_cli_rs");
   });
 });

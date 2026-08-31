@@ -144,9 +144,10 @@ terminaison ChatGPT `/responses` fixe et la forme d’identification entrante du
 
 Cette récupération est disponible uniquement lorsque le proxy écoute sur l’interface de bouclage. Elle ne
 substitue jamais une autre clé API, l’identifiant d’un autre fournisseur ou un autre compte Codex. Seuls les
-en-têtes `authorization`, `chatgpt-account-id` correspondant, `originator`, ainsi que les métadonnées
-facultatives `openai-beta` et `user-agent`, sont transmis. `content-type` et `accept` sont générés localement ;
-aucun autre en-tête de l’appelant ne franchit cette frontière.
+en-têtes `authorization`, `chatgpt-account-id` correspondant, ainsi que les métadonnées facultatives
+`openai-beta` et `user-agent`, sont transmis. L’`originator` entrant est ignoré plutôt que transmis ;
+cette requête de récupération uniquement génère localement `originator: codex_cli_rs`. `content-type`
+et `accept` sont générés localement ; aucun autre en-tête de l’appelant ne franchit cette frontière.
 
 Cette opération consomme du quota, ajoute de la latence, conserve brièvement le texte récupéré dans un cache
 mémoire borné et dépend d’un comportement non documenté du service ChatGPT. Comme un modèle renvoie le texte

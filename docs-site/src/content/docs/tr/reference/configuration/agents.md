@@ -175,10 +175,11 @@ Kabul ve saklama kasıtlı olarak dardır:
   sağlayıcı isteğine asla yerleştirilmez; bellek içi önbellek kapsamı yalnızca
   arayan kimlik bilgisinin ve hesabının süreç açısından rastgele anahtarlanmış
   bir özetini kullanır;
-- kurtarma isteği yalnızca `authorization`, eşleşen `chatgpt-account-id`,
-  `originator` ve isteğe bağlı `openai-beta` ve `user-agent` meta verilerini
-  iletir; opencodex `content-type` ve `accept`'i kendisi ayarlar ve başka hiçbir
-  arayan başlığı bu sınırı geçmez;
+- kurtarma isteği yalnızca `authorization`, eşleşen `chatgpt-account-id` ve
+  isteğe bağlı `openai-beta` ve `user-agent` meta verilerini iletir; gelen
+  `originator` yok sayılır ve iletilmez, yalnızca kurtarma isteği yerel olarak
+  `originator: codex_cli_rs` üretir. opencodex `content-type` ve `accept`'i kendisi
+  ayarlar ve başka hiçbir arayan başlığı bu sınırı geçmez;
 - kurtarılan düz metin asla günlüğe kaydedilmez veya kalıcı hale getirilmez;
   süreç içi yerel önbellek kimlik bilgisi, üst iş parçacığı ve şifreli metin
   kapsamındadır, 15 dakika sonra sona erer ve hem yapılandırılmış girdi sayısı
@@ -212,7 +213,7 @@ değerlendirilmelidir.
 {
   "agentTaskRecovery": {
     "enabled": true,
-    "model": "gpt-5.6-sol",
+    "model": "gpt-5.6-terra",
     "timeoutMs": 45000,
     "cacheEntries": 200
   }

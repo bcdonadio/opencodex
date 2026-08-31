@@ -470,7 +470,7 @@ export interface OcxConfig {
   /** Experimental, default-off ChatGPT recovery for encrypted V2 routed tasks. */
   agentTaskRecovery?: {
     enabled?: boolean;
-    /** ChatGPT model used by the recovery request. Default: gpt-5.6-sol. */
+    /** ChatGPT model used by the recovery request. Default: gpt-5.6-terra. */
     model?: string;
     /** Recovery request timeout in milliseconds. Default: 45000. */
     timeoutMs?: number;

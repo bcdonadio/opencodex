@@ -166,9 +166,11 @@ noktasına ham Responses doğrudan geçişi aracılığıyla bu belirli yerelden
 yönlendirilen şekli kurtarabilir. Kurtarma yalnızca proxy geri döngüye bağlıyken
 kullanılabilir. Asla API anahtarı kimlik doğrulamasının, başka bir sağlayıcı
 kimlik bilgisinin veya başka bir Codex hesabının yerine geçmez. Yalnızca
-`authorization`, eşleşen `chatgpt-account-id`, `originator` ve isteğe bağlı
-`openai-beta`/`user-agent` meta verileri iletilir; `content-type` ve `accept`
-yerel olarak oluşturulur ve başka hiçbir arayan başlığı sınırı geçmez. Kotayı
+`authorization`, eşleşen `chatgpt-account-id` ve isteğe bağlı
+`openai-beta`/`user-agent` meta verileri iletilir. Gelen `originator` yok sayılır
+ve iletilmez; yalnızca kurtarma isteği yerel olarak `originator: codex_cli_rs`
+üretir. `content-type` ve `accept` yerel olarak oluşturulur ve başka hiçbir
+arayan başlığı sınırı geçmez. Kotayı
 tüketir, gecikme ekler, kurtarılan düz metni sınırlı bir bellek içi önbellekte
 kısa süre tutar ve belgelenmemiş ChatGPT arka uç davranışına bağlıdır. Bir model
 kurtarılan metni döndürdüğü için bayt bayt doğruluk garanti edilmez. Genel/API

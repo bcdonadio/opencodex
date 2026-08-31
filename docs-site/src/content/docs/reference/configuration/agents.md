@@ -148,9 +148,10 @@ Admission and retention are deliberately narrow:
 - raw ChatGPT credentials are sent only to the hard-coded ChatGPT endpoint and are never placed in
   the request body, logs, cache keys, or provider request; the in-memory cache scope uses only a
   process-random keyed digest of the caller credential and account;
-- the recovery request forwards only `authorization`, the matching `chatgpt-account-id`,
-  `originator`, and optional `openai-beta` and `user-agent` metadata; opencodex sets `content-type`
-  and `accept` itself, and no other caller headers cross this boundary;
+- the recovery request forwards only `authorization`, the matching `chatgpt-account-id`, and optional
+  `openai-beta` and `user-agent` metadata; the inbound `originator` is ignored rather than forwarded,
+  and this recovery-only request generates `originator: codex_cli_rs` locally. opencodex sets
+  `content-type` and `accept` itself, and no other caller headers cross this boundary;
 - recovered plaintext is never logged or persisted; the process-local cache is credential-, parent-
   thread-, and ciphertext-scoped, expires after 15 minutes, and is bounded by both configured entry
   count (200 by default, 512 maximum) and 8 MiB total;
@@ -176,7 +177,7 @@ model output rather than authenticated plaintext.
 {
   "agentTaskRecovery": {
     "enabled": true,
-    "model": "gpt-5.6-sol",
+    "model": "gpt-5.6-terra",
     "timeoutMs": 45000,
     "cacheEntries": 200
   }

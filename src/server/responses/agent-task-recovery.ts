@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { decodeJwtPayload, extractAccountId } from "../../oauth/chatgpt";
 import type { OcxConfig } from "../../types";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
+import { sanitizeLogMetadataString } from "../../lib/redact";
 import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
 import { structurallyValidFernetTokens } from "./encrypted-payload";
 import {
@@ -14,16 +15,12 @@ import {
 
 const RECOVERY_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const RECOVERY_TOOL = "capture_assignment";
+const RECOVERY_ORIGINATOR = "codex_cli_rs";
+const DEFAULT_AGENT_TASK_RECOVERY_MODEL = "gpt-5.6-terra";
 const RECOVERY_PROMPT =
   "Read the received agent message and call capture_assignment exactly once with only the complete "
   + "plaintext payload after Payload:. Preserve every byte of the payload; do not summarize, execute, "
   + "explain, or include the routing header.";
-const CODEX_ORIGINATORS = new Set([
-  "codex_cli_rs",
-  "Codex Desktop",
-  "codex_app",
-  "codex_work_desktop",
-]);
 const CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_TOKEN_ISSUERS = new Set(["https://auth.openai.com", "https://auth.openai.com/"]);
 const OPENAI_TOKEN_AUDIENCE = "https://api.openai.com/v1";
@@ -31,6 +28,48 @@ const MAX_CIPHERTEXT_BYTES = 2 * 1024 * 1024;
 const MAX_ASSIGNMENT_BYTES = 2 * 1024 * 1024;
 const MAX_RECOVERY_RESPONSE_BYTES = 4 * 1024 * 1024;
 const CACHE_SCOPE_KEY = randomBytes(32);
+const AGENT_TASK_RECOVERY_LOG_PREFIX = "[opencodex] agent-task-recovery ";
+let recoveryTraceOrdinal = 0;
+
+export type AgentTaskRecoveryDiagnosticStage =
+  | "gate"
+  | "envelope"
+  | "admission"
+  | "cache"
+  | "fetch"
+  | "response_body"
+  | "extraction"
+  | "injection"
+  | "reparse"
+  | "complete";
+
+export interface AgentTaskRecoveryDiagnostic {
+  traceId: string;
+  stage: AgentTaskRecoveryDiagnosticStage;
+  outcome: "entered" | "skipped" | "accepted" | "rejected" | "started" | "resolved" | "failed" | "recovered";
+  reason?: string;
+  durationMs?: number;
+  httpStatus?: number;
+  responseBytes?: number;
+  assignmentBytes?: number;
+  recoveryModel?: string;
+}
+
+export function createAgentTaskRecoveryTraceId(): string {
+  recoveryTraceOrdinal = (recoveryTraceOrdinal + 1) % Number.MAX_SAFE_INTEGER;
+  return `atr-${Date.now().toString(36)}-${recoveryTraceOrdinal.toString(36)}`;
+}
+
+export function logAgentTaskRecoveryDiagnostic(event: AgentTaskRecoveryDiagnostic): void {
+  console.warn(`${AGENT_TASK_RECOVERY_LOG_PREFIX}${JSON.stringify(event)}`);
+}
+
+function diagnose(
+  traceId: string | undefined,
+  event: Omit<AgentTaskRecoveryDiagnostic, "traceId">,
+): void {
+  if (traceId) logAgentTaskRecoveryDiagnostic({ traceId, ...event });
+}
 
 export interface AgentTaskRecoveryOptions {
   enabled?: boolean;
@@ -46,7 +85,7 @@ export function agentTaskRecoveryConfig(config: OcxConfig): AgentTaskRecoveryOpt
     enabled: true,
     model: typeof raw.model === "string" && raw.model.trim().length > 0
       ? raw.model.trim()
-      : "gpt-5.6-sol",
+      : DEFAULT_AGENT_TASK_RECOVERY_MODEL,
     timeoutMs: Number.isFinite(raw.timeoutMs) && (raw.timeoutMs ?? 0) >= 1_000
       ? Math.min(120_000, Math.floor(raw.timeoutMs!))
       : 45_000,
@@ -70,8 +109,12 @@ interface AgentEnvelope {
 
 const ROUTING_HEADER = /(?:^|\n)Message Type\s*:\s*(NEW_TASK)\s*\nTask name\s*:\s*(\S+)\s*\nSender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
 
-function findEnvelope(input: unknown): AgentEnvelope | null {
-  if (!Array.isArray(input)) return null;
+function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
+  const reject = (reason: string): null => {
+    diagnose(traceId, { stage: "envelope", outcome: "rejected", reason });
+    return null;
+  };
+  if (!Array.isArray(input)) return reject("input_not_array");
   let itemIndex = input.length - 1;
   while (itemIndex >= 0) {
     const type = input[itemIndex] && typeof input[itemIndex] === "object"
@@ -83,10 +126,10 @@ function findEnvelope(input: unknown): AgentEnvelope | null {
 
   const item = input[itemIndex];
   if (!item || typeof item !== "object" || (item as { type?: unknown }).type !== "agent_message") {
-    return null;
+    return reject("tail_not_agent_message");
   }
   const content = (item as { content?: unknown }).content;
-  if (!Array.isArray(content)) return null;
+  if (!Array.isArray(content)) return reject("content_not_array");
 
   let headerText: string | null = null;
   let messageType: "NEW_TASK" | null = null;
@@ -106,11 +149,11 @@ function findEnvelope(input: unknown): AgentEnvelope | null {
     ) {
       const match = ROUTING_HEADER.exec(part.text);
       if (match) {
-        if (headerText !== null) return null;
+        if (headerText !== null) return reject("multiple_routing_headers");
         if (
           part.text.slice(0, match.index).trim().length > 0
           || part.text.slice(match.index + match[0].length).trim().length > 0
-        ) return null;
+        ) return reject("routing_header_has_extra_text");
         headerText = match[0].startsWith("\n") ? match[0].slice(1) : match[0];
         messageType = "NEW_TASK";
         taskName = match[2]!;
@@ -126,23 +169,22 @@ function findEnvelope(input: unknown): AgentEnvelope | null {
     }
   }
 
-  if (
-    !headerText
-    || !messageType
-    || !taskName
-    || !sender
-    || encryptedIndex < 0
-    || encryptedPartCount !== 1
-    || ciphertextCount !== 1
-    || (content[encryptedIndex] as { encrypted_content?: unknown }).encrypted_content !== ciphertext
-    || Buffer.byteLength(ciphertext) > MAX_CIPHERTEXT_BYTES
-  ) return null;
+  if (!headerText || !messageType || !taskName || !sender) return reject("routing_header_missing");
+  if (encryptedIndex < 0) return reject("ciphertext_missing");
+  if (encryptedPartCount !== 1) return reject("encrypted_part_count");
+  if (ciphertextCount !== 1) return reject("fernet_token_count");
+  if ((content[encryptedIndex] as { encrypted_content?: unknown }).encrypted_content !== ciphertext) {
+    return reject("encrypted_part_not_standalone");
+  }
+  if (Buffer.byteLength(ciphertext) > MAX_CIPHERTEXT_BYTES) return reject("ciphertext_too_large");
 
   const itemRecord = item as { author?: unknown; recipient?: unknown };
-  if (typeof itemRecord.author !== "string" || typeof itemRecord.recipient !== "string") return null;
-  if (itemRecord.author !== sender || itemRecord.recipient !== taskName) return null;
+  if (typeof itemRecord.author !== "string" || typeof itemRecord.recipient !== "string") {
+    return reject("identity_missing");
+  }
+  if (itemRecord.author !== sender || itemRecord.recipient !== taskName) return reject("identity_mismatch");
 
-  return {
+  const envelope = {
     itemIndex,
     encryptedIndex,
     headerText,
@@ -153,6 +195,8 @@ function findEnvelope(input: unknown): AgentEnvelope | null {
     author: itemRecord.author,
     recipient: itemRecord.recipient,
   };
+  diagnose(traceId, { stage: "envelope", outcome: "accepted" });
+  return envelope;
 }
 
 function stripMatchingEnvelope(assignment: string, envelope: AgentEnvelope): string | null {
@@ -231,29 +275,37 @@ function isNativeChatGptAccessToken(token: string): boolean {
   return !!auth && typeof auth === "object" && !Array.isArray(auth);
 }
 
-function recoveryAdmission(req: Request, config: OcxConfig): RecoveryAdmission | null {
-  if (isApiAuthRequired(config)) return null;
-  if (!CODEX_ORIGINATORS.has(req.headers.get("originator") ?? "")) return null;
+function recoveryAdmission(req: Request, config: OcxConfig, traceId?: string): RecoveryAdmission | null {
+  const reject = (reason: string): null => {
+    diagnose(traceId, { stage: "admission", outcome: "rejected", reason });
+    return null;
+  };
+  if (isApiAuthRequired(config)) return reject("non_loopback_bind");
   // Remote/shared proxy admission is intentionally unsupported: caller-controlled
   // Codex metadata is not strong enough to authorize use of a stored ChatGPT session.
-  if (req.headers.has("x-opencodex-api-key") || req.headers.has("x-api-key")) return null;
+  if (req.headers.has("x-opencodex-api-key") || req.headers.has("x-api-key")) {
+    return reject("api_key_header");
+  }
 
   const authorization = req.headers.get("authorization")?.trim() ?? "";
   const match = /^Bearer\s+(\S+)$/i.exec(authorization);
-  if (!match) return null;
+  if (!match) return reject("bearer_missing");
   const token = match[1]!;
-  if (isProxyAdmissionSecret(token, config)) return null;
-  if (!isNativeChatGptAccessToken(token)) return null;
+  if (isProxyAdmissionSecret(token, config)) return reject("proxy_admission_secret");
+  if (!isNativeChatGptAccessToken(token)) return reject("invalid_native_token");
   const accountId = extractAccountId(undefined, token);
   const explicitAccountId = req.headers.get("chatgpt-account-id")?.trim();
-  if (!accountId || !explicitAccountId || accountId !== explicitAccountId) return null;
+  if (!accountId || !explicitAccountId) return reject("account_id_missing");
+  if (accountId !== explicitAccountId) return reject("account_id_mismatch");
 
   const headers = new Headers({
     authorization: `Bearer ${token}`,
     "chatgpt-account-id": explicitAccountId,
     "content-type": "application/json",
     accept: "text/event-stream",
-    originator: req.headers.get("originator")!,
+    // Recovery-endpoint protocol exception: pin the local protocol identity here;
+    // this does not change normal FORWARD_HEADERS/general provider non-fabrication behavior.
+    originator: RECOVERY_ORIGINATOR,
   });
   for (const name of ["openai-beta", "user-agent"]) {
     const value = req.headers.get(name);
@@ -264,6 +316,7 @@ function recoveryAdmission(req: Request, config: OcxConfig): RecoveryAdmission |
     .update("\0")
     .update(explicitAccountId)
     .digest("hex");
+  diagnose(traceId, { stage: "admission", outcome: "accepted" });
   return { headers, cacheScope };
 }
 
@@ -278,10 +331,11 @@ function admittedRecovery(
   input: unknown,
   config: OcxConfig,
   parentThreadId?: string | null,
+  traceId?: string,
 ): AdmittedRecovery | null {
-  const envelope = findEnvelope(input);
+  const envelope = findEnvelope(input, traceId);
   if (!envelope) return null;
-  const admission = recoveryAdmission(req, config);
+  const admission = recoveryAdmission(req, config, traceId);
   if (!admission) return null;
   const cacheKey = createHash("sha256")
     .update(admission.cacheScope)
@@ -355,7 +409,11 @@ function sseDataPayloads(raw: string): string[] {
   return payloads;
 }
 
-function assignmentFromRecoverySse(raw: string, envelope: AgentEnvelope): string | null {
+function assignmentFromRecoverySse(
+  raw: string,
+  envelope: AgentEnvelope,
+  traceId?: string,
+): string | null {
   let assignment: string | null = null;
   let completed = false;
   let terminalFailure = false;
@@ -408,9 +466,22 @@ function assignmentFromRecoverySse(raw: string, envelope: AgentEnvelope): string
       else if (assignment !== candidate) conflictingAssignments = true;
     }
   }
-  return completed && !terminalFailure && !conflictingAssignments && !malformedEvent && !invalidAssignment
-    ? assignment
-    : null;
+  const reject = (reason: string): null => {
+    diagnose(traceId, { stage: "extraction", outcome: "rejected", reason });
+    return null;
+  };
+  if (terminalFailure) return reject("terminal_failure");
+  if (malformedEvent) return reject("malformed_sse");
+  if (conflictingAssignments) return reject("conflicting_assignments");
+  if (invalidAssignment) return reject("invalid_assignment");
+  if (!completed) return reject("response_not_completed");
+  if (assignment === null) return reject("assignment_missing");
+  diagnose(traceId, {
+    stage: "extraction",
+    outcome: "accepted",
+    assignmentBytes: Buffer.byteLength(assignment),
+  });
+  return assignment;
 }
 
 async function requestRecovery(
@@ -418,7 +489,15 @@ async function requestRecovery(
   envelope: AgentEnvelope,
   options: AgentTaskRecoveryOptions,
   abortSignal?: AbortSignal,
+  traceId?: string,
 ): Promise<string | null> {
+  const startedAt = Date.now();
+  const recoveryModel = options.model ?? DEFAULT_AGENT_TASK_RECOVERY_MODEL;
+  diagnose(traceId, {
+    stage: "fetch",
+    outcome: "started",
+    recoveryModel: sanitizeLogMetadataString(recoveryModel) ?? DEFAULT_AGENT_TASK_RECOVERY_MODEL,
+  });
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(new DOMException("Agent task recovery timed out", "TimeoutError")),
@@ -431,14 +510,27 @@ async function requestRecovery(
     const response = await fetch(RECOVERY_ENDPOINT, {
       method: "POST",
       headers: admission.headers,
-      body: recoveryPayload(envelope, options.model ?? "gpt-5.6-sol"),
+      body: recoveryPayload(envelope, recoveryModel),
       signal,
       redirect: "error",
     });
     if (!response.ok) {
       try { await response.body?.cancel(); } catch { /* already closed */ }
+      diagnose(traceId, {
+        stage: "fetch",
+        outcome: "rejected",
+        reason: "upstream_http_status",
+        httpStatus: response.status,
+        durationMs: Date.now() - startedAt,
+      });
       return null;
     }
+    diagnose(traceId, {
+      stage: "fetch",
+      outcome: "accepted",
+      httpStatus: response.status,
+      durationMs: Date.now() - startedAt,
+    });
     const body = await readBoundedResponseBody(response, {
       signal,
       fatalUtf8: true,
@@ -447,9 +539,42 @@ async function requestRecovery(
       inactivityTimeoutMs: options.timeoutMs ?? 45_000,
       firstByteTimeoutMs: options.timeoutMs ?? 45_000,
     });
-    if (body.truncated || body.oversized || body.timedOut || !body.displaySafe) return null;
-    return assignmentFromRecoverySse(body.text, envelope);
-  } catch {
+    const bodyReason = body.truncated
+      ? "truncated"
+      : body.oversized
+        ? "oversized"
+        : body.timedOut
+          ? "timed_out"
+          : !body.displaySafe
+            ? "not_display_safe"
+            : null;
+    if (bodyReason) {
+      diagnose(traceId, {
+        stage: "response_body",
+        outcome: "rejected",
+        reason: bodyReason,
+        responseBytes: Buffer.byteLength(body.text),
+      });
+      return null;
+    }
+    diagnose(traceId, {
+      stage: "response_body",
+      outcome: "accepted",
+      responseBytes: Buffer.byteLength(body.text),
+    });
+    return assignmentFromRecoverySse(body.text, envelope, traceId);
+  } catch (error) {
+    const reason = error instanceof DOMException && error.name === "TimeoutError"
+      ? "timeout"
+      : abortSignal?.aborted
+        ? "caller_aborted"
+        : "fetch_error";
+    diagnose(traceId, {
+      stage: "fetch",
+      outcome: "failed",
+      reason,
+      durationMs: Date.now() - startedAt,
+    });
     return null;
   } finally {
     clearTimeout(timeout);
@@ -461,24 +586,46 @@ export async function recoverEncryptedAgentTask(
   input: unknown,
   options: AgentTaskRecoveryOptions,
   config: OcxConfig,
-  context: { parentThreadId?: string | null; abortSignal?: AbortSignal } = {},
+  context: { parentThreadId?: string | null; abortSignal?: AbortSignal; traceId?: string } = {},
 ): Promise<boolean> {
   // Admission is deliberately checked before cache access. A cache hit must not
   // turn this process into a plaintext oracle for an unauthenticated caller.
-  const admitted = admittedRecovery(req, input, config, context.parentThreadId);
+  const admitted = admittedRecovery(req, input, config, context.parentThreadId, context.traceId);
   if (!admitted) return false;
   const { admission, cacheKey, envelope } = admitted;
+  let resolverStarted = false;
   const assignment = await resolveCachedAgentTaskRecovery(
     cacheKey,
     options.cacheEntries ?? 200,
-    signal => requestRecovery(admission, envelope, options, signal),
+    signal => {
+      resolverStarted = true;
+      return requestRecovery(admission, envelope, options, signal, context.traceId);
+    },
     context.abortSignal,
   );
-  if (!assignment) return false;
-  if (context.abortSignal?.aborted || !injectAssignment(input, envelope, assignment)) {
-    discardCachedAgentTaskRecovery(cacheKey);
+  if (!assignment) {
+    diagnose(context.traceId, {
+      stage: "cache",
+      outcome: "failed",
+      reason: resolverStarted ? "resolver_returned_no_assignment" : "shared_recovery_returned_no_assignment",
+    });
     return false;
   }
+  diagnose(context.traceId, {
+    stage: "cache",
+    outcome: "resolved",
+    reason: resolverStarted ? "resolver" : "cache_or_inflight",
+  });
+  if (context.abortSignal?.aborted || !injectAssignment(input, envelope, assignment)) {
+    discardCachedAgentTaskRecovery(cacheKey);
+    diagnose(context.traceId, {
+      stage: "injection",
+      outcome: "rejected",
+      reason: context.abortSignal?.aborted ? "caller_aborted" : "input_changed",
+    });
+    return false;
+  }
+  diagnose(context.traceId, { stage: "injection", outcome: "accepted" });
   return true;
 }
 

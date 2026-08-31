@@ -295,7 +295,9 @@ import {
 } from "../relay";
 import {
   agentTaskRecoveryConfig,
+  createAgentTaskRecoveryTraceId,
   discardEncryptedAgentTaskRecovery,
+  logAgentTaskRecoveryDiagnostic,
   recoverEncryptedAgentTask,
 } from "./agent-task-recovery";
 import { relaySseEagerBounded } from "../relay-eager";
@@ -2242,12 +2244,23 @@ export async function handleComboResponses(
 
   if (unreadableEncryptedAgentTask && !combo.targets.some(canDecryptUnreadableAgentTask)) {
     const recovery = agentTaskRecoveryConfig(config);
-    if (
-      (options.inboundWire ?? "responses") !== "responses"
-      || !isThreadSpawnRequest(req.headers)
-      || !recovery
-      || options.comboAttempt
-    ) {
+    const recoveryTraceId = createAgentTaskRecoveryTraceId();
+    const recoveryGateReason = (options.inboundWire ?? "responses") !== "responses"
+      ? "non_responses_wire"
+      : !isThreadSpawnRequest(req.headers)
+        ? "not_thread_spawn"
+        : !recovery
+          ? "disabled"
+          : options.comboAttempt
+            ? "combo_child"
+            : null;
+    logAgentTaskRecoveryDiagnostic({
+      traceId: recoveryTraceId,
+      stage: "gate",
+      outcome: recoveryGateReason ? "skipped" : "entered",
+      ...(recoveryGateReason ? { reason: recoveryGateReason } : {}),
+    });
+    if (recoveryGateReason || !recovery) {
       discardEncryptedAgentTaskRecovery(
         req,
         (body as { input?: unknown } | undefined)?.input,
@@ -2275,10 +2288,20 @@ export async function handleComboResponses(
         (body as { input?: unknown } | undefined)?.input,
         recovery,
         config,
-        { parentThreadId: inboundClientThreadId, abortSignal: options.abortSignal },
+        {
+          parentThreadId: inboundClientThreadId,
+          abortSignal: options.abortSignal,
+          traceId: recoveryTraceId,
+        },
       );
     } catch {
       recovered = false;
+      logAgentTaskRecoveryDiagnostic({
+        traceId: recoveryTraceId,
+        stage: "complete",
+        outcome: "failed",
+        reason: "unexpected_exception",
+      });
     }
     // Recovery has the same in-place input mutation contract as the direct routed path.
     if (
@@ -2293,6 +2316,11 @@ export async function handleComboResponses(
       );
       return unreadableEncryptedAgentTaskResponse();
     }
+    logAgentTaskRecoveryDiagnostic({
+      traceId: recoveryTraceId,
+      stage: "complete",
+      outcome: "recovered",
+    });
     comboPayloadReadable = true;
     comboReplaySnapshot.recoveredPlaintext = true;
   } else {
@@ -2677,9 +2705,6 @@ async function handleResponsesInner(
       onRequestBodyRead: undefined,
     });
   }
-  let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
-    (body as { input?: unknown } | undefined)?.input,
-  );
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
   const cursorClientThreadId = codexPoolAffinityKey(req.headers);
   const originalBody = body;
@@ -2701,6 +2726,9 @@ async function handleResponsesInner(
   const previousResponseInputExpanded = options.comboReplaySnapshot?.previousResponseInputExpanded
     ?? (body !== originalBody
       && typeof (body as { previous_response_id?: unknown }).previous_response_id === "string");
+  let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
+    (body as { input?: unknown } | undefined)?.input,
+  );
 
   // Spawn-message compatibility (both directions): agent_message task payloads ride in
   // encrypted_content slots as plaintext. Rewrite them to input_text on the RAW body BEFORE
@@ -3000,15 +3028,28 @@ async function handleResponsesInner(
   }
 
   // Native fallback can consume ciphertext, so recover only after final route selection.
-  if (
-    inboundWire === "responses"
-    &&
-    threadSpawn
-    && unreadableEncryptedAgentTask
-    && agentTaskRecovery
+  const agentTaskRecoveryTraceId = unreadableEncryptedAgentTask
     && !isCanonicalOpenAiForwardProvider(route.provider)
-    && !options.comboAttempt
-  ) {
+    ? createAgentTaskRecoveryTraceId()
+    : undefined;
+  const agentTaskRecoveryGateReason = inboundWire !== "responses"
+    ? "non_responses_wire"
+    : !threadSpawn
+      ? "not_thread_spawn"
+      : !agentTaskRecovery
+        ? "disabled"
+        : options.comboAttempt
+          ? "combo_child"
+          : null;
+  if (agentTaskRecoveryTraceId) {
+    logAgentTaskRecoveryDiagnostic({
+      traceId: agentTaskRecoveryTraceId,
+      stage: "gate",
+      outcome: agentTaskRecoveryGateReason ? "skipped" : "entered",
+      ...(agentTaskRecoveryGateReason ? { reason: agentTaskRecoveryGateReason } : {}),
+    });
+  }
+  if (agentTaskRecoveryTraceId && !agentTaskRecoveryGateReason && agentTaskRecovery) {
     let recovered = false;
     try {
       recovered = await recoverEncryptedAgentTask(
@@ -3016,10 +3057,20 @@ async function handleResponsesInner(
         (body as { input?: unknown } | undefined)?.input,
         agentTaskRecovery,
         config,
-        { parentThreadId, abortSignal: options.abortSignal },
+        {
+          parentThreadId,
+          abortSignal: options.abortSignal,
+          traceId: agentTaskRecoveryTraceId,
+        },
       );
     } catch {
       recovered = false;
+      logAgentTaskRecoveryDiagnostic({
+        traceId: agentTaskRecoveryTraceId,
+        stage: "complete",
+        outcome: "failed",
+        reason: "unexpected_exception",
+      });
     }
     if (recovered) {
       unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
@@ -3126,10 +3177,35 @@ async function handleResponsesInner(
               );
             }
           }
+          logAgentTaskRecoveryDiagnostic({
+            traceId: agentTaskRecoveryTraceId,
+            stage: "complete",
+            outcome: "recovered",
+          });
         } catch {
           unreadableEncryptedAgentTask = true;
+          logAgentTaskRecoveryDiagnostic({
+            traceId: agentTaskRecoveryTraceId,
+            stage: "reparse",
+            outcome: "rejected",
+            reason: "parse_or_selection_failed",
+          });
         }
+      } else {
+        logAgentTaskRecoveryDiagnostic({
+          traceId: agentTaskRecoveryTraceId,
+          stage: "complete",
+          outcome: "failed",
+          reason: "recovered_input_still_unreadable",
+        });
       }
+    } else {
+      logAgentTaskRecoveryDiagnostic({
+        traceId: agentTaskRecoveryTraceId,
+        stage: "complete",
+        outcome: "failed",
+        reason: "recovery_returned_false",
+      });
     }
   }
 

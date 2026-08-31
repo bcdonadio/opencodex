@@ -88,7 +88,7 @@ Les règles d’admission et de conservation sont volontairement strictes :
 - seul un appelant Codex natif qui présente une paire jeton Bearer/compte ChatGPT concordante est admissible. Cette forme d’identifiant est celle du fournisseur canonique `openai` avec `authMode: "forward"`. La récupération utilise exclusivement la paire de la requête entrante et ne lui substitue jamais une authentification par clé d’API, l’identifiant d’un autre fournisseur ou un autre compte Codex ;
 - les appelants qui utilisent `x-opencodex-api-key`, `x-api-key`, des identifiants d’API génériques ou un secret d’admission du proxy continuent de recevoir l’erreur `unreadable_encrypted_agent_task` existante ;
 - les identifiants ChatGPT bruts sont envoyés uniquement au point de terminaison ChatGPT codé en dur. Ils ne sont jamais placés dans le corps de la requête, les journaux, les clés de cache ou la requête destinée au fournisseur. La portée du cache en mémoire n’utilise qu’un condensat, calculé avec une clé aléatoire propre au processus, de l’identifiant et du compte de l’appelant ;
-- la requête de récupération ne transmet que `authorization`, le `chatgpt-account-id` concordant, `originator` et, facultativement, les métadonnées `openai-beta` et `user-agent`. opencodex définit lui-même `content-type` et `accept` ; aucun autre en-tête de l’appelant ne franchit cette limite ;
+- la requête de récupération ne transmet que `authorization`, le `chatgpt-account-id` concordant et, facultativement, les métadonnées `openai-beta` et `user-agent`. L’`originator` entrant est ignoré plutôt que transmis ; cette requête de récupération uniquement génère localement `originator: codex_cli_rs`. opencodex définit lui-même `content-type` et `accept` ; aucun autre en-tête de l’appelant ne franchit cette limite ;
 - le texte en clair récupéré n’est jamais journalisé ni conservé. Le cache propre au processus est cloisonné par identifiant, fil parent et texte chiffré ; il expire après 15 minutes et est limité à la fois par le nombre d’entrées configuré (200 par défaut, 512 au maximum) et par une taille totale de 8 MiB ;
 - toute enveloppe mal formée, tout échec de récupération, dépassement de délai ou échec de validation conserve l’erreur fermée existante. Une annulation par le client renvoie 499. Aucun des deux chemins n’envoie le texte chiffré au fournisseur routé.
 
@@ -102,7 +102,7 @@ Ce mécanisme ne protège pas contre un autre processus exécuté sous le même 
 {
   "agentTaskRecovery": {
     "enabled": true,
-    "model": "gpt-5.6-sol",
+    "model": "gpt-5.6-terra",
     "timeoutMs": 45000,
     "cacheEntries": 200
   }

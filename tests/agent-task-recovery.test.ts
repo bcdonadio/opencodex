@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createTranslatorBudget } from "../src/lib/translator-budget";
+import {
+  clearResponseStateForTests,
+  clearResponseStateMemoryForTests,
+  rememberResponseState,
+} from "../src/responses/state";
 import { warnAgentTaskRecoveryStartup } from "../src/server";
+import { handleResponses } from "../src/server/responses";
 import { resetAgentTaskRecoveryState } from "../src/server/responses/agent-task-recovery";
 import { agentTaskRecoveryWaiterCountForTests } from "../src/server/responses/agent-task-recovery-cache";
 import {
@@ -19,14 +25,36 @@ import {
   SECOND_FERNET_TASK,
 } from "./helpers/agent-task-recovery";
 
+const AGENT_TASK_RECOVERY_LOG_PREFIX = "[opencodex] agent-task-recovery ";
+
+async function captureAgentTaskRecoveryDiagnostics(
+  run: () => Promise<void>,
+): Promise<{ events: Array<Record<string, unknown>>; raw: string }> {
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    await run();
+  } finally {
+    console.warn = originalWarn;
+  }
+  const matching = warnings.filter(line => line.startsWith(AGENT_TASK_RECOVERY_LOG_PREFIX));
+  return {
+    events: matching.map(line => JSON.parse(line.slice(AGENT_TASK_RECOVERY_LOG_PREFIX.length))),
+    raw: matching.join("\n"),
+  };
+}
+
 describe("agent task recovery (opt-in, default off)", () => {
   beforeEach(() => {
+    clearResponseStateMemoryForTests();
     resetAgentTaskRecoveryState();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
     resetAgentTaskRecoveryState();
+    clearResponseStateForTests();
   });
 
   test("keeps the disabled fail-fast response byte-identical to the absent feature", async () => {
@@ -125,6 +153,71 @@ describe("agent task recovery (opt-in, default off)", () => {
     }
   });
 
+  test("logs the exact stage that prevents encrypted task recovery", async () => {
+    const noSpawnHeaders = codexHeaders();
+    noSpawnHeaders.delete("x-openai-subagent");
+    globalThis.fetch = (async () => {
+      throw new Error("a rejected recovery path must not reach any upstream");
+    }) as typeof fetch;
+    const skipped = await captureAgentTaskRecoveryDiagnostics(async () => {
+      const response = await post(routedConfig(), "xai/grok-4.5", encryptedInput(), noSpawnHeaders);
+      expect(response.status).toBe(400);
+    });
+    expect(skipped.events).toContainEqual(expect.objectContaining({
+      stage: "gate",
+      outcome: "skipped",
+      reason: "not_thread_spawn",
+    }));
+
+    resetAgentTaskRecoveryState();
+    const proxyHeaders = codexHeaders("acct-proxy-log", { "x-api-key": "proxy-secret-log" });
+    const rejected = await captureAgentTaskRecoveryDiagnostics(async () => {
+      const response = await post(
+        routedConfig(),
+        "xai/grok-4.5",
+        encryptedInput({ ciphertext: SECOND_FERNET_TASK }),
+        proxyHeaders,
+      );
+      expect(response.status).toBe(400);
+    });
+    expect(rejected.events).toContainEqual(expect.objectContaining({
+      stage: "admission",
+      outcome: "rejected",
+      reason: "api_key_header",
+    }));
+
+    resetAgentTaskRecoveryState();
+    let recoveryFetches = 0;
+    globalThis.fetch = (async (input) => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response("data: {not-json}\n\ndata: [DONE]\n\n", { status: 200 });
+      }
+      throw new Error("malformed recovery must not reach the routed provider");
+    }) as typeof fetch;
+    const failedMidway = await captureAgentTaskRecoveryDiagnostics(async () => {
+      const response = await post(routedConfig(), "xai/grok-4.5", encryptedInput(), codexHeaders());
+      expect(response.status).toBe(400);
+    });
+    expect(recoveryFetches).toBe(1);
+    expect(failedMidway.events).toContainEqual(expect.objectContaining({
+      stage: "fetch",
+      outcome: "started",
+    }));
+    expect(failedMidway.events).toContainEqual(expect.objectContaining({
+      stage: "extraction",
+      outcome: "rejected",
+      reason: "malformed_sse",
+    }));
+
+    const raw = [skipped.raw, rejected.raw, failedMidway.raw].join("\n");
+    expect(raw).not.toContain(FERNET_TASK);
+    expect(raw).not.toContain(SECOND_FERNET_TASK);
+    expect(raw).not.toContain("acct-proxy-log");
+    expect(raw).not.toContain("proxy-secret-log");
+    expect(raw).not.toContain("Bearer");
+  });
+
   test("baseline: encrypted routed task still fails when recovery returns no assignment", async () => {
     const fetchedUrls: string[] = [];
     globalThis.fetch = (async (input) => {
@@ -144,6 +237,59 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(json.error?.code).toBe("unreadable_encrypted_agent_task");
     expect(fetchedUrls.length).toBeGreaterThan(0);
     expect(fetchedUrls[0]).toContain("chatgpt.com/backend-api/codex");
+  });
+
+  test("uses the Terra default recovery model and logs a sanitized fetch-start diagnostic", async () => {
+    let recoveryModel = "";
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryModel = JSON.parse(typeof init?.body === "string" ? init.body : "{}").model;
+        return new Response(recoverySse("Recover with the Terra default."), { status: 200 });
+      }
+      return providerResponse();
+    }) as typeof fetch;
+
+    const diagnostics = await captureAgentTaskRecoveryDiagnostics(async () => {
+      const response = await post(routedConfig({ enabled: true }), "xai/grok-4.5", encryptedInput(), codexHeaders());
+      expect(response.status).toBe(200);
+    });
+
+    expect(recoveryModel).toBe("gpt-5.6-terra");
+    expect(diagnostics.events).toContainEqual(expect.objectContaining({
+      stage: "fetch",
+      outcome: "started",
+      recoveryModel: "gpt-5.6-terra",
+    }));
+    expect(diagnostics.raw).not.toContain(FERNET_TASK);
+    expect(diagnostics.raw).not.toContain("acct-caller");
+  });
+
+  test("honors an explicit Sol recovery model override", async () => {
+    let recoveryModel = "";
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryModel = JSON.parse(typeof init?.body === "string" ? init.body : "{}").model;
+        return new Response(recoverySse("Recover with the Sol override."), { status: 200 });
+      }
+      return providerResponse();
+    }) as typeof fetch;
+
+    const diagnostics = await captureAgentTaskRecoveryDiagnostics(async () => {
+      const response = await post(
+        routedConfig({ enabled: true, model: "gpt-5.6-sol" }),
+        "xai/grok-4.5",
+        encryptedInput({ taskName: "/root/sol-override" }),
+        codexHeaders("acct-sol-override"),
+      );
+      expect(response.status).toBe(200);
+    });
+
+    expect(recoveryModel).toBe("gpt-5.6-sol");
+    expect(diagnostics.events).toContainEqual(expect.objectContaining({
+      stage: "fetch",
+      outcome: "started",
+      recoveryModel: "gpt-5.6-sol",
+    }));
   });
 
   test("authenticated ChatGPT recovery accepts the decrypted payload without a duplicated routing envelope", async () => {
@@ -177,6 +323,54 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(forwardedBodies[1]).toContain("Implement the focused regression test.");
     expect(forwardedBodies[1]).not.toContain(FERNET_TASK);
     expect(forwardedBodies[1].match(/Message Type: NEW_TASK/g)).toHaveLength(1);
+  });
+
+  test("recovers an encrypted routed task materialized from previous_response_id", async () => {
+    const assignment = "Recover the continued GPT child assignment.";
+    rememberResponseState(
+      { model: "xai/grok-4.5", input: encryptedInput() },
+      { id: "resp_encrypted_parent", status: "completed", output: [] },
+      undefined,
+      { force: true },
+    );
+
+    const fetchedUrls: string[] = [];
+    const forwardedBodies: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      fetchedUrls.push(url);
+      if (url.includes("chatgpt.com")) {
+        return new Response(recoverySse(assignment), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      forwardedBodies.push(typeof init?.body === "string" ? init.body : "");
+      return providerResponse();
+    }) as typeof fetch;
+
+    const headers = codexHeaders();
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...Object.fromEntries(headers),
+      },
+      body: JSON.stringify({
+        model: "xai/grok-4.5",
+        previous_response_id: "resp_encrypted_parent",
+        input: [],
+        stream: false,
+      }),
+    }), routedConfig(), { model: "", provider: "" });
+
+    expect(response.status).toBe(200);
+    expect(fetchedUrls).toHaveLength(2);
+    expect(fetchedUrls[0]).toContain("chatgpt.com/backend-api/codex/responses");
+    expect(forwardedBodies).toHaveLength(1);
+    expect(forwardedBodies[0]).toContain(assignment);
+    expect(forwardedBodies[0]).not.toContain(FERNET_TASK);
+    expect(forwardedBodies[0].match(/Message Type: NEW_TASK/g)).toHaveLength(1);
   });
 
   test("charges namespaced tool bridge maps only once across recovery reparse", async () => {
