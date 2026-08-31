@@ -1313,6 +1313,9 @@ function getPoolAccountPlanForSelection(
   if (accountId === MAIN_CODEX_ACCOUNT_ID && selectionOptions?.nativeMainSelectionOnly === true) {
     return undefined;
   }
+  if (accountId === MAIN_CODEX_ACCOUNT_ID && selectionOptions?.callerBackedMainSelection === true) {
+    return undefined;
+  }
   return getPoolAccountPlan(config, accountId);
 }
 
@@ -1321,7 +1324,7 @@ function sharedStateSelectionOptions(
   selectionOptions?: CodexAccountUsabilityOptions,
 ): Pick<
   CodexAccountUsabilityOptions,
-  "nativeMainSelectionOnly" | "isMainAccountTokenLive"
+  "nativeMainSelectionOnly" | "isMainAccountTokenLive" | "callerBackedMainSelection" | "preserveCallerMainPin" | "suppressSharedStateMutations"
 > | undefined {
   if (!selectionOptions) return undefined;
   return {
@@ -1330,6 +1333,15 @@ function sharedStateSelectionOptions(
       : {}),
     ...(selectionOptions.isMainAccountTokenLive
       ? { isMainAccountTokenLive: selectionOptions.isMainAccountTokenLive }
+      : {}),
+    ...(selectionOptions.callerBackedMainSelection !== undefined
+      ? { callerBackedMainSelection: selectionOptions.callerBackedMainSelection }
+      : {}),
+    ...(selectionOptions.preserveCallerMainPin !== undefined
+      ? { preserveCallerMainPin: selectionOptions.preserveCallerMainPin }
+      : {}),
+    ...(selectionOptions.suppressSharedStateMutations !== undefined
+      ? { suppressSharedStateMutations: selectionOptions.suppressSharedStateMutations }
       : {}),
   };
 }
@@ -1564,11 +1576,14 @@ function releaseDrainedCodexAccountPin(
   config: OcxConfig,
   selectionOptions?: Pick<
     CodexAccountUsabilityOptions,
-    "nativeMainSelectionOnly" | "isMainAccountTokenLive"
+    "nativeMainSelectionOnly" | "isMainAccountTokenLive" | "callerBackedMainSelection" | "preserveCallerMainPin"
   >,
 ): void {
   const pinned = pinnedCodexAccountId(config);
   if (pinned === undefined) return;
+  if (pinned === MAIN_CODEX_ACCOUNT_ID
+    && (selectionOptions?.callerBackedMainSelection === true
+      || selectionOptions?.preserveCallerMainPin === true)) return;
   const knownUnavailable = isAccountNeedsReauth(pinned) || isCodexAccountPaused(config, pinned);
   if (knownUnavailable) {
     clearCodexAccountPin(config);
@@ -1887,7 +1902,9 @@ export function resolveCodexAccountForThreadDetailed(
   // revive after quota resets. Independent model scopes must never persist a
   // change to shared routing state.
   if (!isIndependentCodexQuotaScope(quotaScope)) {
-    releaseDrainedCodexAccountPin(config, sharedStateSelectionOptions(selectionOptions));
+    if (selectionOptions?.suppressSharedStateMutations !== true) {
+      releaseDrainedCodexAccountPin(config, sharedStateSelectionOptions(selectionOptions));
+    }
   }
   const sharedActiveBeforeSelection = getEffectiveActiveCodexAccountId(config);
   const preserveSharedSelectionForModelDetour = modelScopedSelection && (
@@ -1965,9 +1982,13 @@ export function resolveCodexAccountForThreadDetailed(
       const cooler = reevaluateAffinityQuota(entry, config, now, quotaScope, selectionOptions);
       if (cooler) {
         if (!isIndependentCodexQuotaScope(quotaScope)) {
-          setActiveCodexAccount(config, cooler);
+          if (selectionOptions?.suppressSharedStateMutations !== true) {
+            setActiveCodexAccount(config, cooler);
+          }
         }
-        bindThreadAffinity(threadId, cooler, now, quotaScope); // rebinds + resets clocks
+        if (selectionOptions?.suppressSharedStateMutations !== true) {
+          bindThreadAffinity(threadId, cooler, now, quotaScope); // rebinds + resets clocks
+        }
         return { status: "selected", accountId: cooler };
       }
       return { status: "selected", accountId: entry.accountId };
@@ -1996,14 +2017,15 @@ export function resolveCodexAccountForThreadDetailed(
     config,
     threadId,
     now,
-    true,
+    selectionOptions?.suppressSharedStateMutations !== true,
     quotaScope,
     strategySelectionOptions,
-    !modelScopedSelection,
-    !preserveExistingModelScopedAffinity,
+    !modelScopedSelection && selectionOptions?.suppressSharedStateMutations !== true,
+    !preserveExistingModelScopedAffinity && selectionOptions?.suppressSharedStateMutations !== true,
   );
   if (strategyPick) {
-    if (threadId && preserveExistingModelScopedAffinity) {
+    if (threadId && preserveExistingModelScopedAffinity
+      && selectionOptions?.suppressSharedStateMutations !== true) {
       bindModelDetourAffinity(threadId, strategyPick, now, modelId, quotaScope);
     }
     if (
@@ -2011,7 +2033,9 @@ export function resolveCodexAccountForThreadDetailed(
       && !preserveSharedSelectionForModelDetour
       && !isIndependentCodexQuotaScope(quotaScope)
     ) {
-      promoteActiveCodexAccount(config, strategyPick);
+      if (selectionOptions?.suppressSharedStateMutations !== true) {
+        promoteActiveCodexAccount(config, strategyPick);
+      }
     }
     return { status: "selected", accountId: strategyPick };
   }
@@ -2029,7 +2053,9 @@ export function resolveCodexAccountForThreadDetailed(
       return { status: "none" };
     }
     if (!isIndependentCodexQuotaScope(quotaScope) && !modelScopedSelection) {
-      setActiveCodexAccount(config, selected);
+      if (selectionOptions?.suppressSharedStateMutations !== true) {
+        setActiveCodexAccount(config, selected);
+      }
     }
     active = selected;
   }
@@ -2050,7 +2076,9 @@ export function resolveCodexAccountForThreadDetailed(
         && preserveSharedSelectionForModelDetour
         && activeHealthyForSharedSelection;
       if (!isIndependentCodexQuotaScope(quotaScope) && !modelOnlyMove) {
-        setActiveCodexAccount(config, fallback);
+        if (selectionOptions?.suppressSharedStateMutations !== true) {
+          setActiveCodexAccount(config, fallback);
+        }
       }
       active = fallback;
     } else if (
@@ -2084,7 +2112,9 @@ export function resolveCodexAccountForThreadDetailed(
       !preserveSharedSelectionForModelDetour
       && !isIndependentCodexQuotaScope(quotaScope)
     ) {
-      rememberActiveCodexAccount(config, preempted);
+      if (selectionOptions?.suppressSharedStateMutations !== true) {
+        rememberActiveCodexAccount(config, preempted);
+      }
     }
     active = preempted;
   }
@@ -2094,7 +2124,7 @@ export function resolveCodexAccountForThreadDetailed(
     now,
     quotaScope,
     selectionOptions,
-    !preserveSharedSelectionForModelDetour,
+    !preserveSharedSelectionForModelDetour && selectionOptions?.suppressSharedStateMutations !== true,
   );
   active = applyFailureFailover(
     config,
@@ -2102,7 +2132,7 @@ export function resolveCodexAccountForThreadDetailed(
     now,
     quotaScope,
     selectionOptions,
-    !preserveSharedSelectionForModelDetour,
+    !preserveSharedSelectionForModelDetour && selectionOptions?.suppressSharedStateMutations !== true,
   );
   if (!isCodexAccountUsable(config, active, selectionOptions)) {
     return hasConfiguredPoolAccount(config, active, selectionOptions)
@@ -2115,7 +2145,7 @@ export function resolveCodexAccountForThreadDetailed(
       ? { status: "selected", accountId: active }
       : { status: "none" };
   }
-  if (threadId) {
+  if (threadId && selectionOptions?.suppressSharedStateMutations !== true) {
     if (preserveExistingModelScopedAffinity) {
       bindModelDetourAffinity(threadId, active, now, modelId, quotaScope);
     } else {

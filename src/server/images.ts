@@ -431,6 +431,7 @@ export async function handleImages(
   if (canUseOpenAiForward) {
     try {
       forward = await resolveFirstUsableOpenAiSidecar(candidates.forwardCandidates, req.headers, config, {
+        modelId: typeof model === "string" ? model : undefined,
         beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
       });
       if (forward) logCtx.provider = formatCodexProviderForLog(forward.providerName, codexLogAccountId(forward.authContext), config);

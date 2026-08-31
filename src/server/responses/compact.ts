@@ -44,6 +44,7 @@ import {
   applyCodexAuthContextToProvider,
   CodexMainProfileDrainingError,
   headersForCodexAuthContext,
+  isCallerBackedMainPoolContext,
   materializeCodexUpstreamAuthAsync,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
@@ -88,6 +89,8 @@ import {
 import {
   ForwardAdmissionCredentialError,
   hasForwardableCodexBearer,
+  isDataPlaneAdmissionSecret,
+  isProxyAdmissionSecret,
   validateForwardAdmissionCredential,
 } from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
@@ -229,7 +232,7 @@ async function refreshNativeMainCompactContext(args: {
   | { ok: false; response: Response }
 > {
   const { req, authCtx, provider, codexAccountMode, substituteMainCredential, options } = args;
-  if (authCtx.kind !== "main-pool") {
+  if (authCtx.kind !== "main-pool" || isCallerBackedMainPoolContext(authCtx)) {
     return { ok: false, response: formatErrorResponse(401, "authentication_error", "No native main credential to refresh") };
   }
   try {
@@ -382,6 +385,7 @@ async function resolveAlternateCompactContext(args: {
       requestScopedMainCredential: hasForwardableCodexBearer(req.headers, config),
       beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
     });
+    if (isCallerBackedMainPoolContext(authCtx)) return null;
     if (!authCtx.accountId || authCtx.accountId === excludeAccountId) return null;
     const provider = applyCodexAuthContextToProvider(route.provider, authCtx, route.codexAccountMode);
     const headers = new Headers({ "content-type": "application/json" });
@@ -484,6 +488,11 @@ export async function handleResponsesCompact(
   admission?: DataPlaneAdmission,
   options: HandleResponsesCompactOptions = {},
 ): Promise<Response> {
+  const inboundBearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim() ?? "";
+  const authorizationBearerIsProxySecret = !!inboundBearer && isProxyAdmissionSecret(inboundBearer, config);
+  const authorizationBearerIsDataPlaneSecret = !!inboundBearer && isDataPlaneAdmissionSecret(inboundBearer, config);
+  const requestScopedMainCredentialAtIngress = admission?.source !== "bearer"
+    && hasForwardableCodexBearer(req.headers, config);
   let body: unknown;
   try {
     body = await readJsonRequestBody(req);
@@ -536,15 +545,23 @@ export async function handleResponsesCompact(
     logCtx.resolvedModel = route.modelId;
   }
 
+  if (authorizationBearerIsProxySecret && !authorizationBearerIsDataPlaneSecret) {
+    return formatErrorResponse(401, "authentication_error", "OpenCodex API credentials cannot be forwarded upstream");
+  }
+
   // #1686: a bearer-presented admission secret is one of ours, so the stored main credential
   // is substituted below instead of the caller bearer being forwarded.
-  // #2132: and only when the route is a native Codex one, which is the only route that can
-  // consume that credential. See the longer note in core.ts resolveResponsesCodexAuth.
-  const substituteMainCredential = admission?.source === "bearer"
-    && route.codexAccountMode !== undefined;
+  // #2132: only a canonical ChatGPT forward transport can consume that credential. Match
+  // core.ts's transport predicate so a custom-named canonical row cannot forward our own
+  // admission secret merely because provider-name lookup yields no Codex account mode.
+  const substituteMainCredential = (admission?.source === "bearer"
+    || (isCanonicalOpenAiForwardProvider(route.provider) && authorizationBearerIsProxySecret))
+    && (route.codexAccountMode !== undefined || isCanonicalOpenAiForwardProvider(route.provider));
   const requestScopedMainCredential = route.codexAccountMode !== undefined
+    && route.codexAccountId === undefined
+    && isCanonicalOpenAiForwardProvider(route.provider)
     && !substituteMainCredential
-    && hasForwardableCodexBearer(req.headers, config);
+    && requestScopedMainCredentialAtIngress;
   if (route.codexAccountMode === "direct" && !substituteMainCredential) {
     try { validateForwardAdmissionCredential(req.headers, config); }
     catch (err) {
@@ -611,6 +628,23 @@ export async function handleResponsesCompact(
         if (override) {
           headers.set("authorization", `Bearer ${override.accessToken}`);
           headers.set("chatgpt-account-id", override.chatgptAccountId);
+        }
+      } else if (substituteMainCredential) {
+        authCtx = await resolveCodexAuthContext(req.headers, config, "direct", {
+          substituteMainCredentialForDirect: true,
+          modelId: selectedModelId,
+          beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
+          signal: req.signal,
+          nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
+        });
+        const selected = await materializeCodexUpstreamAuthAsync(req.headers, authCtx, {
+          substituteMainCredential: true,
+          signal: req.signal,
+          nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
+        });
+        for (const name of FORWARD_HEADERS) {
+          const value = selected.get(name);
+          if (value) headers.set(name, value);
         }
       }
     } catch (err) {

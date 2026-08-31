@@ -770,6 +770,38 @@ describe("subagent fallback final-route normalization", () => {
 });
 
 describe("native fallback account preview", () => {
+  test("an unentitled caller-backed pinned main uses configured fallback without losing the pin", async () => {
+    const now = 1_800_000_000_000;
+    Date.now = () => now;
+    const cfg = poolNativePlusRoutedConfig({
+      activeCodexAccountId: "__main__",
+      activeCodexAccountPinned: "__main__",
+      subagentModelFallback: ["xai/grok-4.5"],
+      codexAccounts: [
+        { id: "main", email: "main@example.test", isMain: true },
+      ],
+    });
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
+    mockUpstream(capture, { "caller-account": [] });
+
+    const response = await postSpawn(
+      cfg,
+      { model: "gpt-5.6-sol", input: readableAgentInput(), stream: false },
+      {},
+      logCtx,
+      { "chatgpt-account-id": "caller-account" },
+    );
+
+    expect(response.status).toBe(200);
+    expect((logCtx as unknown as Record<string, unknown>).subagentModelFallbackTo).toBe("xai/grok-4.5");
+    expect(capture.urls).toHaveLength(1);
+    expect(capture.urls[0]).toContain("api.x.ai");
+    expect(capture.bodies[0]).toContain('"model":"grok-4.5"');
+    expect(cfg.activeCodexAccountId).toBe("__main__");
+    expect(cfg.activeCodexAccountPinned).toBe("__main__");
+  });
+
   test("fallback preview and final auth use their own entitlement snapshots", async () => {
     const now = 1_800_000_000_000;
     Date.now = () => now;

@@ -526,6 +526,7 @@ export async function resolveLiveRelay(
   if (candidates.forwardCandidates.length > 0) {
     try {
       forward = await resolveFirstUsableOpenAiSidecar(candidates.forwardCandidates, req.headers, config, {
+        modelId: new URL(req.url).searchParams.get("model") ?? undefined,
         beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
       });
       if (forward) {

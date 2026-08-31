@@ -210,6 +210,7 @@ async function startPoolRetryHarness(
     omitCredentialAccountIds?: string[];
     combos?: OcxConfig["combos"];
     modelRosterByAccount?: Record<string, string[]>;
+    ownedNativeMain?: boolean;
   } = {},
 ): Promise<PoolRetryHarness> {
   await removeTestDirBestEffort(TEST_DIR);
@@ -301,7 +302,9 @@ async function startPoolRetryHarness(
   }
   for (const accountId of options.reauthAccountIds ?? []) markAccountNeedsReauth(accountId);
 
-  const server = startServer(0);
+  const server = startServer(0, options.ownedNativeMain
+    ? { inspectNativeCodexOwnership: ownedServiceHomeInspection("pool retry harness") }
+    : undefined);
   return {
     config,
     dispatches,
@@ -2295,6 +2298,78 @@ describe("server local API auth", () => {
       await upstream.stop(true);
     }
   });
+
+  test("manual main selection uses a keyring caller on Responses, compact, and WebSocket", async () => {
+    const harness = await startPoolRetryHarness(async (_accountId, request) => {
+      const body = await request.clone().json().catch(() => ({})) as { stream?: unknown };
+      if (body.stream === true) {
+        return new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_caller_main_ws","status":"completed","output":[]}}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      return Response.json({
+        id: "resp_caller_main",
+        object: "response",
+        status: "completed",
+        output: [],
+      });
+    }, {
+      activeAccountId: MAIN_CODEX_ACCOUNT_ID,
+      websockets: true,
+      ownedNativeMain: true,
+    });
+    const callerHeaders = {
+      authorization: "Bearer caller-keyring-token",
+      "chatgpt-account-id": "caller-keyring-account",
+    };
+    const select = await originalGlobalFetch(new URL("/api/codex-auth/active", harness.server.url), {
+      method: "PUT",
+      headers: managementHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ accountId: MAIN_CODEX_ACCOUNT_ID }),
+    });
+    expect(select.status).toBe(200);
+
+    const wsUrl = new URL("/v1/responses", harness.server.url);
+    wsUrl.protocol = "ws:";
+    let ws: WebSocket | undefined;
+    try {
+      expect((await harness.request({ model: "gpt-test", headers: callerHeaders })).status).toBe(200);
+      expect((await harness.request({ model: "gpt-test", path: "/v1/responses/compact", headers: callerHeaders })).status).toBe(200);
+      ws = new WebSocket(wsUrl, { headers: callerHeaders } as unknown as string[]);
+      await new Promise<void>((resolve, reject) => {
+        const frames: string[] = [];
+        const timer = setTimeout(() => reject(new Error(`caller main websocket timeout: ${frames.join(" | ")}`)), watchdogMs(5_000));
+        ws!.addEventListener("open", () => {
+          ws!.send(JSON.stringify({ type: "response.create", model: "gpt-test", input: "hello" }));
+        }, { once: true });
+        ws!.addEventListener("message", event => {
+          const frame = String(event.data);
+          frames.push(frame);
+          if (!frame.includes("response.completed")) return;
+          clearTimeout(timer);
+          resolve();
+        });
+        ws!.addEventListener("error", () => reject(new Error("caller main websocket failed")), { once: true });
+      });
+
+      expect(harness.dispatches).toEqual([
+        "caller-keyring-account",
+        "caller-keyring-account",
+        "caller-keyring-account",
+      ]);
+      expect(getRequestLogEntries().slice(-3).map(entry => entry.accountLogLabel))
+        .toEqual(["main", "main", "main"]);
+      const active = await originalGlobalFetch(new URL("/api/codex-auth/active", harness.server.url), {
+        headers: managementHeaders(),
+      }).then(response => response.json()) as { activeCodexAccountId?: string; pinnedAccountId?: string | null };
+      expect(active.activeCodexAccountId).toBe(MAIN_CODEX_ACCOUNT_ID);
+      expect(active.pinnedAccountId).toBe(MAIN_CODEX_ACCOUNT_ID);
+    } finally {
+      ws?.close();
+      await stopPoolRetryHarness(harness);
+    }
+  }, { timeout: SERVER_BUDGET_MS });
 
   test("websocket routed adapter records completed usage in request logs", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });

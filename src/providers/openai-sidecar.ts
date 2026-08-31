@@ -3,6 +3,7 @@ import {
   CodexPoolAuthenticationError,
   headersForCodexAuthContext,
   hasCallerCodexBearer,
+  isCallerBackedMainPoolContext,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
   type CodexAccountSelectionAdmission,
@@ -10,7 +11,11 @@ import {
 } from "../codex/auth-context";
 import { recordCodexUpstreamOutcome, type CodexUpstreamOutcome } from "../codex/routing";
 import { extractAccountId } from "../oauth/chatgpt";
-import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "../server/auth-cors";
+import {
+  ForwardAdmissionCredentialError,
+  hasForwardableCodexBearer,
+  validateForwardAdmissionCredential,
+} from "../server/auth-cors";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
 import {
   CODEX_FORWARD_BASE_URL,
@@ -99,6 +104,7 @@ export async function resolveFirstUsableOpenAiSidecar(
   config: OcxConfig,
   options: {
     exactAccount?: ExactOpenAiSidecarAccount;
+    modelId?: string;
     beginCodexAccountSelection?: () => CodexAccountSelectionAdmission | undefined;
   } = {},
 ): Promise<ResolvedOpenAiForwardSidecar | undefined> {
@@ -151,13 +157,19 @@ export async function resolveFirstUsableOpenAiSidecar(
       if (!callerBearerMayBeForwarded || !hasCallerCodexBearer(incomingHeaders)) continue;
       const headers = directSidecarHeaders(incomingHeaders);
       if (!headers) continue;
+      const authContext = await resolveCodexAuthContext(incomingHeaders, config, "direct", {
+        modelId: options.modelId,
+      });
       return {
         ...candidate,
-        authContext: { kind: "main", accountId: null },
+        authContext,
         headers,
       };
     }
     const authContext = await resolveCodexAuthContext(incomingHeaders, config, candidate.accountMode, {
+      modelId: options.modelId,
+      requestScopedMainCredential: callerBearerMayBeForwarded
+        && hasForwardableCodexBearer(incomingHeaders, config),
       beginCodexAccountSelection: options.beginCodexAccountSelection,
     });
     if (!isCodexAuthContextUsable(authContext, config)) continue;
@@ -165,7 +177,8 @@ export async function resolveFirstUsableOpenAiSidecar(
       ...candidate,
       authContext,
       headers: headersForCodexAuthContext(incomingHeaders, authContext),
-      ...(authContext.kind === "pool" || authContext.kind === "main-pool"
+      ...((authContext.kind === "pool" || authContext.kind === "main-pool")
+        && !isCallerBackedMainPoolContext(authContext)
         ? {
           recordOutcome: (outcome: CodexUpstreamOutcome) => recordCodexUpstreamOutcome(
             config,

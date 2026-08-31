@@ -1402,7 +1402,7 @@ describe("server combo failover 030 activation matrix", () => {
       { provider: "a", model: "m1" },
       { provider: "b", model: "m2" },
     ]);
-    config.webSearchSidecar = { enabled: true, backend: "openai" };
+    config.webSearchSidecar = { enabled: true, backend: "openai", model: "gpt-test" };
     const response = await post(config, {
       stream: true,
       tools: [{ type: "web_search" }],

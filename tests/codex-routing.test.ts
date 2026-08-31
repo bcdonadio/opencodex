@@ -2360,6 +2360,33 @@ describe("codex account selection order", () => {
     expect(getEffectiveActiveCodexAccountId(config)).toBe("b");
   });
 
+  test("suppressed round-robin resolution does not advance the shared cursor", () => {
+    const config = makeConfig({
+      accountPoolStrategy: "round-robin",
+      accountPoolStickyLimit: 1,
+      activeCodexAccountId: "b",
+    });
+    resetCodexRoutingForManualSelection("b");
+
+    const suppressed = resolveCodexAccountForThreadDetailed(
+      null,
+      config,
+      Date.now(),
+      "shared",
+      { suppressSharedStateMutations: true },
+    );
+    expect(suppressed.status).toBe("selected");
+
+    // A request that lost commit authority may observe the next account, but the
+    // following authoritative request must still receive that same next turn.
+    expect(resolveCodexAccountForThreadDetailed(
+      null,
+      config,
+      Date.now() + 1,
+      "shared",
+    )).toEqual(suppressed);
+  });
+
   test.each(["fill-first", "round-robin"] as const)(
     "%s preserves healthy shared active, pin, and affinity during a model-only detour",
     (strategy) => {

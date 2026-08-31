@@ -107,6 +107,7 @@ export async function handleSearch(
   try {
     upstream = await resolveFirstUsableOpenAiSidecar(candidates, req.headers, config, {
       exactAccount,
+      modelId: exactAccount?.modelId ?? (typeof model === "string" ? model : undefined),
       beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
     });
     if (!upstream) {

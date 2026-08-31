@@ -4,8 +4,14 @@ import { runWithWebSearch as runWithWebSearchProduction, type WebSearchLoopDeps 
 import { describeImage } from "../src/vision/describe";
 import { parseRequest } from "../src/responses/parser";
 import { headersForCodexAuthContext } from "../src/codex/auth-context";
+import {
+  listOpenAiForwardSidecarCandidates,
+  resolveFirstUsableOpenAiSidecar,
+} from "../src/providers/openai-sidecar";
+import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
+import { getCodexUpstreamHealth } from "../src/codex/routing";
 import type { ProviderAdapter } from "../src/adapters/base";
-import type { OcxProviderConfig } from "../src/types";
+import type { OcxConfig, OcxProviderConfig } from "../src/types";
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
 
 function runWithWebSearch(
@@ -573,6 +579,44 @@ describe("sidecar abort propagation", () => {
 
     expect(seenAuthorization).toBe("Bearer pool-token");
     expect(seenAccount).toBe("pool_acc");
+  });
+
+  test("OpenAI sidecars use caller-backed main without recording shared account outcomes", async () => {
+    const config: OcxConfig = {
+      defaultProvider: "openai",
+      providers: {
+        openai: {
+          adapter: "openai-responses",
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          authMode: "forward",
+          codexAccountMode: "pool",
+        },
+      },
+      codexAccounts: [],
+      activeCodexAccountId: MAIN_CODEX_ACCOUNT_ID,
+      activeCodexAccountPinned: MAIN_CODEX_ACCOUNT_ID,
+    };
+    const incoming = new Headers({
+      authorization: "Bearer caller-keyring-token",
+      "chatgpt-account-id": "caller-keyring-account",
+    });
+
+    const resolved = await resolveFirstUsableOpenAiSidecar(
+      listOpenAiForwardSidecarCandidates(config),
+      incoming,
+      config,
+      { modelId: "gpt-test" },
+    );
+
+    expect(resolved?.authContext).toMatchObject({
+      kind: "main-pool",
+      accountId: MAIN_CODEX_ACCOUNT_ID,
+      credentialSource: "caller",
+    });
+    expect(resolved?.headers.get("authorization")).toBe("Bearer caller-keyring-token");
+    expect(resolved?.headers.get("chatgpt-account-id")).toBe("caller-keyring-account");
+    expect(resolved?.recordOutcome).toBeUndefined();
+    expect(getCodexUpstreamHealth(MAIN_CODEX_ACCOUNT_ID)).toBeNull();
   });
 
   test("vision sidecar uses selected pool auth instead of inbound main auth", async () => {

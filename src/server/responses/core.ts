@@ -143,6 +143,7 @@ import {
   CodexPoolAuthenticationError,
   CodexThreadAffinityExpiredError,
   headersForCodexAuthContext,
+  isCallerBackedMainPoolContext,
   materializeCodexUpstreamAuthAsync,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
@@ -155,6 +156,7 @@ import {
 import {
   entitledCodexAccountIdsForModel,
   invalidateCodexModelEntitlementsForAccount,
+  isDirectCallerEntitledToCodexModel,
   resolveCodexModelEntitlements,
 } from "../../codex/model-entitlements";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../../codex/catalog/native-models";
@@ -168,6 +170,7 @@ import {
   computeQuotaCooldown,
   codexQuotaScopeForModel,
   formatCodexProviderForLog,
+  getEffectiveActiveCodexAccountId,
   handOffThreadAffinityGeneration,
   previewCodexAccountForRequest,
   recordCodexUpstreamOutcome,
@@ -188,6 +191,8 @@ import {
 import {
   ForwardAdmissionCredentialError,
   hasForwardableCodexBearer,
+  isDataPlaneAdmissionSecret,
+  isProxyAdmissionSecret,
   validateForwardAdmissionCredential,
 } from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
@@ -395,7 +400,8 @@ export function sidecarOutcomeRecorder(
   config: OcxConfig,
   authCtx: CodexAuthContext,
 ): ((outcome: CodexUpstreamOutcome) => void) | undefined {
-  return authCtx.kind === "pool" || authCtx.kind === "main-pool"
+  return (authCtx.kind === "pool" || authCtx.kind === "main-pool")
+    && !isCallerBackedMainPoolContext(authCtx)
     ? outcome => recordCodexUpstreamOutcome(config, authCtx.accountId, outcome, {
       threadId: authCtx.affinityKey,
       fixedAccount: authCtx.fixedAccount,
@@ -506,8 +512,9 @@ function bindRouteReasoningReplayScope(args: {
       durableSalt,
     );
   } else if (provider.authMode === "forward") {
-    const poolContext = args.codexAuthContext?.kind === "pool"
-      || args.codexAuthContext?.kind === "main-pool"
+    const poolContext = (args.codexAuthContext?.kind === "pool"
+      || args.codexAuthContext?.kind === "main-pool")
+      && !isCallerBackedMainPoolContext(args.codexAuthContext)
       ? args.codexAuthContext
       : undefined;
     credentialIdentity = reasoningReplayCodexCredentialIdentity({
@@ -828,6 +835,7 @@ function nonEmptyProviderApiKey(provider: OcxProviderConfig): string | undefined
 }
 
 function isFixedCodexAccount(authCtx: CodexAuthContext): boolean {
+  if (isCallerBackedMainPoolContext(authCtx)) return true;
   return (authCtx.kind === "pool" || authCtx.kind === "main-pool")
     && authCtx.fixedAccount === true;
 }
@@ -837,6 +845,7 @@ export function usesCodexForwardPoolAuth(
   provider: OcxProviderConfig,
 ): authCtx is Extract<CodexAuthContext, { kind: "pool" | "main-pool" }> {
   return (authCtx.kind === "pool" || authCtx.kind === "main-pool")
+    && !isCallerBackedMainPoolContext(authCtx)
     && provider.authMode === "forward" && provider.adapter === "openai-responses";
 }
 
@@ -926,6 +935,7 @@ interface CodexPoolAccountRetryArgs {
     translatorBudget: TranslatorBudget;
     turnAdmissionLease?: AdmissionLease;
     resolveCodexModelEntitlements?: typeof resolveCodexModelEntitlements;
+    requestScopedMainCredential?: boolean;
   };
   firstAuthCtx: Extract<CodexAuthContext, { kind: "pool" | "main-pool" }>;
   firstResponse: Response;
@@ -970,13 +980,15 @@ async function resolveCodexRetryModelEntitlements(
   config: OcxConfig,
   resolver: typeof resolveCodexModelEntitlements,
   turnAdmissionLease?: AdmissionLease,
+  requestScopedMainCredential = false,
 ): Promise<Awaited<ReturnType<typeof resolveCodexModelEntitlements>>> {
   // The initial auth selection has already released its admission before the first
   // response arrives. Re-enter for every refresh so profile switching cannot overlap
   // credential discovery, and omit main entirely when a drain or recovery owns it.
   const selectionAdmission = codexAccountSelectionForTurn(turnAdmissionLease)?.();
   const nativeMainReadsForbidden = isNativeMainTrafficBlocked()
-    || selectionAdmission?.mainProfileDraining === true;
+    || selectionAdmission?.mainProfileDraining === true
+    || requestScopedMainCredential;
   try {
     return await resolver(config, {
       excludeAccountIds: nativeMainReadsForbidden
@@ -1077,6 +1089,7 @@ async function retryCodexPoolOnAlternateAccount(
   } = args;
   const inboundWire = options.inboundWire ?? "responses";
   const entitlementResolver = options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements;
+  const requestScopedMainCredential = options.requestScopedMainCredential === true;
   let retryAuthCtx: CodexAuthContext | undefined;
   if (outcomeStatus === 400 && ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(route.modelId)) {
     invalidateCodexModelEntitlementsForAccount(firstAuthCtx.accountId);
@@ -1086,6 +1099,7 @@ async function retryCodexPoolOnAlternateAccount(
         config,
         entitlementResolver,
         options.turnAdmissionLease,
+        requestScopedMainCredential,
       );
     } catch (error) {
       await firstResponse.body?.cancel().catch(() => undefined);
@@ -1112,7 +1126,7 @@ async function retryCodexPoolOnAlternateAccount(
         {
           excludeAccountId: firstAuthCtx.accountId,
           modelId: route.modelId,
-          requestScopedMainCredential: hasForwardableCodexBearer(req.headers, config),
+          requestScopedMainCredential,
           beginCodexAccountSelection: codexAccountSelectionForTurn(options.turnAdmissionLease),
           resolveCodexModelEntitlements: entitlementResolver,
         },
@@ -1132,6 +1146,7 @@ async function retryCodexPoolOnAlternateAccount(
   if (retryAuthCtx?.kind !== "pool" && retryAuthCtx?.kind !== "main-pool") {
     return { kind: "no-alternate" };
   }
+  const callerBackedAlternate = isCallerBackedMainPoolContext(retryAuthCtx);
 
   const quotaMeta = { ...codexQuotaOutcomeMeta(firstResponse), ...(await codexDenialOutcomeMeta(firstResponse)) };
   if (outcomeStatus === 429 || outcomeStatus === 402) {
@@ -1155,9 +1170,17 @@ async function retryCodexPoolOnAlternateAccount(
       probeQuotaScope: codexProbeQuotaScope(firstAuthCtx),
       writerGeneration: firstAuthCtx.writerGeneration,
       // Retry already advanced the RR ring via excludeAccountId — reuse for promotion.
-      ...(retryAuthCtx.accountId ? { promoteAccountId: retryAuthCtx.accountId } : {}),
+      ...(!callerBackedAlternate && retryAuthCtx.accountId
+        ? { promoteAccountId: retryAuthCtx.accountId }
+        : {}),
     });
   };
+  if (callerBackedAlternate) {
+    // A request-owned credential cannot become a Pool retry target, but the stored
+    // account that actually returned the rejection must still retain its health/quota evidence.
+    recordFirstOutcome();
+    return { kind: "no-alternate" };
+  }
   // Only a combo reset-derived outcome is deferred. Retry-After, defaults, and
   // ordinary requests must block the first account before the alternate send.
   if (!deferFirstOutcome) recordFirstOutcome();
@@ -1255,6 +1278,7 @@ async function retryCodexPoolOnAlternateAccount(
           config,
           entitlementResolver,
           options.turnAdmissionLease,
+          requestScopedMainCredential,
         );
       } catch (error) {
         await upstreamResponse.body?.cancel().catch(() => undefined);
@@ -1408,6 +1432,14 @@ export interface HandleResponsesOptions {
   onCodexAuthContextResolved?: (context: CodexAuthContext | undefined) => void;
   /** Internal deterministic seam for account-gated native fallback tests. */
   resolveCodexModelEntitlements?: typeof resolveCodexModelEntitlements;
+  /** Request-scoped caller entitlement seam shared by preview and final auth. */
+  isDirectCallerEntitledToCodexModel?: typeof isDirectCallerEntitledToCodexModel;
+  /** Immutable caller/proxy classification captured before the first upstream send. */
+  requestScopedMainCredential?: boolean;
+  /** Whether ingress Authorization carried an OpenCodex admission secret. */
+  authorizationBearerIsProxySecret?: boolean;
+  /** Whether that secret belongs to the data-plane admission domain. */
+  authorizationBearerIsDataPlaneSecret?: boolean;
   recordTerminalOutcomes?: boolean;
   setTerminalOutcomeRecorder?: (recorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined) => void;
   onNativePassthroughTerminal?: (status: ResponsesTerminalStatus) => void;
@@ -1700,11 +1732,23 @@ async function resolveResponsesCodexAuth(
     // bug; the transport is the authority, because the transport is what actually carries the
     // header. A key-authenticated routed provider is still not canonical-forward, so #2132's
     // no-ChatGPT-login install keeps working.
-    const substituteMainCredential = options.admission?.source === "bearer"
+    const canonicalForwardTransport = isCanonicalOpenAiForwardProvider(route.provider);
+    if (options.authorizationBearerIsProxySecret === true
+      && options.authorizationBearerIsDataPlaneSecret !== true) {
+      throw new ForwardAdmissionCredentialError();
+    }
+    const proxyBearerCannotBeForwarded = options.authorizationBearerIsProxySecret === true;
+    const substituteMainCredential = (
+      options.admission?.source === "bearer"
+      || (canonicalForwardTransport && proxyBearerCannotBeForwarded)
+    )
       && (route.codexAccountMode !== undefined || isCanonicalOpenAiForwardProvider(route.provider));
-    const requestScopedMainCredential = route.codexAccountMode !== undefined
+    const requestScopedMainCredential = options.requestScopedMainCredential ?? (route.codexAccountMode !== undefined
+      && route.codexAccountId === undefined
+      && isCanonicalOpenAiForwardProvider(route.provider)
       && !substituteMainCredential
-      && hasForwardableCodexBearer(req.headers, config);
+      && hasForwardableCodexBearer(req.headers, config));
+    options.requestScopedMainCredential = requestScopedMainCredential;
     if (route.codexAccountMode === "direct" && !substituteMainCredential) {
       validateForwardAdmissionCredential(req.headers, config);
     }
@@ -1717,6 +1761,7 @@ async function resolveResponsesCodexAuth(
         requestScopedMainCredential,
         beginCodexAccountSelection: codexAccountSelectionForTurn(options.turnAdmissionLease),
         resolveCodexModelEntitlements: options.resolveCodexModelEntitlements,
+        isDirectCallerEntitledToCodexModel: options.isDirectCallerEntitledToCodexModel,
         signal: options.abortSignal,
         nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
       });
@@ -1874,7 +1919,7 @@ async function refreshNativeMainForwardAuth(args: {
   | { ok: false; response: Response }
 > {
   const { req, route, authCtx, substituteMainCredential, options } = args;
-  if (authCtx.kind !== "main-pool") {
+  if (authCtx.kind !== "main-pool" || isCallerBackedMainPoolContext(authCtx)) {
     return { ok: false, response: formatErrorResponse(401, "authentication_error", "No native main credential to refresh") };
   }
   try {
@@ -2573,8 +2618,21 @@ export async function handleResponses(
 ): Promise<Response> {
   const ownsBudget = options.translatorBudget === undefined;
   const translatorBudget = options.translatorBudget ?? createTranslatorBudget();
+  const requestScopedMainCredential = options.requestScopedMainCredential
+    ?? (options.admission?.source !== "bearer" && hasForwardableCodexBearer(req.headers, config));
+  const inboundBearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim() ?? "";
+  const authorizationBearerIsProxySecret = options.authorizationBearerIsProxySecret
+    ?? (!!inboundBearer && isProxyAdmissionSecret(inboundBearer, config));
+  const authorizationBearerIsDataPlaneSecret = options.authorizationBearerIsDataPlaneSecret
+    ?? (!!inboundBearer && isDataPlaneAdmissionSecret(inboundBearer, config));
   try {
-    const response = await handleResponsesInner(req, config, logCtx, { ...options, translatorBudget });
+    const response = await handleResponsesInner(req, config, logCtx, {
+      ...options,
+      translatorBudget,
+      requestScopedMainCredential,
+      authorizationBearerIsProxySecret,
+      authorizationBearerIsDataPlaneSecret,
+    });
     return ownsBudget ? finalizeOwnedTranslatorBudget(response, translatorBudget) : response;
   } catch (error) {
     if (ownsBudget) translatorBudget.dispose();
@@ -2812,11 +2870,41 @@ async function handleResponsesInner(
     ? codexAccountSelectionForTurn(options.turnAdmissionLease)?.()
     : undefined;
   const nativeMainRecoveryBlocked = isNativeMainTrafficBlocked();
+  const requestScopedMainCredential = options.requestScopedMainCredential === true
+    && route.codexAccountMode !== undefined
+    && route.codexAccountId === undefined
+    && isCanonicalOpenAiForwardProvider(route.provider);
+  const previewCallerBackedMain = requestScopedMainCredential
+    && config.activeCodexAccountId === MAIN_CODEX_ACCOUNT_ID
+    && getEffectiveActiveCodexAccountId(config) === MAIN_CODEX_ACCOUNT_ID
+    && (config.activeCodexAccountPinned === undefined
+      || config.activeCodexAccountPinned === MAIN_CODEX_ACCOUNT_ID);
+  const callerEntitlementByModel = new Map<string, Promise<boolean>>();
+  const resolveCallerEntitlement = options.isDirectCallerEntitledToCodexModel
+    ?? isDirectCallerEntitledToCodexModel;
+  const callerIsEntitledToModel = (modelId: string): Promise<boolean> => {
+    let pending = callerEntitlementByModel.get(modelId);
+    if (!pending) {
+      pending = resolveCallerEntitlement(req.headers, modelId);
+      callerEntitlementByModel.set(modelId, pending);
+    }
+    return pending;
+  };
+  if (requestScopedMainCredential) {
+    options.isDirectCallerEntitledToCodexModel = (_headers, modelId) => callerIsEntitledToModel(modelId);
+  }
+  const callerBackedMainKeepsRequestedModel = previewCallerBackedMain
+    && await callerIsEntitledToModel(route.modelId);
   const nativeMainReadsForbidden = nativeMainRecoveryBlocked
-    || previewSelectionAdmission?.mainProfileDraining === true;
+    || previewSelectionAdmission?.mainProfileDraining === true
+    || requestScopedMainCredential;
   const previewSelectionOptions = {
     nativeMainSelectionOnly: !nativeMainRecoveryBlocked
       && previewSelectionAdmission?.mainProfileDraining === true,
+    isMainAccountTokenLive: requestScopedMainCredential ? () => false : undefined,
+    callerBackedMainSelection: previewCallerBackedMain,
+    preserveCallerMainPin: requestScopedMainCredential,
+    suppressSharedStateMutations: requestScopedMainCredential,
   };
   let selectedForwardHeaders = req.headers;
   let subagentFallbackAccountId = config.activeCodexAccountId ?? null;
@@ -2842,6 +2930,7 @@ async function handleResponsesInner(
   if (
     threadSpawn
     && !options.comboAttempt
+    && !callerBackedMainKeepsRequestedModel
     && (route.codexAccountId === undefined || initialSubagentFallbackChain !== null)
   ) {
     // The final resolveCodexAuthContext binds under codexQuotaScopeForModel(route.modelId),
@@ -2971,6 +3060,10 @@ async function handleResponsesInner(
               const recoverySelectionOptions = {
                 nativeMainSelectionOnly: !recoveryNativeMainBlocked
                   && recoverySelectionAdmission?.mainProfileDraining === true,
+                isMainAccountTokenLive: requestScopedMainCredential ? () => false : undefined,
+                callerBackedMainSelection: previewCallerBackedMain,
+                preserveCallerMainPin: requestScopedMainCredential,
+                suppressSharedStateMutations: requestScopedMainCredential,
               };
               const recoveryNow = Date.now();
               // Carry the entitlement filter through recovery too (#2509/#2623). The scope was
@@ -3138,7 +3231,9 @@ async function handleResponsesInner(
   // per-request fail-closed sentinel after the final provider and credential are known.
   const identityScope = codexLogAccountId(authCtx);
   if (identityScope) parsed._cursorIdentityScope = identityScope;
-  subagentFallbackAccountId = authCtx.kind === "pool" || authCtx.kind === "main-pool"
+  subagentFallbackAccountId = isCallerBackedMainPoolContext(authCtx)
+    ? null
+    : authCtx.kind === "pool" || authCtx.kind === "main-pool"
     ? authCtx.accountId
     : config.activeCodexAccountId ?? null;
 
@@ -3407,36 +3502,41 @@ async function handleResponsesInner(
     );
   }
 
-  let openAiSidecar: ResolvedOpenAiForwardSidecar | undefined;
+  let openAiVisionSidecar: ResolvedOpenAiForwardSidecar | undefined;
+  let openAiSearchSidecar: ResolvedOpenAiForwardSidecar | undefined;
   const needsOpenAiVision = shouldResolveOpenAiVisionSidecar(config, route.provider, route.modelId, parsed);
   const needsOpenAiSearch = shouldResolveOpenAiWebSearchSidecar(config, parsed, isPassthrough);
   if (needsOpenAiVision || needsOpenAiSearch) {
-    try {
-      openAiSidecar = await resolveFirstUsableOpenAiSidecar(
-        listOpenAiForwardSidecarCandidates(config),
-        req.headers,
-        config,
-        {
-          // Account-qualified native routes are passthrough, so their in-turn helper is vision.
-          // Scope its cooldown and outcome to the helper model, not the routed text model.
-          ...(route.codexAccountId !== undefined
-            ? { exactAccount: { accountId: route.codexAccountId, modelId: resolveOpenAiVisionModel(config) } }
-            : {}),
-          beginCodexAccountSelection: codexAccountSelectionForTurn(options.turnAdmissionLease),
-        },
-      );
-    } catch (err) {
-      // Sidecars are optional helpers for an otherwise independent routed turn.
-      // An unavailable/cooling/expired Multi credential disables the helper; it
-      // must not turn a valid routed-provider request into a Codex-auth failure.
-      if (
-        !(err instanceof CodexPoolAuthenticationError)
-        && !(err instanceof CodexAuthContextError)
-        && !(err instanceof CodexAccountCooldownError)
-        && !(err instanceof CodexThreadAffinityExpiredError)
-        && !(err instanceof CodexMainProfileDrainingError)
-      ) throw err;
-    }
+    const candidates = listOpenAiForwardSidecarCandidates(config);
+    const byModel = new Map<string, Promise<ResolvedOpenAiForwardSidecar | undefined>>();
+    const resolveForModel = (modelId: string): Promise<ResolvedOpenAiForwardSidecar | undefined> => {
+      let pending = byModel.get(modelId);
+      if (pending) return pending;
+      pending = resolveFirstUsableOpenAiSidecar(candidates, req.headers, config, {
+        ...(route.codexAccountId !== undefined
+          ? { exactAccount: { accountId: route.codexAccountId, modelId } }
+          : {}),
+        modelId,
+        beginCodexAccountSelection: codexAccountSelectionForTurn(options.turnAdmissionLease),
+      }).catch((err: unknown) => {
+        // Sidecars are optional helpers for an otherwise independent routed turn.
+        // An unavailable/cooling/expired credential disables only this helper.
+        if (
+          err instanceof CodexPoolAuthenticationError
+          || err instanceof CodexAuthContextError
+          || err instanceof CodexAccountCooldownError
+          || err instanceof CodexThreadAffinityExpiredError
+          || err instanceof CodexMainProfileDrainingError
+        ) return undefined;
+        throw err;
+      });
+      byModel.set(modelId, pending);
+      return pending;
+    };
+    const visionModel = resolveOpenAiVisionModel(config);
+    const searchModel = config.webSearchSidecar?.model ?? "gpt-5.6-luna";
+    if (needsOpenAiVision) openAiVisionSidecar = await resolveForModel(visionModel);
+    if (needsOpenAiSearch) openAiSearchSidecar = await resolveForModel(searchModel);
   }
 
   // Vision sidecar: the routed model can't see images (provider.noVisionModels). Describe each
@@ -3450,13 +3550,13 @@ async function handleResponsesInner(
     || req.headers.get("x-opencodex-vision-describe") === "1";
   const visionPlan = visionDescribeTerminal
     ? undefined
-    : planVisionSidecar(config, route.provider, route.modelId, parsed, openAiSidecar);
-  const recordSidecarOutcome = openAiSidecar?.recordOutcome;
+    : planVisionSidecar(config, route.provider, route.modelId, parsed, openAiVisionSidecar);
+  const recordSidecarOutcome = openAiVisionSidecar?.recordOutcome;
   if (visionPlan) {
     await describeImagesInPlace(
       parsed,
       visionPlan,
-      openAiSidecar?.headers ?? selectedForwardHeaders,
+      openAiVisionSidecar?.headers ?? selectedForwardHeaders,
       options.abortSignal,
       recordSidecarOutcome,
       translatorBudget,
@@ -4873,7 +4973,7 @@ async function handleResponsesInner(
   //   - runTurn: image bridge may run (it supports runTurn); web-search is skipped so runTurn
   //     can proceed for web-search-only turns
   const wsPlan = !routedCompaction
-    ? planWebSearch(config, parsed, false, route.provider, route.modelId, openAiSidecar)
+    ? planWebSearch(config, parsed, false, route.provider, route.modelId, openAiSearchSidecar)
     : undefined;
   const imgPlan = !routedCompaction ? await planImageBridge(config, parsed, route.provider) : undefined;
   const vidPlan = !routedCompaction ? await planVideoBridge(config, parsed, route.provider) : undefined;

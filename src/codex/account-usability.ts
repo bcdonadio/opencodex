@@ -15,6 +15,12 @@ export interface CodexAccountUsabilityOptions {
   nativeMainSelectionOnly?: boolean;
   /** Test seam for proving whether routing attempted a physical native-token read. */
   isMainAccountTokenLive?: typeof isMainAccountTokenLive;
+  /** Validated caller bearer represents a manually selected main without auth.json reads. */
+  callerBackedMainSelection?: boolean;
+  /** Preserve a caller-owned Main pin when this model detours to a stored Pool account. */
+  preserveCallerMainPin?: boolean;
+  /** This request may choose a model detour but must not publish shared routing state. */
+  suppressSharedStateMutations?: boolean;
   /** Confirmed account ids for an account-gated model; omitted for ordinary native models. */
   modelEligibleAccountIds?: ReadonlySet<string>;
 }
@@ -32,6 +38,7 @@ export function isCodexAccountUsable(
     // A legacy pool row with the sentinel makes an active `__main__` ambiguous.
     // Fail closed until the authenticated compatibility-delete path removes it.
     if (hasLegacyMainCodexPoolAccount(config.codexAccounts)) return false;
+    if (options.callerBackedMainSelection) return true;
     if (isAccountNeedsReauth(accountId) && !hasMainAccountRefreshGrant()) return false;
     // A selection-only caller owns the recovery/drain fence and will reject main
     // before reservation or token materialization. Treat cached main as a routing

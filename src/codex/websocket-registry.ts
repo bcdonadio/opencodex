@@ -32,6 +32,7 @@ const socketsByAccount = new Map<string, Set<ServerWebSocket<WsData>>>();
 
 function trackedAccountId(ws: ServerWebSocket<WsData>): string | null {
   const ctx = ws.data.authContext;
+  if (ctx?.kind === "main-pool" && ctx.credentialSource === "caller") return null;
   return ctx?.kind === "pool" || ctx?.kind === "main-pool" ? ctx.accountId : null;
 }
 

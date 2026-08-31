@@ -1014,6 +1014,11 @@ test("routed Claude requests give OpenAI sidecars main auth without leaking it t
   const forward = Bun.serve({
     port: 0,
     async fetch(req) {
+      if (req.method === "GET" && new URL(req.url).pathname === "/models") {
+        return Response.json({
+          models: [{ slug: "gpt-5.6-luna", supported_in_api: true }],
+        });
+      }
       const body = await req.json() as Record<string, any>;
       const kind = Array.isArray(body.tools) && body.tools.some((tool: Record<string, unknown>) => tool.type === "web_search")
         ? "web-search"
