@@ -296,9 +296,12 @@ import {
 import {
   agentTaskRecoveryConfig,
   createAgentTaskRecoveryTraceId,
+  discardAgentTaskRecoveryResult,
   discardEncryptedAgentTaskRecovery,
   logAgentTaskRecoveryDiagnostic,
   recoverEncryptedAgentTask,
+  verifyRecoveredAgentTaskDelivery,
+  type AgentTaskRecoveryResult,
 } from "./agent-task-recovery";
 import { relaySseEagerBounded } from "../relay-eager";
 import {
@@ -1475,6 +1478,8 @@ export interface HandleResponsesOptions {
   stripClaudeMainAuthForNoncanonicalForward?: boolean;
   /** Internal recursion guard; callers outside this module must not set it. */
   comboAttempt?: boolean;
+  /** Test-only seam: mutate recovered input between injection and delivery verification. */
+  recoveryDeliveryTestHook?: (input: unknown, result: AgentTaskRecoveryResult) => void;
   /** Internal combo handoff for one parent-validated continuation snapshot. */
   comboReplaySnapshot?: {
     sourceBody: unknown;
@@ -2225,6 +2230,7 @@ export async function handleComboResponses(
 
   const unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
+    { strictEnvelope: !!agentTaskRecoveryConfig(config) && isThreadSpawnRequest(req.headers) },
   );
   const canDecryptUnreadableAgentTask = (target: (typeof combo.targets)[number]): boolean => {
     const provider = config.providers[target.provider];
@@ -2241,6 +2247,7 @@ export async function handleComboResponses(
     comboPayloadReadable || !unreadableEncryptedAgentTask || canDecryptUnreadableAgentTask(target);
   const initialNow = Date.now();
   let pick: ReturnType<typeof pickComboTarget> = null;
+  let discardRecoveredComboCache = (): void => {};
 
   if (unreadableEncryptedAgentTask && !combo.targets.some(canDecryptUnreadableAgentTask)) {
     const recovery = agentTaskRecoveryConfig(config);
@@ -2281,9 +2288,16 @@ export async function handleComboResponses(
       );
       return comboUnavailableResponse(`No available targets for combo: ${comboId}`);
     }
-    let recovered = false;
+    let recoveryResult: AgentTaskRecoveryResult = { recovered: false };
+    let recoveryCacheDiscarded = false;
+    const discardRecoveryCache = (): void => {
+      if (recoveryCacheDiscarded || !recoveryResult.recovered) return;
+      discardAgentTaskRecoveryResult(recoveryResult);
+      recoveryCacheDiscarded = true;
+    };
+    discardRecoveredComboCache = discardRecoveryCache;
     try {
-      recovered = await recoverEncryptedAgentTask(
+      recoveryResult = await recoverEncryptedAgentTask(
         req,
         (body as { input?: unknown } | undefined)?.input,
         recovery,
@@ -2295,7 +2309,7 @@ export async function handleComboResponses(
         },
       );
     } catch {
-      recovered = false;
+      recoveryResult = { recovered: false };
       logAgentTaskRecoveryDiagnostic({
         traceId: recoveryTraceId,
         stage: "complete",
@@ -2303,11 +2317,15 @@ export async function handleComboResponses(
         reason: "unexpected_exception",
       });
     }
+    if (recoveryResult.recovered) {
+      options.recoveryDeliveryTestHook?.((body as { input?: unknown } | undefined)?.input, recoveryResult);
+    }
     // Recovery has the same in-place input mutation contract as the direct routed path.
     if (
-      !recovered
+      !recoveryResult.recovered
       || hasUnreadableEncryptedAgentTask((body as { input?: unknown } | undefined)?.input)
     ) {
+      discardRecoveryCache();
       discardEncryptedAgentTaskRecovery(
         req,
         (body as { input?: unknown } | undefined)?.input,
@@ -2316,6 +2334,25 @@ export async function handleComboResponses(
       );
       return unreadableEncryptedAgentTaskResponse();
     }
+    if (!verifyRecoveredAgentTaskDelivery((body as { input?: unknown } | undefined)?.input, recoveryResult)) {
+      discardRecoveryCache();
+      logAgentTaskRecoveryDiagnostic({
+        traceId: recoveryTraceId,
+        stage: "delivery",
+        outcome: "rejected",
+        reason: "reparse_mismatch",
+        assignmentBytes: recoveryResult.assignmentBytes,
+        assignmentFingerprint: recoveryResult.assignmentFingerprint,
+      });
+      return unreadableEncryptedAgentTaskResponse();
+    }
+    logAgentTaskRecoveryDiagnostic({
+      traceId: recoveryTraceId,
+      stage: "delivery",
+      outcome: "accepted",
+      assignmentBytes: recoveryResult.assignmentBytes,
+      assignmentFingerprint: recoveryResult.assignmentFingerprint,
+    });
     logAgentTaskRecoveryDiagnostic({
       traceId: recoveryTraceId,
       stage: "complete",
@@ -2339,7 +2376,10 @@ export async function handleComboResponses(
 
   let lastFailure: Response | null = null;
   while (pick) {
-    if (options.abortSignal?.aborted) return clientCancelledResponse();
+    if (options.abortSignal?.aborted) {
+      discardRecoveredComboCache();
+      return clientCancelledResponse();
+    }
     const childLog: RequestLogContext = {
       model: pick.target.model,
       provider: pick.target.provider,
@@ -2728,6 +2768,7 @@ async function handleResponsesInner(
       && typeof (body as { previous_response_id?: unknown }).previous_response_id === "string");
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
+    { strictEnvelope: !!agentTaskRecovery && isThreadSpawnRequest(req.headers) },
   );
 
   // Spawn-message compatibility (both directions): agent_message task payloads ride in
@@ -3049,10 +3090,18 @@ async function handleResponsesInner(
       ...(agentTaskRecoveryGateReason ? { reason: agentTaskRecoveryGateReason } : {}),
     });
   }
+  let discardRecoveredAgentTaskCache = (): void => {};
   if (agentTaskRecoveryTraceId && !agentTaskRecoveryGateReason && agentTaskRecovery) {
-    let recovered = false;
+    let recoveryResult: AgentTaskRecoveryResult = { recovered: false };
+    let recoveryCacheDiscarded = false;
+    const discardRecoveryCache = (): void => {
+      if (recoveryCacheDiscarded || !recoveryResult.recovered) return;
+      discardAgentTaskRecoveryResult(recoveryResult);
+      recoveryCacheDiscarded = true;
+    };
+    discardRecoveredAgentTaskCache = discardRecoveryCache;
     try {
-      recovered = await recoverEncryptedAgentTask(
+      recoveryResult = await recoverEncryptedAgentTask(
         req,
         (body as { input?: unknown } | undefined)?.input,
         agentTaskRecovery,
@@ -3064,7 +3113,7 @@ async function handleResponsesInner(
         },
       );
     } catch {
-      recovered = false;
+      recoveryResult = { recovered: false };
       logAgentTaskRecoveryDiagnostic({
         traceId: agentTaskRecoveryTraceId,
         stage: "complete",
@@ -3072,7 +3121,10 @@ async function handleResponsesInner(
         reason: "unexpected_exception",
       });
     }
-    if (recovered) {
+    if (recoveryResult.recovered) {
+      options.recoveryDeliveryTestHook?.((body as { input?: unknown } | undefined)?.input, recoveryResult);
+    }
+    if (recoveryResult.recovered) {
       unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
         (body as { input?: unknown } | undefined)?.input,
       );
@@ -3096,6 +3148,26 @@ async function handleResponsesInner(
             }
           }
           parsed = reparsed;
+          if (!verifyRecoveredAgentTaskDelivery(parsed, recoveryResult)) {
+            discardRecoveryCache();
+            unreadableEncryptedAgentTask = true;
+            logAgentTaskRecoveryDiagnostic({
+              traceId: agentTaskRecoveryTraceId,
+              stage: "delivery",
+              outcome: "rejected",
+              reason: "reparse_mismatch",
+              assignmentBytes: recoveryResult.assignmentBytes,
+              assignmentFingerprint: recoveryResult.assignmentFingerprint,
+            });
+            throw new Error("recovered delivery mismatch");
+          }
+          logAgentTaskRecoveryDiagnostic({
+            traceId: agentTaskRecoveryTraceId,
+            stage: "delivery",
+            outcome: "accepted",
+            assignmentBytes: recoveryResult.assignmentBytes,
+            assignmentFingerprint: recoveryResult.assignmentFingerprint,
+          });
           // The recovery mutated `body.input` in place, so `_rawBody` now carries decrypted task
           // text. Bar it from the continuation cache before any recording path can reach it —
           // that cache is persisted to disk, which would defeat the recovery cache's TTL.
@@ -3165,11 +3237,13 @@ async function handleResponsesInner(
               logCtx.routeDecision = route.routeDecision;
             } catch (err) {
               if (err instanceof NoAvailableComboTargetsError) {
+                discardRecoveryCache();
                 return comboUnavailableResponse(err.message);
               }
               if (err instanceof NoEligiblePolicyCandidateError) {
                 logCtx.routeDecision = err.trace;
               }
+              discardRecoveryCache();
               return formatErrorResponse(
                 404,
                 "invalid_request_error",
@@ -3183,6 +3257,7 @@ async function handleResponsesInner(
             outcome: "recovered",
           });
         } catch {
+          discardRecoveryCache();
           unreadableEncryptedAgentTask = true;
           logAgentTaskRecoveryDiagnostic({
             traceId: agentTaskRecoveryTraceId,
@@ -3192,6 +3267,7 @@ async function handleResponsesInner(
           });
         }
       } else {
+        discardRecoveryCache();
         logAgentTaskRecoveryDiagnostic({
           traceId: agentTaskRecoveryTraceId,
           stage: "complete",
@@ -3209,11 +3285,15 @@ async function handleResponsesInner(
     }
   }
 
-  if (options.abortSignal?.aborted) return clientCancelledResponse();
+  if (options.abortSignal?.aborted) {
+    discardRecoveredAgentTaskCache();
+    return clientCancelledResponse();
+  }
 
   // Encrypted child tasks may only reach the canonical native backend. This check
   // runs against the FINAL route so native-only fallback can rescue a routed primary.
   if (!isCanonicalOpenAiForwardProvider(route.provider) && unreadableEncryptedAgentTask) {
+    discardRecoveredAgentTaskCache();
     return unreadableEncryptedAgentTaskResponse();
   }
 
@@ -3224,6 +3304,7 @@ async function handleResponsesInner(
     hasUnexpandedPreviousResponse
     && isCanonicalOpenAiForwardProvider(route.provider)
   ) {
+    discardRecoveredAgentTaskCache();
     return formatErrorResponse(
       400,
       "invalid_request_error",
@@ -3251,7 +3332,10 @@ async function handleResponsesInner(
     logCtx.provider = `${route.providerName}-${route.codexAccountNamespace}`;
   }
 
-  if (options.abortSignal?.aborted) return clientCancelledResponse();
+  if (options.abortSignal?.aborted) {
+    discardRecoveredAgentTaskCache();
+    return clientCancelledResponse();
+  }
   // Refuse an input that cannot plausibly fit the model context window before spending auth,
   // circuit budget, or upstream bandwidth on a turn the provider will reject anyway (#1412).
   //

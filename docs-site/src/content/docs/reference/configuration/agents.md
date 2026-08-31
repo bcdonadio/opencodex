@@ -128,6 +128,8 @@ contains an otherwise unreadable Fernet payload, opencodex uses a raw Responses 
 to the fixed `https://chatgpt.com/backend-api/codex/responses` endpoint with forward-mode
 authentication. ChatGPT returns the plaintext assignment through a forced function call; opencodex
 then converts only that task item to a standard user message before routed-provider dispatch.
+The routed recovery message strips transport routing metadata and contains exactly one
+payload-only user text value.
 
 This is not local decryption and does not fix the Codex wire protocol. It depends on undocumented
 ChatGPT backend behavior and may stop working after a backend change. The recovered assignment is

@@ -4,7 +4,7 @@ import type { OcxConfig } from "../../types";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { sanitizeLogMetadataString } from "../../lib/redact";
 import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
-import { structurallyValidFernetTokens } from "./encrypted-payload";
+import { AGENT_MESSAGE_CONTROL_PREAMBLE, structurallyValidFernetTokens } from "./encrypted-payload";
 import {
   discardCachedAgentTaskRecovery,
   resetAgentTaskRecoveryCache,
@@ -28,6 +28,7 @@ const MAX_CIPHERTEXT_BYTES = 2 * 1024 * 1024;
 const MAX_ASSIGNMENT_BYTES = 2 * 1024 * 1024;
 const MAX_RECOVERY_RESPONSE_BYTES = 4 * 1024 * 1024;
 const CACHE_SCOPE_KEY = randomBytes(32);
+const ASSIGNMENT_FINGERPRINT_KEY = randomBytes(32);
 const AGENT_TASK_RECOVERY_LOG_PREFIX = "[opencodex] agent-task-recovery ";
 let recoveryTraceOrdinal = 0;
 
@@ -40,6 +41,7 @@ export type AgentTaskRecoveryDiagnosticStage =
   | "response_body"
   | "extraction"
   | "injection"
+  | "delivery"
   | "reparse"
   | "complete";
 
@@ -52,6 +54,7 @@ export interface AgentTaskRecoveryDiagnostic {
   httpStatus?: number;
   responseBytes?: number;
   assignmentBytes?: number;
+  assignmentFingerprint?: string;
   recoveryModel?: string;
 }
 
@@ -107,6 +110,26 @@ interface AgentEnvelope {
   recipient: string;
 }
 
+export type AgentTaskRecoveryResult =
+  | { recovered: false }
+  | {
+    recovered: true;
+    assignmentBytes: number;
+    assignmentFingerprint: string;
+    /** Internal cache key used only for fail-closed discard after delivery mismatch. */
+    cacheKey: string;
+  };
+
+function assignmentFingerprint(assignment: string): string {
+  return createHmac("sha256", ASSIGNMENT_FINGERPRINT_KEY).update(assignment).digest("hex");
+}
+
+function isControlPreambleOnly(text: string): boolean {
+  if (!/\[CXC-[A-Z0-9-]+\]/i.test(text)) return false;
+  const remaining = text.replace(new RegExp(AGENT_MESSAGE_CONTROL_PREAMBLE.source, "gi"), "").trim();
+  return remaining.length === 0;
+}
+
 const ROUTING_HEADER = /(?:^|\n)Message Type\s*:\s*(NEW_TASK)\s*\nTask name\s*:\s*(\S+)\s*\nSender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
 
 function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
@@ -142,7 +165,7 @@ function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
 
   for (let index = 0; index < content.length; index += 1) {
     const part = content[index] as { type?: unknown; text?: unknown; encrypted_content?: unknown } | null;
-    if (!part) continue;
+    if (!part || typeof part !== "object") return reject("extra_content_block");
     if (
       (part.type === "input_text" || part.type === "text")
       && typeof part.text === "string"
@@ -158,7 +181,11 @@ function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
         messageType = "NEW_TASK";
         taskName = match[2]!;
         sender = match[3]!;
+      } else if (!isControlPreambleOnly(part.text)) {
+        return reject("extra_text_block");
       }
+    } else if (part.type !== "encrypted_content") {
+      return reject("extra_content_block");
     }
     if (part.type !== "encrypted_content" || typeof part.encrypted_content !== "string") continue;
     encryptedPartCount += 1;
@@ -200,21 +227,36 @@ function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
 }
 
 function stripMatchingEnvelope(assignment: string, envelope: AgentEnvelope): string | null {
-  const match = ROUTING_HEADER.exec(assignment);
-  if (!match) return assignment;
+  let normalized = assignment;
+  // Recovery models may echo a recognized CXC control preamble before the
+  // routing envelope. These transport-only paragraphs are safe to remove;
+  // arbitrary prefixes remain invalid and are never silently discarded.
+  for (;;) {
+    const control = new RegExp(AGENT_MESSAGE_CONTROL_PREAMBLE.source, "i").exec(normalized);
+    if (!control || control.index !== 0) break;
+    normalized = normalized.slice(control[0].length).replace(/^\n+/, "");
+  }
+  const match = ROUTING_HEADER.exec(normalized);
+  const hasRouting = new RegExp(ROUTING_HEADER.source).test(normalized);
+  if (!match) return normalized;
   if (match.index !== 0) return null;
   if (
     match[1] !== envelope.messageType
     || match[2] !== envelope.taskName
     || match[3] !== envelope.sender
   ) return null;
-  return assignment.slice(match[0].length);
+  const payload = normalized.slice(match[0].length);
+  if (hasRouting && new RegExp(ROUTING_HEADER.source).test(payload)) return null;
+  if (new RegExp(AGENT_MESSAGE_CONTROL_PREAMBLE.source, "i").test(payload)) return null;
+  return payload;
 }
 
 function validateAssignment(assignment: unknown, envelope: AgentEnvelope): string | null {
   if (typeof assignment !== "string") return null;
   const payload = stripMatchingEnvelope(assignment, envelope);
   if (payload === null || payload.trim().length === 0) return null;
+  if (new RegExp(ROUTING_HEADER.source).test(payload)) return null;
+  if (new RegExp(AGENT_MESSAGE_CONTROL_PREAMBLE.source, "i").test(payload)) return null;
   if (Buffer.byteLength(payload) > MAX_ASSIGNMENT_BYTES) return null;
   if (structurallyValidFernetTokens(payload).length > 0) return null;
   return payload;
@@ -233,7 +275,9 @@ function injectAssignment(input: unknown, envelope: AgentEnvelope, assignment: s
     || part.encrypted_content !== envelope.ciphertext
   ) return false;
 
-  content[envelope.encryptedIndex] = { type: "input_text", text: assignment };
+  // Once recovery succeeds the transport envelope is no longer meaningful to a routed
+  // provider. Replace the whole message content so no routing/control blocks survive.
+  (item as Record<string, unknown>).content = [{ type: "input_text", text: assignment }];
   const message = item as Record<string, unknown>;
   message.type = "message";
   message.role = "user";
@@ -480,6 +524,7 @@ function assignmentFromRecoverySse(
     stage: "extraction",
     outcome: "accepted",
     assignmentBytes: Buffer.byteLength(assignment),
+    assignmentFingerprint: assignmentFingerprint(assignment),
   });
   return assignment;
 }
@@ -492,7 +537,9 @@ async function requestRecovery(
   traceId?: string,
 ): Promise<string | null> {
   const startedAt = Date.now();
-  const recoveryModel = options.model ?? DEFAULT_AGENT_TASK_RECOVERY_MODEL;
+  const recoveryModel = typeof options.model === "string" && options.model.trim().length > 0
+    ? options.model.trim()
+    : DEFAULT_AGENT_TASK_RECOVERY_MODEL;
   diagnose(traceId, {
     stage: "fetch",
     outcome: "started",
@@ -587,11 +634,11 @@ export async function recoverEncryptedAgentTask(
   options: AgentTaskRecoveryOptions,
   config: OcxConfig,
   context: { parentThreadId?: string | null; abortSignal?: AbortSignal; traceId?: string } = {},
-): Promise<boolean> {
+): Promise<AgentTaskRecoveryResult> {
   // Admission is deliberately checked before cache access. A cache hit must not
   // turn this process into a plaintext oracle for an unauthenticated caller.
   const admitted = admittedRecovery(req, input, config, context.parentThreadId, context.traceId);
-  if (!admitted) return false;
+  if (!admitted) return { recovered: false };
   const { admission, cacheKey, envelope } = admitted;
   let resolverStarted = false;
   const assignment = await resolveCachedAgentTaskRecovery(
@@ -609,13 +656,19 @@ export async function recoverEncryptedAgentTask(
       outcome: "failed",
       reason: resolverStarted ? "resolver_returned_no_assignment" : "shared_recovery_returned_no_assignment",
     });
-    return false;
+    return { recovered: false };
   }
   diagnose(context.traceId, {
     stage: "cache",
     outcome: "resolved",
     reason: resolverStarted ? "resolver" : "cache_or_inflight",
   });
+  const result: AgentTaskRecoveryResult = {
+    recovered: true,
+    assignmentBytes: Buffer.byteLength(assignment),
+    assignmentFingerprint: assignmentFingerprint(assignment),
+    cacheKey,
+  };
   if (context.abortSignal?.aborted || !injectAssignment(input, envelope, assignment)) {
     discardCachedAgentTaskRecovery(cacheKey);
     diagnose(context.traceId, {
@@ -623,10 +676,65 @@ export async function recoverEncryptedAgentTask(
       outcome: "rejected",
       reason: context.abortSignal?.aborted ? "caller_aborted" : "input_changed",
     });
+    return { recovered: false };
+  }
+  diagnose(context.traceId, {
+    stage: "injection",
+    outcome: "accepted",
+    assignmentBytes: result.assignmentBytes,
+    assignmentFingerprint: result.assignmentFingerprint,
+  });
+  return result;
+}
+
+export function discardAgentTaskRecoveryResult(result: AgentTaskRecoveryResult): void {
+  if (result.recovered) discardCachedAgentTaskRecovery(result.cacheKey);
+}
+
+export function verifyRecoveredAgentTaskDelivery(
+  value: unknown,
+  result: AgentTaskRecoveryResult,
+): boolean {
+  if (!result.recovered || !value || typeof value !== "object") return false;
+  const parsed = value as { context?: { messages?: unknown[] } };
+  const messages = Array.isArray(parsed.context?.messages)
+    ? parsed.context.messages
+    : Array.isArray(value)
+      ? value
+      : undefined;
+  if (!Array.isArray(messages)) return false;
+  let terminalIndex = messages.length - 1;
+  // Responses input may carry control metadata after the current task. The envelope
+  // detector deliberately ignores these, so the delivery invariant must do the same
+  // while continuing to reject any other trailing content.
+  while (terminalIndex >= 0) {
+    const candidate = messages[terminalIndex];
+    const type = candidate && typeof candidate === "object"
+      ? (candidate as { type?: unknown }).type
+      : undefined;
+    if (type !== "additional_tools" && type !== "compaction_trigger") break;
+    terminalIndex -= 1;
+  }
+  const terminal = terminalIndex >= 0 ? messages[terminalIndex] : undefined;
+  if (!terminal || typeof terminal !== "object") return false;
+  const terminalRecord = terminal as { role?: unknown; type?: unknown; content?: unknown };
+  if (messages === parsed.context?.messages) {
+    if (terminalRecord.role !== "user") return false;
+  } else if (terminalRecord.type !== "message" || terminalRecord.role !== "user") {
     return false;
   }
-  diagnose(context.traceId, { stage: "injection", outcome: "accepted" });
-  return true;
+  const content = terminalRecord.content;
+  let text: string | undefined;
+  if (typeof content === "string") text = content;
+  else if (Array.isArray(content) && content.length === 1) {
+    const block = content[0] as { type?: unknown; text?: unknown } | null;
+    if (block && (block.type === "input_text" || block.type === "text") && typeof block.text === "string") {
+      text = block.text;
+    }
+  }
+  if (text === undefined) return false;
+  return Buffer.byteLength(text) === result.assignmentBytes
+    && assignmentFingerprint(text) === result.assignmentFingerprint;
 }
 
 export function discardEncryptedAgentTaskRecovery(

@@ -96,6 +96,44 @@ describe("agent task recovery security", () => {
     expect(providerBody).not.toContain(accountId);
   });
 
+  test("drops recognized CXC control-preamble-only text before recovery and provider delivery", async () => {
+    const assignment = "CXC preamble is transport-only.";
+    let providerBody = "";
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        return new Response(recoverySse(assignment), { status: 200 });
+      }
+      providerBody = typeof init?.body === "string" ? init.body : "";
+      return providerResponse();
+    }) as typeof fetch;
+    const input = encryptedInput();
+    (input[0] as { content: unknown[] }).content.unshift({
+      type: "input_text",
+      text: "[CXC-LEAF-GUARD] stay within the worker boundary.",
+    });
+    const response = await post(routedConfig(), "xai/grok-4.5", input, codexHeaders());
+    expect(response.status).toBe(200);
+    expect(providerBody).toContain(assignment);
+    expect(providerBody).not.toContain("CXC-LEAF-GUARD");
+  });
+
+  test.each([
+    { label: "unrecognized text", extra: { type: "input_text", text: "Do this unrelated thing." } },
+    { label: "media", extra: { type: "input_image", image_url: "data:image/png;base64,AA==" } },
+  ])("rejects extra $label content before recovery or provider fetch", async ({ extra }) => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("extra envelope content must fail closed");
+    }) as typeof fetch;
+    const input = encryptedInput();
+    (input[0] as { content: unknown[] }).content.push(extra);
+    const response = await post(routedConfig(), "xai/grok-4.5", input, codexHeaders());
+    expect(response.status).toBe(400);
+    expect(fetchCalls).toBe(0);
+    expect(await response.json()).toMatchObject({ error: { code: "unreadable_encrypted_agent_task" } });
+  });
+
   test("a cached recovery never bypasses caller authentication", async () => {
     const assignment = `${ROUTING_ENVELOPE}Do not expose this cached task.`;
     let recoveryFetches = 0;

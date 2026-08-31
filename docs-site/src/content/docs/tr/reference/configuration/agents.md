@@ -149,6 +149,8 @@ noktasına ham bir Responses doğrudan geçiş isteği kullanır. ChatGPT düz m
 görevini zorunlu bir fonksiyon çağrısı aracılığıyla döndürür; opencodex daha
 sonra yönlendirilen sağlayıcı dağıtımından önce yalnızca bu görev öğesini
 standart bir kullanıcı mesajına dönüştürür.
+Yönlendirilen kurtarma mesajı, taşıma yönlendirme meta verilerini kaldırır ve yalnızca yükü içeren tek
+bir kullanıcı metin değeri sunar.
 
 Bu yerel şifre çözme değildir ve Codex hat protokolünü düzeltmez. Belgelenmemiş
 ChatGPT arka uç davranışına bağlıdır ve bir arka uç değişikliğinden sonra
@@ -247,5 +249,4 @@ ile `xhigh` arasını sunar.
 
 v1, varsayılan ve v2 davranışının yeni başlayanlara yönelik açıklaması için [Alt
 ajan yüzeyleri](/tr/guides/sub-agent-surface/) sayfasına bakın.
-
 

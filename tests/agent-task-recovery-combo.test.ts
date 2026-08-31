@@ -10,6 +10,7 @@ import {
 } from "../src/responses/state";
 import { resetAgentTaskRecoveryState } from "../src/server/responses/agent-task-recovery";
 import { agentTaskRecoveryCacheSnapshotForTests } from "../src/server/responses/agent-task-recovery-cache";
+import { handleResponses } from "../src/server/responses";
 import {
   codexHeaders,
   encryptedInput,
@@ -98,12 +99,72 @@ describe("combo path encrypted agent task recovery", () => {
     expect(forwardedBodies).toHaveLength(1);
     expect(forwardedBodies[0]).toContain(assignment);
     expect(forwardedBodies[0]).not.toContain(FERNET_TASK);
-    expect(forwardedBodies[0].match(/Message Type: NEW_TASK/g)).toHaveLength(1);
+    expect(forwardedBodies[0].match(/Message Type: NEW_TASK/g) ?? []).toHaveLength(0);
+    const comboBody = JSON.parse(forwardedBodies[0]!) as { messages?: Array<{ role?: string; content?: unknown }> };
+    const terminal = comboBody.messages?.at(-1);
+    expect(terminal?.role).toBe("user");
+    expect(terminal?.content === assignment || JSON.stringify(terminal?.content) === JSON.stringify([{ type: "text", text: assignment }])).toBe(true);
     expect(responseContinuationRetainedStoreSnapshot().count).toBe(0);
     const snapshotPath = join(home, "responses-state.json");
     const snapshot = existsSync(snapshotPath) ? readFileSync(snapshotPath, "utf8") : "";
     expect(snapshot).not.toContain(assignment);
     expect(snapshot).not.toContain(responsePayload.id!);
+  });
+
+  test("discards combo recovery when cancellation wins before child dispatch", async () => {
+    const config = comboConfig([{ provider: "xai", model: "grok-4.5" }]);
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async input => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse("Combo cancellation-sensitive assignment."), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerCompletion();
+    }) as typeof fetch;
+    const request = () => new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...Object.fromEntries(codexHeaders()) },
+      body: JSON.stringify({ model: "combo/routed", input: encryptedInput(), stream: false }),
+    });
+    const controller = new AbortController();
+    const cancelled = await handleResponses(request(), config, { model: "", provider: "" }, {
+      abortSignal: controller.signal,
+      recoveryDeliveryTestHook: () => controller.abort(),
+    });
+    expect(cancelled.status).toBe(499);
+    expect(providerFetches).toBe(0);
+
+    const retry = await handleResponses(request(), config, { model: "", provider: "" });
+    expect(retry.status).toBe(200);
+    expect(recoveryFetches).toBe(2);
+    expect(providerFetches).toBe(1);
+  });
+
+  test.each([
+    { label: "additional_tools", trailer: { type: "additional_tools", role: "developer", tools: [] } },
+    { label: "compaction_trigger", trailer: { type: "compaction_trigger" } },
+  ])("keeps recovered combo delivery valid with trailing $label metadata", async ({ trailer }) => {
+    const assignment = `TRAILING-${trailer.type}-PAYLOAD`;
+    let providerFetches = 0;
+    let providerBody = "";
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url.includes("chatgpt.com")) return new Response(recoverySse(assignment), { status: 200 });
+      providerFetches += 1;
+      providerBody = typeof init?.body === "string" ? init.body : "";
+      return providerCompletion();
+    }) as typeof fetch;
+    const input = encryptedInput();
+    input.push(trailer);
+
+    const response = await post(comboConfig([{ provider: "xai", model: "grok-4.5" }]), "combo/routed", input, codexHeaders());
+
+    expect(response.status).toBe(200);
+    expect(providerFetches).toBe(1);
+    expect(providerBody).toContain(assignment);
+    expect(providerBody).not.toContain("Message Type: NEW_TASK");
   });
 
   test("rejects an all-disabled combo before recovery creates or caches plaintext", async () => {

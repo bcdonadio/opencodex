@@ -172,7 +172,9 @@ ve iletilmez; yalnızca kurtarma isteği yerel olarak `originator: codex_cli_rs`
 üretir. `content-type` ve `accept` yerel olarak oluşturulur ve başka hiçbir
 arayan başlığı sınırı geçmez. Kotayı
 tüketir, gecikme ekler, kurtarılan düz metni sınırlı bir bellek içi önbellekte
-kısa süre tutar ve belgelenmemiş ChatGPT arka uç davranışına bağlıdır. Bir model
+kısa süre tutar ve belgelenmemiş ChatGPT arka uç davranışına bağlıdır. Yönlendirilen kurtarma mesajı,
+taşıma yönlendirme meta verilerini kaldırır ve yalnızca yükü içeren tek bir kullanıcı metin değeri sunar.
+Bir model
 kurtarılan metni döndürdüğü için bayt bayt doğruluk garanti edilmez. Genel/API
 anahtarlı proxy arayanlarını reddeder ve herhangi bir arızada
 `unreadable_encrypted_agent_task`'i korur. Tam güven sınırı ve yapılandırma için
@@ -317,5 +319,4 @@ sabitler.
 
 Model bağlam sınırı alt ajan modundan bağımsızdır. Modeller sayfasında
 yapılandırın; yerel OpenAI modelleri gerçek bağlam pencerelerini korur.
-
 

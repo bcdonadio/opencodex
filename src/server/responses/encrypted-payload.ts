@@ -183,7 +183,7 @@ export const AGENT_MESSAGE_ROUTING_ENVELOPE = /(?:^|\n)Message Type\s*:\s*NEW_TA
 // envelope stripper below.
 export const AGENT_MESSAGE_CONTROL_PREAMBLE = /(?:^|\n)\[CXC-[A-Z0-9-]+\][^\n]*(?:\n(?!\n|Message Type\s*:)[^\n]*)*(?=\n{2,}|\nMessage Type\s*:|$)/gi;
 
-export function hasUnreadableEncryptedAgentTask(input: unknown): boolean {
+export function hasUnreadableEncryptedAgentTask(input: unknown, options: { strictEnvelope?: boolean } = {}): boolean {
   if (!Array.isArray(input)) return false;
 
   // codex-rs appends one NEW_TASK agent_message at the current input tail. Historical
@@ -227,6 +227,7 @@ export function hasUnreadableEncryptedAgentTask(input: unknown): boolean {
   }
 
   if (!hasFernetTask) return false;
+  if (options.strictEnvelope) return hasFernetTask;
   const readableTask = readableParts
     .join("\n\n")
     .replace(AGENT_MESSAGE_CONTROL_PREAMBLE, "\n")

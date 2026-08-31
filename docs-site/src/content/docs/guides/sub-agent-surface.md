@@ -147,6 +147,8 @@ authentication, another provider credential, or another Codex account. Only `aut
 `originator` is ignored rather than forwarded; this recovery-only request generates `originator: codex_cli_rs`
 locally. `content-type` and `accept` are generated locally, and no other caller headers
 cross the boundary.
+The routed recovery message strips transport routing metadata and presents exactly one
+payload-only user text value.
 It consumes quota, adds latency, briefly retains recovered plaintext in a bounded in-memory cache,
 and depends on undocumented ChatGPT backend behavior. Because a model returns the recovered text,
 byte-for-byte fidelity is not guaranteed. It rejects generic/API-key proxy callers and preserves

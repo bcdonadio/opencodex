@@ -7,7 +7,12 @@ import {
 } from "../src/responses/state";
 import { warnAgentTaskRecoveryStartup } from "../src/server";
 import { handleResponses } from "../src/server/responses";
-import { resetAgentTaskRecoveryState } from "../src/server/responses/agent-task-recovery";
+import {
+  recoverEncryptedAgentTask,
+  resetAgentTaskRecoveryState,
+  verifyRecoveredAgentTaskDelivery,
+  type AgentTaskRecoveryResult,
+} from "../src/server/responses/agent-task-recovery";
 import { agentTaskRecoveryWaiterCountForTests } from "../src/server/responses/agent-task-recovery-cache";
 import {
   agentMessage,
@@ -86,6 +91,88 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(absent.fetchCalls).toBe(0);
     expect(raw).not.toContain(FERNET_TASK);
     expect(raw).not.toContain("acct-caller");
+  });
+
+  test("rejects a post-reparse delivery whose bytes or keyed fingerprint do not match recovery", () => {
+    const result: AgentTaskRecoveryResult = {
+      recovered: true,
+      assignmentBytes: Buffer.byteLength("expected assignment"),
+      assignmentFingerprint: "not-the-process-keyed-fingerprint",
+      cacheKey: "opaque-cache-key",
+    };
+    const reparsed = {
+      context: { messages: [{ role: "user", content: "different assignment" }] },
+    };
+    expect(verifyRecoveredAgentTaskDelivery(reparsed, result)).toBe(false);
+  });
+
+  test("fails closed on a forced post-reparse mismatch and discards the recovery cache", async () => {
+    const assignment = "Mismatch-sensitive assignment.";
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse(assignment), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const request = () => new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...Object.fromEntries(codexHeaders()) },
+      body: JSON.stringify({ model: "xai/grok-4.5", input: encryptedInput(), stream: false }),
+    });
+    let hookRuns = 0;
+    const first = await captureAgentTaskRecoveryDiagnostics(async () => {
+      const response = await handleResponses(request(), routedConfig(), { model: "", provider: "" }, {
+        recoveryDeliveryTestHook: input => {
+          hookRuns += 1;
+          const terminal = (input as Array<Record<string, unknown>>).at(-1)!;
+          terminal.content = [{ type: "input_text", text: "tampered assignment" }];
+        },
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { code: "unreadable_encrypted_agent_task" } });
+    });
+    expect(hookRuns).toBe(1);
+    expect(providerFetches).toBe(0);
+    expect(first.events).toContainEqual(expect.objectContaining({ stage: "delivery", outcome: "rejected" }));
+
+    const retry = await handleResponses(request(), routedConfig(), { model: "", provider: "" });
+    expect(retry.status).toBe(200);
+    expect(recoveryFetches).toBe(2);
+    expect(providerFetches).toBe(1);
+  });
+
+  test("discards recovery when the caller cancels before provider handoff", async () => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async input => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse("Cancellation-sensitive assignment."), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const request = () => new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...Object.fromEntries(codexHeaders()) },
+      body: JSON.stringify({ model: "xai/grok-4.5", input: encryptedInput(), stream: false }),
+    });
+    const controller = new AbortController();
+    const cancelled = await handleResponses(request(), routedConfig(), { model: "", provider: "" }, {
+      abortSignal: controller.signal,
+      recoveryDeliveryTestHook: () => controller.abort(),
+    });
+    expect(cancelled.status).toBe(499);
+    expect(providerFetches).toBe(0);
+
+    const retry = await handleResponses(request(), routedConfig(), { model: "", provider: "" });
+    expect(retry.status).toBe(200);
+    expect(recoveryFetches).toBe(2);
+    expect(providerFetches).toBe(1);
   });
 
   test("keeps disabled normal routed requests behaviorally identical to the absent feature", async () => {
@@ -264,6 +351,28 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(diagnostics.raw).not.toContain("acct-caller");
   });
 
+  test("uses Terra defensively when direct recovery receives a blank model", async () => {
+    let recoveryModel = "";
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryModel = JSON.parse(typeof init?.body === "string" ? init.body : "{}").model;
+        return new Response(recoverySse("Recover with the defensive Terra default."), { status: 200 });
+      }
+      throw new Error("direct recovery must not dispatch to the routed provider");
+    }) as typeof fetch;
+
+    const input = encryptedInput();
+    const result = await recoverEncryptedAgentTask(
+      new Request("http://localhost/v1/responses", { headers: codexHeaders() }),
+      input,
+      { enabled: true, model: " \t " },
+      routedConfig(),
+    );
+
+    expect(result.recovered).toBe(true);
+    expect(recoveryModel).toBe("gpt-5.6-terra");
+  });
+
   test("honors an explicit Sol recovery model override", async () => {
     let recoveryModel = "";
     globalThis.fetch = (async (input, init) => {
@@ -322,7 +431,74 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(forwardedBodies[0]).toContain("capture_assignment");
     expect(forwardedBodies[1]).toContain("Implement the focused regression test.");
     expect(forwardedBodies[1]).not.toContain(FERNET_TASK);
-    expect(forwardedBodies[1].match(/Message Type: NEW_TASK/g)).toHaveLength(1);
+    expect(forwardedBodies[1].match(/Message Type: NEW_TASK/g) ?? []).toHaveLength(0);
+    const routedBody = JSON.parse(forwardedBodies[1]!) as { messages?: Array<{ role?: string; content?: unknown }> };
+    const terminal = routedBody.messages?.at(-1);
+    expect(terminal?.role).toBe("user");
+    expect(terminal?.content === assignment || JSON.stringify(terminal?.content) === JSON.stringify([{ type: "text", text: assignment }])).toBe(true);
+  });
+
+  test("emits matching keyed assignment metadata for extraction and delivery", async () => {
+    const assignment = "Metadata-safe assignment payload.";
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        return new Response(recoverySse(assignment), { status: 200 });
+      }
+      return providerResponse();
+    }) as typeof fetch;
+    const diagnostics = await captureAgentTaskRecoveryDiagnostics(async () => {
+      expect((await post(routedConfig(), "xai/grok-4.5", encryptedInput(), codexHeaders())).status).toBe(200);
+    });
+    const extraction = diagnostics.events.find(event => event.stage === "extraction" && event.outcome === "accepted");
+    const delivery = diagnostics.events.find(event => event.stage === "delivery" && event.outcome === "accepted");
+    expect(extraction?.assignmentBytes).toBe(Buffer.byteLength(assignment));
+    expect(delivery?.assignmentBytes).toBe(Buffer.byteLength(assignment));
+    expect(typeof extraction?.assignmentFingerprint).toBe("string");
+    expect(delivery?.assignmentFingerprint).toBe(extraction?.assignmentFingerprint);
+    expect(diagnostics.raw).not.toContain(assignment);
+    expect(diagnostics.raw).not.toContain(FERNET_TASK);
+  });
+
+  test.each([
+    {
+      label: "leading recognized CXC control preamble",
+      assignment: `[CXC-LEAF-GUARD] obey the worker boundary.\n\n${ROUTING_ENVELOPE}Payload-only task.`,
+      expectedStatus: 200,
+    },
+    {
+      label: "arbitrary prefix before routing envelope",
+      assignment: `Unrecognized prefix.\n${ROUTING_ENVELOPE}Payload-only task.`,
+      expectedStatus: 400,
+    },
+    {
+      label: "mismatched routing envelope",
+      assignment: "Message Type: NEW_TASK\nTask name: /root/other\nSender: /root\nPayload:\n\nPayload-only task.",
+      expectedStatus: 400,
+    },
+    {
+      label: "repeated routing envelope",
+      assignment: `${ROUTING_ENVELOPE}Payload-only task.\n${ROUTING_ENVELOPE}`,
+      expectedStatus: 400,
+    },
+  ])("normalizes or rejects recovered transport metadata: $label", async ({ assignment, expectedStatus }) => {
+    let providerFetches = 0;
+    let providerBody = "";
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) return new Response(recoverySse(assignment), { status: 200 });
+      providerFetches += 1;
+      providerBody = typeof init?.body === "string" ? init.body : "";
+      return providerResponse();
+    }) as typeof fetch;
+    const response = await post(routedConfig(), "xai/grok-4.5", encryptedInput(), codexHeaders());
+    expect(response.status).toBe(expectedStatus);
+    if (expectedStatus === 200) {
+      expect(providerFetches).toBe(1);
+      expect(providerBody).toContain("Payload-only task.");
+      expect(providerBody).not.toContain("Message Type: NEW_TASK");
+      expect(providerBody).not.toContain("CXC-LEAF-GUARD");
+    } else {
+      expect(providerFetches).toBe(0);
+    }
   });
 
   test("recovers an encrypted routed task materialized from previous_response_id", async () => {
@@ -370,7 +546,7 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(forwardedBodies).toHaveLength(1);
     expect(forwardedBodies[0]).toContain(assignment);
     expect(forwardedBodies[0]).not.toContain(FERNET_TASK);
-    expect(forwardedBodies[0].match(/Message Type: NEW_TASK/g)).toHaveLength(1);
+    expect(forwardedBodies[0].match(/Message Type: NEW_TASK/g) ?? []).toHaveLength(0);
   });
 
   test("charges namespaced tool bridge maps only once across recovery reparse", async () => {
@@ -446,7 +622,7 @@ describe("agent task recovery (opt-in, default off)", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(providerBody).toContain("Message Type: NEW_TASK");
+    expect(providerBody).not.toContain("Message Type: NEW_TASK");
     expect(providerBody).toContain(assignment);
     expect(providerBody).not.toContain(FERNET_TASK);
   });

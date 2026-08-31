@@ -148,6 +148,8 @@ en-têtes `authorization`, `chatgpt-account-id` correspondant, ainsi que les mé
 `openai-beta` et `user-agent`, sont transmis. L’`originator` entrant est ignoré plutôt que transmis ;
 cette requête de récupération uniquement génère localement `originator: codex_cli_rs`. `content-type`
 et `accept` sont générés localement ; aucun autre en-tête de l’appelant ne franchit cette frontière.
+Le message de récupération routé supprime les métadonnées de routage du transport et présente une
+seule valeur textuelle utilisateur contenant la charge utile.
 
 Cette opération consomme du quota, ajoute de la latence, conserve brièvement le texte récupéré dans un cache
 mémoire borné et dépend d’un comportement non documenté du service ChatGPT. Comme un modèle renvoie le texte
