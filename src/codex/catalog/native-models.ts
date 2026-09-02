@@ -56,9 +56,9 @@ export function nativeOpenAiCapabilitySourceSlug(slug: string): string {
  * `gpt-daybreak-blue-latest` is entitlement-gated upstream: it is absent from codex-rs's
  * bundled catalog and reaches a client only through an authenticated `/models` response.
  * It is listed here by explicit owner decision so the capability template exists without waiting
- * for an observation, because opencodex injects `model_catalog_json` and codex-rs therefore builds
- * a `StaticModelsManager` whose refresh is a no-op — an entitled account had no way to
- * discover it on a clean install.
+ * for an observation. OpenCodex serves the merged catalog through its own `GET /v1/models`
+ * protocol endpoint, allowing Codex's online model manager to discover entitled models on a clean
+ * install without a local `model_catalog_json` override.
  *
  * Availability is not static: catalog sync and Pool routing require the account's authenticated
  * `/models` roster to contain account-gated slugs. An unconfirmed or unentitled account never

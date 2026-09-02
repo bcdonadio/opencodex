@@ -87,7 +87,7 @@ kimliğini veya arkasındaki somut sağlayıcı/model seçicilerini değiştirme
 
 ## Codex Desktop yerel izin listesi uyumluluğu
 
-Bazı Codex Desktop sürümleri, uygulama sunucusu `model_catalog_json`'ı zaten
+Bazı Codex Desktop sürümleri, uygulama sunucusu proxy tarafından sağlanan model kataloğunu zaten
 yükledikten sonra uzak bir yalnızca yerel `available_models` izin listesi
 uygular. `Nova1/codex-gpt-5.6-sol` gibi normal yönlendirilen kimlikler daha
 sonra CLI tarafından kullanılabilir ancak Desktop seçicisinde bulunmaz. Bu,
@@ -408,5 +408,4 @@ tam doğrulama mesajını görüntüler.
 Hata hedefe özgü olmaktan ziyade uç (terminal) bir hataydı. Geçersiz girdiyi
 düzeltin, aşırı büyük bir bağlamı azaltın, bir politika reddini işleyin veya
 reddedilen istek kaynağını düzeltin. Kombolar bu durumlar için atlama yapmaz.
-
 

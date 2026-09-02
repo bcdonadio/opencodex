@@ -3,9 +3,9 @@ title: Intégration à Codex
 description: Comment opencodex s'intègre à Codex, synchronise le catalogue de modèles, installe des intercepteurs et restaure proprement la configuration d'origine.
 ---
 
-opencodex fait passer Codex par le proxy en modifiant deux éléments lus par Codex : sa configuration
-(`$CODEX_HOME/config.toml`, par défaut `~/.codex/config.toml`) et son catalogue de modèles. Chaque modification
-est idempotente et réversible.
+opencodex fait passer Codex par le proxy en modifiant sa configuration (`$CODEX_HOME/config.toml`, par défaut
+`~/.codex/config.toml`). Le proxy fournit le catalogue via le protocole `GET /v1/models` et ne fixe pas Codex
+sur un fichier de catalogue local généré. Chaque modification est idempotente et réversible.
 
 Le proxy expose une route non qualifiée `openai` pour la connexion Codex, avec les modes de compte Pool (par
 défaut) et Direct, ainsi que `openai-apikey/<model>` pour la clé API configurée. Pool comprend le compte
@@ -20,7 +20,6 @@ l'identifiant du fournisseur `openai` intégré à Codex et fait pointer ce four
 
 ```toml
 # root keys, before the first table
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 # Auto-injected by opencodex
 openai_base_url = "http://127.0.0.1:10100/v1"
 
@@ -116,7 +115,6 @@ généré. L'injecteur utilise donc un fournisseur dédié :
 ```toml
 # root keys
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # appended at the end of the file
 # Auto-injected by opencodex
@@ -135,10 +133,11 @@ vous pouvez fusionner manuellement si l'injection automatique a été supprimée
 forme avec fournisseur dédié. Le mode de fournisseur externe laisse ce profil intact.
 
 :::caution
-Les clés racine telles que `openai_base_url`, `model_provider` et `model_catalog_json` **doivent** précéder le
-premier en-tête `[table]`. L'injecteur garantit ce placement, supprime ses propres copies obsolètes ou en double
-et n'écrase jamais une clé racine `openai_base_url` appartenant à l'utilisateur. Si cette clé existe, la
-synchronisation met le catalogue à jour, mais signale que le routage n'a pas été injecté.
+Les clés racine telles que `openai_base_url` et `model_provider` **doivent** précéder le premier en-tête `[table]`.
+L'injecteur garantit ce placement et n'écrase jamais une clé racine `openai_base_url` appartenant à l'utilisateur.
+Un remplacement `model_catalog_json` personnalisé appartenant à l'utilisateur est conservé ; les anciens
+remplacements qui pointent vers `opencodex-catalog.json` sont supprimés afin que Codex utilise le catalogue fourni
+par le protocole.
 :::
 
 ## Catalogue de modèles partagé
@@ -199,8 +198,8 @@ modifier l'historique.
 
 ## Synchronisation du catalogue de modèles
 
-Codex affiche les modèles provenant d'un catalogue sur disque — par défaut
-`$CODEX_HOME/opencodex-catalog.json`. Au démarrage et lors de `ocx sync`, opencodex :
+OpenCodex matérialise le catalogue fusionné dans `$CODEX_HOME/opencodex-catalog.json` et sert le même catalogue via
+`GET /v1/models`. Codex consomme la réponse du protocole, et non un remplacement de fichier local. Au démarrage et lors de `ocx sync`, opencodex :
 
 1. **Sauvegarde** une fois le catalogue d'origine dans `~/.opencodex/catalog-backup.json`, afin que la mise en
    avant des modèles soit réversible.

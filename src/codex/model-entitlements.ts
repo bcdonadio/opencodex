@@ -907,8 +907,8 @@ export function getCodexModelEntitlementStatus(
  * [Decision Log]
  * - 목적과 의도: Account-gated native models must be advertised and selected only for accounts
  *   whose own authenticated upstream catalog confirms the model.
- * - 기존 구현 및 제약 조건: The injected Codex catalog is static, while Pool may contain
- *   accounts with different entitlements. A global allowlist therefore exposed unusable rows.
+ * - 기존 구현 및 제약 조건: Pool may contain accounts with different entitlements. A global
+ *   catalog allowlist therefore exposed unusable rows.
  * - 검토한 주요 대안: Infer access from plan labels, learn only after a failed prompt, or rewrite
  *   Daybreak to its current physical model.
  * - 선택한 방식: Cache bounded authenticated `/models` rosters per credential generation and

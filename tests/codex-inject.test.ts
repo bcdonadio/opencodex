@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyEol,
+  applyCodexCatalogOverride,
   buildOpenaiBaseUrlLine,
   buildProfileFile,
   buildProviderTableBlock,
@@ -11,6 +12,7 @@ import {
   stripOpencodexConfig,
   stripRootContextWindowOverrides,
 } from "../src/codex/inject";
+import { DEFAULT_CATALOG_PATH } from "../src/codex/paths";
 import {
   MANAGED_AGENTS_TABLE_MARKER,
   MANAGED_SUBAGENT_DEFAULT_MARKER,
@@ -88,7 +90,7 @@ describe("Codex config injection", () => {
       'model = "gpt-5.5"',
       'model_context_window = 1000000',
       'model_auto_compact_token_limit = 900000',
-      'model_catalog_json = "/tmp/opencodex-catalog.json"',
+      `model_catalog_json = "${DEFAULT_CATALOG_PATH}"`,
       'model_provider = "opencodex"',
       "",
       "[features]",
@@ -190,12 +192,59 @@ describe("Codex config injection", () => {
   });
 
   test("non-loopback fallback profile mirrors websocket and API auth provider options", () => {
-    const profile = buildProfileFile(10100, "/tmp/opencodex-catalog.json", true, true);
+    const profile = buildProfileFile(10100, DEFAULT_CATALOG_PATH, true, true);
 
-    expect(profile).toContain('model_catalog_json = "/tmp/opencodex-catalog.json"');
+    expect(profile).not.toContain("model_catalog_json");
     expect(profile).toContain("supports_websockets = true");
     expect(profile).toContain('env_key = "OPENCODEX_API_AUTH_TOKEN"');
     expect(profile).not.toContain("env_http_headers");
+  });
+
+  test("fallback profile preserves a user-owned custom catalog override", () => {
+    const profile = buildProfileFile(10100, "/tmp/custom-catalog.json");
+
+    expect(profile).toContain('model_catalog_json = "/tmp/custom-catalog.json"');
+  });
+
+  test("fallback profile omits a relative generated OpenCodex catalog override", () => {
+    const profile = buildProfileFile(10100, "opencodex-catalog.json");
+
+    expect(profile).not.toContain("model_catalog_json");
+  });
+
+  test("config injection removes a stale generated catalog override", () => {
+    const result = applyCodexCatalogOverride(
+      'model_catalog_json = "opencodex-catalog.json" # stale\nmodel = "gpt-5.5"\n',
+      DEFAULT_CATALOG_PATH,
+    );
+
+    expect(result.overridePath).toBeNull();
+    expect(result.content).toBe('model = "gpt-5.5"\n');
+  });
+
+  test("config injection preserves a user-owned custom catalog override", () => {
+    const original = 'model_catalog_json = "custom-catalog.json" # user catalog\n';
+    const result = applyCodexCatalogOverride(
+      original,
+      "/tmp/opencodex-catalog.json",
+    );
+
+    expect(result.overridePath).toBe("custom-catalog.json");
+    expect(result.content).toBe(original);
+  });
+
+  test("config injection preserves a user catalog with the generated basename outside CODEX_HOME", () => {
+    const original = 'model_catalog_json = "/srv/team/opencodex-catalog.json" # user catalog\n';
+    const result = applyCodexCatalogOverride(
+      original,
+      "/tmp/opencodex-catalog.json",
+    );
+
+    expect(result.overridePath).toBe("/srv/team/opencodex-catalog.json");
+    expect(result.content).toBe(original);
+    expect(buildProfileFile(10100, result.overridePath)).toContain(
+      'model_catalog_json = "/srv/team/opencodex-catalog.json"',
+    );
   });
 
   test("honors an explicit unavailable catalog decision", () => {
@@ -314,7 +363,7 @@ describe("Design B openai_base_url injection", () => {
     const injected = setRootOpenaiBaseUrl([
       'model = "opencode-go/minimax-m3"',
       'model_verbosity = "high"',
-      'model_catalog_json = "/tmp/opencodex-catalog.json"',
+      `model_catalog_json = "${DEFAULT_CATALOG_PATH}"`,
       "",
       "[features]",
       "fast_mode = true",

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   atomicWriteFile,
   loadConfig,
@@ -121,9 +122,9 @@ export function applyEol(content: string, eol: "\r\n" | "\n"): string {
 
 export interface InjectCodexOptions {
   /**
-   * Absolute or CODEX_HOME-relative catalog path to advertise to Codex. Pass `null` only when the
-   * opencodex catalog could not be materialized; Codex will then keep its native catalog instead of
-   * failing on a missing model_catalog_json file.
+   * Absolute or CODEX_HOME-relative catalog artifact selected by sync. The generated OpenCodex
+   * path is recorded for coordinated restore but is advertised to Codex through GET /v1/models,
+   * not model_catalog_json. Pass `null` when the artifact could not be materialized.
    */
   catalogPath?: string | null;
   /**
@@ -602,7 +603,17 @@ function ensureFastModeFeature(content: string, fastMode?: boolean): string {
 }
 
 function isOpencodexCatalogPath(path: string): boolean {
-  return path.replace(/\\/g, "/").split("/").pop() === "opencodex-catalog.json";
+  const candidate = resolve(resolveCodexConfigPath(path));
+  const generated = resolve(DEFAULT_CATALOG_PATH);
+  return process.platform === "win32"
+    ? candidate.toLowerCase() === generated.toLowerCase()
+    : candidate === generated;
+}
+
+function userCatalogOverridePath(catalogPath?: string | null): string | null {
+  return catalogPath && !isOpencodexCatalogPath(catalogPath)
+    ? catalogPath
+    : null;
 }
 
 function stripOpencodexCatalogPath(content: string): string {
@@ -619,8 +630,29 @@ function stripOpencodexCatalogPath(content: string): string {
     .join("\n");
 }
 
+/** Apply only a user-owned static catalog override; generated catalogs stay on the protocol. */
+export function applyCodexCatalogOverride(
+  content: string,
+  selectedCatalogPath?: string | null,
+): { content: string; overridePath: string | null } {
+  const overridePath =
+    userCatalogOverridePath(readRootModelCatalogPath(content)) ??
+    userCatalogOverridePath(selectedCatalogPath);
+  return {
+    content: overridePath
+      ? setRootModelCatalogPath(content, overridePath)
+      : stripOpencodexCatalogPath(content),
+    overridePath,
+  };
+}
+
 export function buildProfileFile(port: number, catalogPath?: string | null, supportsWebsockets = false, includeApiAuthHeader = false, hostname?: string, fastMode?: boolean): string {
   const host = providerBaseHost(hostname);
+  // The proxy advertises its generated catalog over GET /v1/models. Keep an
+  // explicitly user-owned catalog override, but never pin Codex to the local
+  // OpenCodex artifact: that would replace the protocol-provided catalog with
+  // a static file snapshot.
+  const catalogOverridePath = userCatalogOverridePath(catalogPath);
   // Design B (loopback): the reference/fallback file documents the root override form.
   // Non-loopback keeps the legacy provider-table shape (built-in provider cannot carry
   // the x-opencodex-api-key env header).
@@ -631,7 +663,8 @@ export function buildProfileFile(port: number, catalogPath?: string | null, supp
       "# Merge these root keys into ~/.codex/config.toml manually if auto-injection was removed.",
       buildOpenaiBaseUrlLine(port, hostname),
     ];
-    if (catalogPath) lines.push(`model_catalog_json = ${tomlString(catalogPath)}`);
+    if (catalogOverridePath)
+      lines.push(`model_catalog_json = ${tomlString(catalogOverridePath)}`);
     if (fastMode !== undefined) lines.push("", "[features]", `fast_mode = ${fastMode ? "true" : "false"}`, "");
     return lines.join("\n");
   }
@@ -640,7 +673,8 @@ export function buildProfileFile(port: number, catalogPath?: string | null, supp
     `# Routes all model requests through the opencodex proxy at ${host}:${port}`,
     'model_provider = "opencodex"',
   ];
-  if (catalogPath) lines.push(`model_catalog_json = ${tomlString(catalogPath)}`);
+  if (catalogOverridePath)
+    lines.push(`model_catalog_json = ${tomlString(catalogOverridePath)}`);
   if (fastMode !== undefined) lines.push("", "[features]", `fast_mode = ${fastMode ? "true" : "false"}`);
   lines.push(buildProviderTableBlock(port, supportsWebsockets, includeApiAuthHeader, hostname).trimEnd(), "");
   return lines.join("\n");
@@ -777,9 +811,8 @@ export async function injectCodexConfig(
     content,
     options.catalogPath,
   );
-  content = catalogPath
-    ? setRootModelCatalogPath(content, catalogPath)
-    : stripOpencodexCatalogPath(content);
+  const catalogOverride = applyCodexCatalogOverride(content, catalogPath);
+  content = catalogOverride.content;
 
   const legacyMode = shouldInjectApiAuthHeader(config);
   let keptUserBaseUrl = false;
@@ -838,7 +871,14 @@ export async function injectCodexConfig(
     managedDefaultsMessage = `  ⚠️ ${nativeSubagentDefaultsWarning}\n`;
   }
 
-  const profileContent = buildProfileFile(port, catalogPath, websocketsEnabled(config ?? {}), legacyMode, config?.hostname, config?.fastMode);
+  const profileContent = buildProfileFile(
+    port,
+    catalogOverride.overridePath ?? catalogPath,
+    websocketsEnabled(config ?? {}),
+    legacyMode,
+    config?.hostname,
+    config?.fastMode,
+  );
   content = applyEol(content, eol);
 
   /*
@@ -1087,8 +1127,10 @@ export async function injectCodexConfig(
   }
 
   const catalogMessage = catalogPath
-    ? `  Codex model catalog: ${catalogPath}\n`
-    : `  Codex model catalog not injected because no opencodex catalog file exists yet.\n`;
+    ? isOpencodexCatalogPath(catalogPath)
+      ? `  Codex model catalog: served by the proxy protocol (source: ${catalogPath}).\n`
+      : `  Codex model catalog: preserved user override ${catalogPath}.\n`
+    : `  Codex model catalog: served by the proxy protocol; no local catalog artifact exists yet.\n`;
   const ejected = (history as { ejectedRows?: number }).ejectedRows ?? 0;
   const migratedRows = (history.rows ?? 0) + ejected;
   const historyMessage =

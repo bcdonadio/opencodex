@@ -77,7 +77,7 @@ concrete provider/model selectors behind it.
 ## Codex Desktop native-allowlist compatibility
 
 Some Codex Desktop releases apply a remote native-only `available_models` allowlist after the
-app-server has already loaded `model_catalog_json`. Normal routed ids such as
+app-server has already loaded the proxy-provided model catalog. Normal routed ids such as
 `Nova1/codex-gpt-5.6-sol` are then usable by the CLI but absent from the Desktop picker. This is the
 upstream [Codex Desktop bug](https://github.com/openai/codex/issues/19694) tracked by
 [opencodex #241](https://github.com/lidge-jun/opencodex/issues/241).

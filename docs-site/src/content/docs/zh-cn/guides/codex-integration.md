@@ -3,9 +3,9 @@ title: Codex 集成
 description: opencodex 如何将自身注入 Codex、同步模型目录、安装 shim，并干净地恢复。
 ---
 
-opencodex 通过修改 Codex 读取的两样东西，让 Codex 经由 proxy 路由：它的 config
-（`$CODEX_HOME/config.toml`，默认 `~/.codex/config.toml`）和它的 model catalog。每一次修改都
-是幂等且可逆的。
+opencodex 通过修改 Codex 读取的 config（`$CODEX_HOME/config.toml`，默认 `~/.codex/config.toml`），
+让 Codex 经由 proxy 路由。proxy 通过 `GET /v1/models` 协议提供 model catalog，不会让 Codex 固定使用
+生成的本地 catalog 文件。每一次修改都是幂等且可逆的。
 
 proxy 提供一条裸 `openai` Codex 登录路由，支持 Pool（默认）和 Direct 账号模式，另有
 `openai-apikey/<model>` 对应已配置的 API key。Pool 包含主账户加已添加账户；Direct 只使用调用方/
@@ -19,7 +19,6 @@ Codex 内置的 `openai` provider id，并将该 provider 指向 opencodex：
 
 ```toml
 # root keys, before the first table
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 # Auto-injected by opencodex
 openai_base_url = "http://127.0.0.1:10100/v1"
 
@@ -106,7 +105,6 @@ OpenAI Images 响应形状。provider 配置的 key 会在上游请求前替换�
 ```toml
 # root keys
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # appended at the end of the file
 # Auto-injected by opencodex
@@ -124,9 +122,10 @@ env_key = "OPENCODEX_API_AUTH_TOKEN"
 它包含专用 provider 形式。外部 provider 模式会保持这个 profile 不变。
 
 :::caution
-像 `openai_base_url`、`model_provider` 和 `model_catalog_json` 这样的 root keys **必须** 位于第一个
-`[table]` 头之前。注入器会保证这一点，移除自己留下的陈旧/重复副本，并且绝不会覆盖用户拥有的 root
-`openai_base_url`；如果已经存在一个这样的值，sync 仍会更新 catalog，但会报告路由没有被注入。
+像 `openai_base_url` 和 `model_provider` 这样的 root keys **必须** 位于第一个 `[table]` 头之前。
+注入器会保证这一点，并且绝不会覆盖用户拥有的 root `openai_base_url`。用户自有的自定义
+`model_catalog_json` override 会保留；指向 `opencodex-catalog.json` 的陈旧 override 会被移除，
+让 Codex 使用协议提供的 catalog。
 :::
 
 ## 共享模型目录
@@ -169,8 +168,8 @@ source 和 event marker。没有 manifest 的 `opencodex` 行会保持不变；�
 
 ## 模型目录同步
 
-Codex 显示的模型来自一个磁盘上的 catalog（默认是 `$CODEX_HOME/opencodex-catalog.json`）。在启动时以及执行
-`ocx sync` 时，opencodex 会：
+OpenCodex 会将合并后的 catalog materialize 到 `$CODEX_HOME/opencodex-catalog.json`，并通过 `GET /v1/models` 提供同一 catalog。
+Codex 消费协议响应，而不是本地文件 override。在启动时以及执行 `ocx sync` 时，opencodex 会：
 
 1. **备份**一次干净的 catalog 到 `~/.opencodex/catalog-backup.json`（这样 featuring 是可逆的）。
 2. **抓取**符合条件的 provider 的实时模型 catalog（缓存约 5 分钟；失败时先回退到上一个正常列表，再回退到

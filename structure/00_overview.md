@@ -26,9 +26,9 @@ archaeology, debugging, or source research.
 ## Product boundary
 
 opencodex is a local proxy for Codex. It does not patch Codex binaries. It changes local Codex
-state by writing root routing keys and a model catalog — a provider table only in the
+state by writing root routing keys — and a provider table only in the
 API-auth-header form described in [`02_config-and-codex-home.md`](02_config-and-codex-home.md) —
-then serves the Responses data plane:
+then serves the model catalog and Responses data plane over the protocol:
 
 ```text
 Codex CLI / TUI / App / SDK
@@ -98,7 +98,8 @@ opencodex state root does not undo those writes. Putting native Codex back is th
 
 - `websockets` defaults to `false`; only `true` advertises `supports_websockets`.
 - `CODEX_HOME` wins over `~/.codex` when present and valid.
-- Root TOML keys such as `model_provider` and `model_catalog_json` must stay before any table.
+- Root TOML keys such as `model_provider` must stay before any table; user-owned custom
+  `model_catalog_json` overrides are preserved at the root, but OpenCodex does not add one.
 - Routed model slugs use `provider/model`.
 - OpenAI has one `openai` Codex-login provider with Pool(default)/Direct modes and a separate `openai-apikey`; see [`08_openai-provider-tiers.md`](08_openai-provider-tiers.md).
 - Codex `spawn_agent` visibility depends on the first five featured catalog entries.

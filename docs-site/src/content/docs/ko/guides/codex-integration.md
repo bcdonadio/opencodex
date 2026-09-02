@@ -3,7 +3,7 @@ title: Codex 통합
 description: opencodex가 Codex에 자신을 주입하고, 모델 카탈로그를 동기화하고, shim을 설치하고, 깔끔하게 복원하는 방식.
 ---
 
-opencodex는 Codex가 읽는 두 가지, 즉 설정(`$CODEX_HOME/config.toml`, 기본값 `~/.codex/config.toml`)과 모델 카탈로그를 편집해서 Codex가 프록시를 경유하게 합니다. 모든 편집은 멱등적이며 되돌릴 수 있습니다.
+opencodex는 Codex가 읽는 설정(`$CODEX_HOME/config.toml`, 기본값 `~/.codex/config.toml`)을 편집해서 Codex가 프록시를 경유하게 합니다. 프록시는 `GET /v1/models` 프로토콜로 모델 카탈로그를 제공하며, Codex를 생성된 로컬 카탈로그 파일에 고정하지 않습니다. 모든 편집은 멱등적이며 되돌릴 수 있습니다.
 
 프록시는 bare `openai` Codex 로그인 경로 하나와 Pool(기본) 및 Direct 계정 모드, 그리고 설정된 API 키용 `openai-apikey/<model>`을 제공합니다. Pool은 메인 계정과 추가된 계정을 포함하고, Direct는 호출자/메인 bearer만 사용합니다. 경로들은 서로 fallback하지 않습니다. shipped v1 config는 marker 2로 이관되며, 수동 복원을 위해 `config.json.pre-openai-tiers-v2.bak`를 보존합니다.
 
@@ -13,7 +13,6 @@ opencodex는 Codex가 읽는 두 가지, 즉 설정(`$CODEX_HOME/config.toml`, �
 
 ```toml
 # root keys, before the first table
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 # Auto-injected by opencodex
 openai_base_url = "http://127.0.0.1:10100/v1"
 
@@ -70,7 +69,6 @@ OpenAI 호환 커스텀 gateway를 쓰려면 전용 provider를 설정하고 sta
 ```toml
 # root keys
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # appended at the end of the file
 # Auto-injected by opencodex
@@ -86,7 +84,7 @@ env_key = "OPENCODEX_API_AUTH_TOKEN"
 OpenCodex가 라우팅을 소유할 때는 두 모드 모두 `$CODEX_HOME/opencodex.config.toml`을 참고용/폴백 설정으로 작성합니다. loopback에서는 자동 주입이 사라졌을 때 수동으로 합칠 수 있는 root key가 들어가고, non-loopback에서는 전용 provider 형식이 들어갑니다. 외부 provider 모드는 이 프로필을 건드리지 않습니다.
 
 :::caution
-`openai_base_url`, `model_provider`, `model_catalog_json` 같은 root key는 첫 번째 `[table]` 헤더보다 **반드시** 앞에 있어야 합니다. 인젝터는 그 위치를 보장하고, 자신이 남긴 오래되었거나 중복된 복사본은 지웁니다. 사용자가 소유한 root `openai_base_url`은 덮어쓰지 않습니다. 그런 값이 있으면 sync는 카탈로그만 갱신하고 라우팅은 주입하지 않았다고 알립니다.
+`openai_base_url`, `model_provider` 같은 root key는 첫 번째 `[table]` 헤더보다 **반드시** 앞에 있어야 합니다. 인젝터는 그 위치를 보장하고 사용자가 소유한 root `openai_base_url`은 덮어쓰지 않습니다. 사용자가 소유한 맞춤 `model_catalog_json` override는 보존하며, `opencodex-catalog.json`을 가리키는 오래된 override는 제거해 Codex가 프로토콜 카탈로그를 사용하게 합니다.
 :::
 
 ## 공유 모델 카탈로그
@@ -112,7 +110,7 @@ Windows에서 Orca shell은 `CODEX_HOME`과 `ORCA_CODEX_HOME`을 Orca의 번들 
 
 ## 모델 카탈로그 동기화
 
-Codex는 디스크의 카탈로그(`$CODEX_HOME/opencodex-catalog.json`이 기본값)에 있는 모델을 보여줍니다. 시작 시와 `ocx sync` 시 opencodex는 다음을 수행합니다.
+OpenCodex는 병합된 카탈로그를 `$CODEX_HOME/opencodex-catalog.json`에 materialize하고 같은 카탈로그를 `GET /v1/models`로 제공합니다. Codex는 로컬 파일 override가 아니라 프로토콜 응답을 사용합니다. 시작 시와 `ocx sync` 시 opencodex는 다음을 수행합니다.
 
 1. 원본 카탈로그를 `~/.opencodex/catalog-backup.json`에 한 번 **백업**합니다(그래서 featuring도 되돌릴 수 있습니다).
 2. 적격한 provider의 live model catalog를 **가져옵니다**(약 5분 캐시, `modelCacheTtlMs` 기본값 `300000`; 마지막 정상 목록, 그다음 설정된 `models[]`로 fallback). Forward auth에는 model endpoint가 없고, Cursor는 `/models` 대신 `GetUsableModels` RPC를 사용합니다.

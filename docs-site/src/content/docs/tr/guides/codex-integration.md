@@ -3,10 +3,10 @@ title: Codex Entegrasyonu
 description: opencodex'in kendisini Codex'e nasıl enjekte ettiği, model kataloğunu nasıl senkronize ettiği, dolguları (shims) nasıl kurduğu ve nasıl temiz bir şekilde geri yüklediği.
 ---
 
-opencodex, Codex'in okuduğu iki şeyi düzenleyerek Codex'in proxy üzerinden
-yönlendirilmesini sağlar: yapılandırması (`$CODEX_HOME/config.toml`, varsayılan
-`~/.codex/config.toml`) ve model kataloğu. Her düzenleme eşkuvvetli (idempotent)
-ve geri alınabilirdir.
+opencodex, Codex'in okuduğu yapılandırmayı (`$CODEX_HOME/config.toml`, varsayılan
+`~/.codex/config.toml`) düzenleyerek Codex'in proxy üzerinden yönlendirilmesini sağlar.
+Proxy, model kataloğunu `GET /v1/models` protokolü üzerinden sunar; Codex'i oluşturulan yerel
+katalog dosyasına sabitlemez. Her düzenleme eşkuvvetli (idempotent) ve geri alınabilirdir.
 
 Proxy, Havuz (varsayılan) ve Doğrudan (Direct) hesap modlarına sahip tek bir
 yalın `openai` Codex girişi rotasının yanı sıra, yapılandırılmış API anahtarı
@@ -24,7 +24,6 @@ ve bu sağlayıcıyı opencodex'e yönlendirir:
 
 ```toml
 # kök anahtarlar, ilk tablodan önce
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 # Auto-injected by opencodex
 openai_base_url = "http://127.0.0.1:10100/v1"
 
@@ -131,7 +130,6 @@ kullanır:
 ```toml
 # kök anahtarlar
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # dosyanın sonuna eklenir
 # Auto-injected by opencodex
@@ -151,11 +149,11 @@ kök anahtarları içerir; geri döngü olmayanda ise özel sağlayıcı formunu
 Harici sağlayıcı modu bu profile dokunmaz.
 
 :::caution
-`openai_base_url`, `model_provider` ve `model_catalog_json` gibi kök anahtarlar
-ilk `[tablo]` başlığından önce **bulunmalıdır**. Enjektör bu yerleşimi garanti
-eder, kendi eski/yinelenen kopyalarını kaldırır ve kullanıcıya ait bir kök
-`openai_base_url`'in üzerine asla yazmaz; bir tane varsa senkronizasyon kataloğu
-günceller ancak yönlendirmenin enjekte edilmediğini bildirir.
+`openai_base_url` ve `model_provider` gibi kök anahtarlar ilk `[tablo]` başlığından
+önce **bulunmalıdır**. Enjektör bu yerleşimi garanti eder ve kullanıcıya ait bir kök
+`openai_base_url`'in üzerine asla yazmaz. Kullanıcıya ait özel `model_catalog_json`
+geçersiz kılması korunur; `opencodex-catalog.json` dosyasına işaret eden eski geçersiz
+kılmalar kaldırılır, böylece Codex protokol kataloğunu kullanır.
 :::
 
 ## Paylaşılan model kataloğu
@@ -223,9 +221,8 @@ yedeklenen meta verileri geri yükler. Geçmişe dokunulmadan bırakmak için
 
 ## Model kataloğu senkronizasyonu
 
-Codex modelleri diskteki bir katalogdan gösterir (varsayılan olarak
-`$CODEX_HOME/opencodex-catalog.json`). Başlangıçta ve `ocx sync` sırasında
-opencodex:
+OpenCodex birleştirilmiş kataloğu `$CODEX_HOME/opencodex-catalog.json` yolunda oluşturur ve aynı kataloğu `GET /v1/models` üzerinden sunar.
+Codex yerel dosya geçersiz kılmasını değil, protokol yanıtını kullanır. Başlangıçta ve `ocx sync` sırasında opencodex:
 
 1. Öne çıkarmanın geri alınabilir olması için bozulmamış kataloğu
    `~/.opencodex/catalog-backup.json` konumuna bir kez **yedekler**.

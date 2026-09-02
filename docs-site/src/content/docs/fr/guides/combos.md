@@ -77,7 +77,7 @@ sélecteurs concrets fournisseur/modèle qui le composent.
 ## Compatibilité avec la liste d’autorisation native de Codex Desktop
 
 Certaines versions de Codex Desktop appliquent une liste d’autorisation `available_models` réservée aux modèles natifs après que
-le serveur d’application a déjà chargé `model_catalog_json`. Des identifiants routés normaux tels que
+le serveur d’application a déjà chargé le catalogue fourni par le proxy. Des identifiants routés normaux tels que
 `Nova1/codex-gpt-5.6-sol` restent alors utilisables dans la CLI, mais sont absents du sélecteur Desktop. Il s’agit du
 [bogue de Codex Desktop](https://github.com/openai/codex/issues/19694) en amont, suivi dans
 [opencodex #241](https://github.com/lidge-jun/opencodex/issues/241).

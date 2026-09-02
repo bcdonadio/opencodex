@@ -195,9 +195,9 @@ preserving a stale one would block every later migration.
 [Decision Log]
 - 목적과 의도: Prevent account-gated native models from being shown or dispatched through a
   ChatGPT account that upstream does not authorize.
-- 기존 구현 및 제약 조건: A static global Daybreak row solved clean-install discovery for
-  entitled accounts, but Pool accounts can hold different grants and Codex's injected catalog does
-  not refresh itself.
+- 기존 구현 및 제약 조건: A global Daybreak row solved clean-install discovery for entitled
+  accounts, but Pool accounts can hold different grants and a catalog row alone cannot prove which
+  account may serve it.
 - 검토한 주요 대안: Infer grants from plan labels, learn only from prompt failures, bind Daybreak
   permanently to main, or rewrite the wire id to `gpt-5.6-sol`.
 - 선택한 방식: Share bounded authenticated per-account model-roster evidence between catalog sync,

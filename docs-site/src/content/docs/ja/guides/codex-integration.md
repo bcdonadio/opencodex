@@ -3,7 +3,7 @@ title: Codexの統合
 description: opencodex が自身を Codex に挿入し、モデル カタログを同期し、shim をインストールし、クリーンに復元する方法。
 ---
 
-opencodex は、Codex が読み取る 2 つの内容 (構成 (`$CODEX_HOME/config.toml`、デフォルト `~/.codex/config.toml`) とそのモデル カタログ) を編集することで、プロキシを経由する Codex ルートを作成します。すべての編集は冪等であり、元に戻すことができます。
+opencodex は、Codex が読み取る構成 (`$CODEX_HOME/config.toml`、デフォルト `~/.codex/config.toml`) を編集することで、プロキシを経由する Codex ルートを作成します。プロキシは `GET /v1/models` プロトコルでモデル カタログを提供し、生成されたローカル カタログ ファイルに Codex を固定しません。すべての編集は冪等であり、元に戻すことができます。
 
 プロキシは、プール (デフォルト) およびダイレクト アカウント モードで 1 つのベア `openai` Codex ログイン ルートと、構成された API キーの `openai-apikey/<model>` を公開します。プールにはメインアカウントと追加アカウントが含まれます。直接は、発信者/メインベアラーのみを使用します。ルートは相互にフォールバックしません。出荷された v1 設定はマーカー 2 に移行され、手動復元用に `config.json.pre-openai-tiers-v2.bak` が保存されます。
 
@@ -13,7 +13,6 @@ opencodex は、Codex が読み取る 2 つの内容 (構成 (`$CODEX_HOME/confi
 
 ```toml
 # root keys, before the first table
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 # Auto-injected by opencodex
 openai_base_url = "http://127.0.0.1:10100/v1"
 
@@ -78,7 +77,6 @@ OpenAI 互換のカスタム ゲートウェイの場合は、専用プロバイ
 ```toml
 # root keys
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # appended at the end of the file
 # Auto-injected by opencodex
@@ -94,7 +92,7 @@ env_key = "OPENCODEX_API_AUTH_TOKEN"
 OpenCodex がルーティングを所有している場合、どちらのモードも参照/フォールバック設定として `$CODEX_HOME/opencodex.config.toml` を書き込みます。ループバックでは、自動挿入が削除された場合に手動でマージできるルート キーが含まれています。非ループバックでは、専用のプロバイダー フォームが含まれます。外部プロバイダー モードでは、このプロファイルは変更されません。
 
 :::caution
-`openai_base_url`、`model_provider`、`model_catalog_json` などのルート キーは、最初の `[table]` ヘッダーの前に**なければなりません**。インジェクターはその配置を保証し、それ自身の古い/重複したコピーを削除し、ユーザー所有のルート `openai_base_url` を決して上書きしません。存在する場合、sync はカタログを更新しますが、ルーティングが挿入されなかったことを報告します。
+`openai_base_url`、`model_provider` などのルート キーは、最初の `[table]` ヘッダーの前に**なければなりません**。インジェクターはその配置を保証し、ユーザー所有のルート `openai_base_url` を決して上書きしません。ユーザー所有のカスタム `model_catalog_json` オーバーライドは保持されますが、`opencodex-catalog.json` を指す古いオーバーライドは削除され、Codex はプロトコル カタログを使用します。
 :::
 
 ## 共有モデルカタログ
@@ -120,7 +118,7 @@ Windows では、ChatGPT/Codex アプリが `%USERPROFILE%\\.codex` を読み取
 
 ## モデルカタログの同期
 
-Codex には、ディスク上のカタログ (デフォルトでは `$CODEX_HOME/opencodex-catalog.json`) からのモデルが表示されます。起動時および `ocx sync`、opencodex:
+OpenCodex はマージ済みカタログを `$CODEX_HOME/opencodex-catalog.json` に具体化し、同じカタログを `GET /v1/models` で提供します。Codex はローカル ファイルのオーバーライドではなく、プロトコルの応答を使用します。起動時および `ocx sync`、opencodex:
 
 1. **元のカタログを `~/.opencodex/catalog-backup.json` に一度バックアップ**します (したがって、フィーチャリングは
 可逆）。

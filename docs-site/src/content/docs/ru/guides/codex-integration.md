@@ -3,9 +3,10 @@ title: Интеграция с Codex
 description: Как opencodex внедряется в Codex, синхронизирует каталог моделей, устанавливает shim'ы и чисто восстанавливает исходное состояние.
 ---
 
-opencodex заставляет Codex маршрутизировать запросы через прокси, редактируя две сущности,
-которые читает Codex: его конфигурацию (`$CODEX_HOME/config.toml`, по умолчанию
-`~/.codex/config.toml`) и его каталог моделей. Все правки идемпотентны и обратимы.
+opencodex заставляет Codex маршрутизировать запросы через прокси, редактируя его конфигурацию
+(`$CODEX_HOME/config.toml`, по умолчанию `~/.codex/config.toml`). Прокси предоставляет каталог
+моделей через протокол `GET /v1/models` и не привязывает Codex к сгенерированному локальному файлу.
+Все правки идемпотентны и обратимы.
 
 Прокси предоставляет один «голый» маршрут входа Codex `openai` с режимами аккаунтов Pool
 (по умолчанию) и Direct, а также `openai-apikey/<model>` для настроенного API-ключа. Pool
@@ -20,7 +21,6 @@ opencodex заставляет Codex маршрутизировать запро
 
 ```toml
 # root keys, before the first table
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 # Auto-injected by opencodex
 openai_base_url = "http://127.0.0.1:10100/v1"
 
@@ -118,7 +118,6 @@ caller bearer перед отправкой upstream-запроса.
 ```toml
 # root keys
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # appended at the end of the file
 # Auto-injected by opencodex
@@ -137,10 +136,10 @@ reference/fallback-конфиг. На loopback в нём лежат root key, к
 external-provider этот профиль не трогает.
 
 :::caution
-Root key вроде `openai_base_url`, `model_provider` и `model_catalog_json` **обязаны** располагаться
-до первого заголовка `[table]`. Injector гарантирует это размещение, удаляет собственные
-устаревшие или дублирующиеся копии и никогда не перезаписывает user-owned root `openai_base_url`;
-если такой ключ уже существует, sync обновляет каталог, но сообщает, что routing не был внедрён.
+Root key вроде `openai_base_url` и `model_provider` **обязаны** располагаться до первого заголовка `[table]`.
+Injector гарантирует это размещение и никогда не перезаписывает user-owned root `openai_base_url`.
+Пользовательский `model_catalog_json` override сохраняется; устаревшие override, указывающие на
+`opencodex-catalog.json`, удаляются, чтобы Codex использовал каталог из протокола.
 :::
 
 ## Общий каталог моделей
@@ -191,8 +190,8 @@ marker — включая корректную историю выделенно
 
 ## Синхронизация каталога моделей
 
-Codex показывает модели из каталога на диске (`$CODEX_HOME/opencodex-catalog.json` по
-умолчанию). При старте и при `ocx sync` opencodex:
+OpenCodex материализует объединённый каталог в `$CODEX_HOME/opencodex-catalog.json` и предоставляет тот же каталог через
+`GET /v1/models`. Codex использует ответ протокола, а не локальный файловый override. При старте и при `ocx sync` opencodex:
 
 1. **Создаёт резервную копию** исходного каталога один раз в `~/.opencodex/catalog-backup.json`
    (чтобы «feature»-правки были обратимы).

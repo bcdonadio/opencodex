@@ -3,8 +3,9 @@ title: Codex 整合
 description: opencodex 如何將自身注入 Codex、同步模型目錄、安裝 shim，並乾淨地恢復。
 ---
 
-opencodex 透過修改 Codex 會讀取的兩項內容，讓 Codex 經由 proxy 路由：其設定
-（`$CODEX_HOME/config.toml`，預設為 `~/.codex/config.toml`）與模型目錄。每項修改都是冪等且可逆的。
+opencodex 透過修改 Codex 會讀取的設定（`$CODEX_HOME/config.toml`，預設為 `~/.codex/config.toml`），
+讓 Codex 經由 proxy 路由。proxy 透過 `GET /v1/models` 協定提供模型目錄，不會讓 Codex 綁定到產生的本機目錄檔案。
+每項修改都是冪等且可逆的。
 
 proxy 提供一條裸 `openai` Codex 登入路徑，可使用 Pool（預設）與 Direct 帳號模式，另提供
 `openai-apikey/<model>` 給已設定的 API 金鑰。Pool 包含主帳號與新增帳號；Direct 只使用 caller／主登入
@@ -18,7 +19,6 @@ bearer。這些路徑不會彼此 fallback。shipped v1 設定會遷移到 marke
 
 ```toml
 # 根級鍵，必須位於第一個 table 之前
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 # Auto-injected by opencodex
 openai_base_url = "http://127.0.0.1:10100/v1"
 
@@ -104,7 +104,6 @@ provider：
 ```toml
 # 根級鍵
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # 追加到檔案末尾
 # Auto-injected by opencodex
@@ -122,9 +121,9 @@ env_key = "OPENCODEX_API_AUTH_TOKEN"
 專用 provider 形式。外部 provider 模式不會修改此 profile。
 
 :::caution
-`openai_base_url`、`model_provider`、`model_catalog_json` 等根級鍵**必須**位於第一個 `[table]`
-標頭之前。注入器會保證此位置、移除自己留下的舊值或重複項，而且絕不覆寫使用者自有的根級
-`openai_base_url`；若該值存在，同步仍會更新模型目錄，但會回報路由未注入。
+`openai_base_url`、`model_provider` 等根級鍵**必須**位於第一個 `[table]` 標頭之前。注入器會保證此位置，
+而且絕不覆寫使用者自有的根級 `openai_base_url`。使用者自有的自訂 `model_catalog_json` 覆寫會保留；
+指向 `opencodex-catalog.json` 的舊覆寫會移除，讓 Codex 使用協定提供的目錄。
 :::
 
 ## 共享模型目錄
@@ -175,8 +174,8 @@ marker；正常的專用 provider 歷史也包含在內。請先備份狀態，�
 
 ## 模型目錄同步
 
-Codex 從磁碟上的目錄顯示模型，預設為 `$CODEX_HOME/opencodex-catalog.json`。啟動時與執行
-`ocx sync` 時，opencodex 會：
+OpenCodex 會將合併後的目錄具體化至 `$CODEX_HOME/opencodex-catalog.json`，並透過 `GET /v1/models` 提供相同目錄。
+Codex 會使用協定回應，而非本機檔案覆寫。啟動時與執行 `ocx sync` 時，opencodex 會：
 
 1. **備份**一次原始目錄到 `~/.opencodex/catalog-backup.json`，讓置頂操作可逆。
 2. **取得**符合條件的 provider 即時模型目錄，快取約 5 分鐘；失敗時先 fallback 到上一份正常列表，

@@ -94,7 +94,7 @@ export function effortCapAppliesTo(
  *
  * Catalog fallback fires only for the ChatGPT-backend native passthrough IDENTITY
  * (adapter "openai-responses" + authMode "forward", the fresh-install `openai`
- * provider shape): the injected catalog is authoritative exactly for models Codex
+ * provider shape): the OpenCodex catalog is authoritative exactly for models Codex
  * validates against that backend. A custom responses provider (key mode) serving a
  * native-looking bare id must NOT inherit the unrelated native ladder.
  */

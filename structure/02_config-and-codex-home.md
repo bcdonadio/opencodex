@@ -297,7 +297,6 @@ keeps its native provider id, which decides whether existing thread history stil
 **Loopback (default).** A single marker-owned root override, no provider table:
 
 ```toml
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 openai_base_url = "http://127.0.0.1:10100/v1"
 ```
 
@@ -314,7 +313,6 @@ ownership.
 
 ```toml
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 [model_providers.opencodex]
 name = "OpenCodex Proxy"
@@ -326,7 +324,11 @@ env_key = "OPENCODEX_API_AUTH_TOKEN"
 
 Root TOML keys must be written before the first `[table]`. Re-injection strips the stale form of
 both shapes — opencodex blocks, injected root base-url overrides, stale root context-window
-overrides, and stale catalog paths — before rewriting, so switching between forms leaves no residue.
+overrides, and stale OpenCodex catalog paths — before rewriting, so switching between forms leaves
+no residue. The generated catalog is served through `GET /v1/models`; the injector does not write
+it as `model_catalog_json`, because doing so would replace Codex's online model manager with a
+static local snapshot. A user-owned custom `model_catalog_json` remains untouched and is mirrored
+to the fallback profile.
 
 Native Codex sub-agent defaults are a separate, explicit opt-in. When
 `syncCodexSubagentDefaults` is true and `injectionModel` is set, injection writes marker-owned
