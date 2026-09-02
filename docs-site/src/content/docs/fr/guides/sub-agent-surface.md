@@ -141,11 +141,6 @@ L’option expérimentale `agentTaskRecovery`, désactivée par défaut, peut r�
 tâche native envoyée vers une route externe. Elle utilise un transfert Responses brut vers le point de
 terminaison ChatGPT `/responses` fixe et la forme d’identification entrante du fournisseur canonique
 `openai` configuré avec `authMode: "forward"`.
-Lorsqu’elle est activée, opencodex retire d’abord uniquement les annotations `encrypted: true` des
-champs de message des outils v2 `spawn_agent`, `send_message` et `followup_task` avant d’envoyer le
-tour du parent natif. Les nouveaux messages initiaux et de suivi sont ainsi matérialisés en texte
-clair à chaque profondeur autorisée ; un texte chiffré créé auparavant utilise encore la requête de
-récupération comme solution de repli.
 
 Cette récupération est disponible uniquement lorsque le proxy écoute sur l’interface de bouclage. Elle ne
 substitue jamais une autre clé API, l’identifiant d’un autre fournisseur ou un autre compte Codex. Seuls les

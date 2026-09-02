@@ -141,10 +141,6 @@ content when you control the caller.
 An experimental, disabled-by-default `agentTaskRecovery` option can recover this specific native-
 to-routed shape through a raw Responses passthrough to the fixed ChatGPT `/responses` endpoint using
 the incoming credential shape used by the canonical `openai` provider with `authMode: "forward"`.
-When enabled, opencodex first removes only the `encrypted: true` annotations from the message fields
-of V2 `spawn_agent`, `send_message`, and `followup_task` tools before a native parent turn is sent.
-New initial and follow-up messages are therefore materialized as plaintext at every allowed nesting
-depth; ciphertext created before that parent turn still uses the recovery request as a fallback.
 Recovery is available only while the proxy is bound to loopback. It never substitutes API-key
 authentication, another provider credential, or another Codex account. Only `authorization`, matching
 `chatgpt-account-id`, and optional `openai-beta`/`user-agent` metadata are forwarded. The inbound
