@@ -1,10 +1,10 @@
 ---
 title: Integrations
-description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness, MiniMax Code and Prime Agent from the dashboard — one switch per client, with a backup taken before every write.
+description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent and Aside from the dashboard — one switch per client, with a backup taken before every write.
 ---
 
 The **Integrations** tab writes opencodex's provider block into a client's own config
-file, and removes it again. Ten clients work this way, each with a switch:
+file, and removes it again. Twelve clients work this way, each with a switch:
 
 | Client | Config file | Format | When the change takes effect | Credential |
 |---|---|---|---|---|
@@ -18,6 +18,14 @@ file, and removes it again. Ten clients work this way, each with a switch:
 | DeepSeek Harness (DSH) | `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`) | YAML | hot reload | non-secret loopback bearer placeholder |
 | MiniMax Code | `~/.minimax/config.yaml` | YAML | new sessions, or after opening the model picker | loopback placeholder |
 | Prime Agent | `~/.prime/agent/models.json` | JSON | new sessions | loopback placeholder |
+| ZCode | `~/.zcode/v2/config.json` | JSON | on restart | loopback placeholder |
+| Aside | `~/.aside/u/<account>/models.json` | JSON | after fully quitting and reopening Aside | loopback placeholder |
+
+The managed OpenCode integration owns two fragments: `provider.opencodex` (opencode V1) and
+`providers.opencodex` (opencode V2). Only the V2 block carries the per-model reasoning-effort
+variants, so both are written and kept in sync; they name the same provider and model ids, and
+opencode V2 merges them into one provider entry. Apply, Refresh, Disable, and Restore act on both
+fragments, and your other providers, agents, keybinds, and MCP entries stay untouched.
 
 Managed DSH support has a compatibility floor of **DSH 0.1.0-rc.6**. OpenCodex owns only
 `llm-pi-ai.providers.opencodex`; Apply and Refresh replace that fragment, Disable removes only that
@@ -39,6 +47,17 @@ disagree about which file is meant. Its managed block owns only
 `providers.opencodex`, so other providers and any `modelOverrides` you have set
 stay untouched. Prime Agent reads `models.json` when a session starts, so start
 a new session after connecting it.
+
+Aside is per-account: its state lives under `~/.aside/u/<account>/` and opencodex
+writes the catalog of whichever account Aside's own `accounts.json` names as
+current. If that manifest is missing or unreadable the integration refuses rather
+than guessing an account, because a guess on a multi-account machine would write
+into a different account's catalog. Its managed block owns only
+`providers.opencodex`, so your other Aside providers stay untouched.
+
+One caveat specific to Aside: the running app rewrites `models.json` itself, so
+fully quit and reopen Aside after applying, the same way Claude Desktop needs a
+restart. Aside's block is loopback-only and never carries a real credential.
 
 Paths honor each client's own environment override where it has one. For OMP,
 `OMP_PROFILE` wins over `PI_PROFILE` by presence, even when explicitly empty. A named profile
@@ -105,6 +124,14 @@ written as whole documents), or
 whenever our own entries were edited, the switch locks and disable refuses rather
 than guessing which edits were yours.
 
+That lock is no longer a dead end. A conflicted client shows **Replace** next to its
+switch, on both the overview card and the client's own page. It replaces whatever
+holds our settings with the block opencodex would write, and it asks first: the
+dialog names the file, says what is lost, and points at the snapshot that makes it
+undoable. The switch itself stays locked, because the switch cannot know which edits
+you meant to keep — only you can say so. Nothing else is relaxed: a file we cannot
+parse, or one whose structure we cannot reason about, still refuses.
+
 ## What to expect, honestly
 
 **Formatting is generally not preserved.** Applying parses a config and writes it back
@@ -139,10 +166,10 @@ managed integration for now.
 `opencodex-loopback` placeholder rather than a key. No real credential is ever written
 into any client config.
 
-**For `ocx opencode`, the launcher's provider block wins.** That launcher injects
-`provider.opencodex` through `OPENCODE_CONFIG_CONTENT`, which outranks the same entry on
-disk — the rest of your opencode config still applies as usual. The switch here is what
-matters when you launch `opencode` directly.
+**For `ocx opencode`, the launcher's provider blocks win.** That launcher injects
+`provider.opencodex` and `providers.opencodex` through `OPENCODE_CONFIG_CONTENT`, which
+outranks the same entries on disk — the rest of your opencode config still applies as
+usual. The switch here is what matters when you launch `opencode` directly.
 
 ## From the terminal
 
@@ -155,6 +182,16 @@ ocx integration client disable --client hermes
 ocx integration client history --client hermes
 ocx integration client restore --op <opId> [--confirm-drift]
 ```
+
+`--overwrite-conflict` is the terminal form of **Replace**:
+
+```bash
+ocx integration client enable --client zcode --overwrite-conflict
+```
+
+Like `--confirm-drift`, it is never assumed — without it a conflict is still refused.
+It applies only to `enable`; forcing a *disable* over a conflict would delete a block
+we never wrote, so that combination is rejected.
 
 For MiniMax Code, connect the provider once and launch through the checked wrapper:
 

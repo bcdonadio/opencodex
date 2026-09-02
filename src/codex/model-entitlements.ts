@@ -13,6 +13,7 @@ import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "./catalog/native-models";
 import { loadPersistedCodexRuntime } from "./runtime";
 import { codexRuntimeStateEpoch } from "./runtime";
 import upstreamModelsSnapshot from "./data/upstream-models.json";
+import { codexCredentialMutationEpoch } from "./credential-mutation-epoch";
 
 const CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models";
 
@@ -71,6 +72,37 @@ export function deriveGatedClientVersionFloor(
 }
 
 /**
+ * Lowest `client_version` MEASURED to actually return the account-gated rows.
+ *
+ * The bundled snapshot is not sufficient on its own. It records `0.142.2` for the gpt-5.6
+ * rows, and `0.142.2` is a version upstream answers with 200 and five models, none of them
+ * gpt-5.6; `0.144.0` and above answer with the gated rows present
+ * (devlog/_fin/260817_native_gpt56_1m_context/001_measurement_evidence.md, independently
+ * reproduced by the #2886 and #3022 reporters). So a floor derived from the snapshot alone
+ * asks a question whose honest answer is an empty gated set — and the fail-closed gate then
+ * reads that absence as a confirmed denial, which is how 2.36.0 removed sol/terra/luna from
+ * accounts that own them (#3022).
+ *
+ * This is a measurement, not a preference, which is why it composes with the derivation
+ * instead of replacing it: see `composeGatedClientVersionFloor`.
+ */
+const MEASURED_GATED_CLIENT_VERSION_MINIMUM = "0.144.0";
+
+/**
+ * Lowest versions measured to return each account-gated model when the account owns it.
+ *
+ * This is deliberately independent of the bundled upstream snapshot. The snapshot still
+ * records 0.142.2 for sol/terra/luna, while live measurements show that upstream omits them
+ * below 0.144.0. Daybreak has no snapshot row or independent minimum, so its omission remains
+ * authoritative instead of inheriting a guessed floor from another model.
+ */
+export const ACCOUNT_GATED_NATIVE_MODEL_MINIMUM_CLIENT_VERSIONS: ReadonlyMap<string, string> = new Map([
+  ["gpt-5.6-sol", MEASURED_GATED_CLIENT_VERSION_MINIMUM],
+  ["gpt-5.6-terra", MEASURED_GATED_CLIENT_VERSION_MINIMUM],
+  ["gpt-5.6-luna", MEASURED_GATED_CLIENT_VERSION_MINIMUM],
+]);
+
+/**
  * Fallback when the snapshot records no usable gated floor.
  *
  * Not every gated slug carries a `minimal_client_version` — `gpt-daybreak-blue-latest` has no
@@ -80,10 +112,41 @@ export function deriveGatedClientVersionFloor(
  */
 const GATED_MODEL_CLIENT_VERSION_FLOOR_FALLBACK = "0.142.2";
 
-export const GATED_MODEL_CLIENT_VERSION_FLOOR: string =
-  deriveGatedClientVersionFloor(
-    (upstreamModelsSnapshot as { models?: Array<Record<string, unknown>> }).models ?? [],
-  ) ?? GATED_MODEL_CLIENT_VERSION_FLOOR_FALLBACK;
+/**
+ * The floor actually used: the highest of what the snapshot derives, what we have measured
+ * upstream to honour, and the fallback.
+ *
+ * Composed rather than hardcoded so the two sources cannot drift into a contradiction. The
+ * snapshot may raise the floor; it may never lower it below a measurement. When a future
+ * snapshot refresh records `0.144.0` or higher, the derivation takes over naturally and
+ * `MEASURED_GATED_CLIENT_VERSION_MINIMUM` goes inert instead of fighting it.
+ */
+function composeGatedClientVersionFloor(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  gatedSlugs: ReadonlySet<string> = ACCOUNT_GATED_NATIVE_OPENAI_MODELS,
+): string {
+  const derived = deriveGatedClientVersionFloor(rows, gatedSlugs) ?? GATED_MODEL_CLIENT_VERSION_FLOOR_FALLBACK;
+  return compareClientVersions(derived, MEASURED_GATED_CLIENT_VERSION_MINIMUM) >= 0
+    ? derived
+    : MEASURED_GATED_CLIENT_VERSION_MINIMUM;
+}
+
+export const GATED_MODEL_CLIENT_VERSION_FLOOR: string = composeGatedClientVersionFloor(
+  (upstreamModelsSnapshot as { models?: Array<Record<string, unknown>> }).models ?? [],
+);
+
+/** Test-only seam: the composition on synthetic rows, so both directions can be proven. */
+export function composeGatedClientVersionFloorForTests(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  gatedSlugs?: ReadonlySet<string>,
+): string {
+  return composeGatedClientVersionFloor(rows, gatedSlugs);
+}
+
+/** Test-only seam: the ordering the floor composition relies on. */
+export function compareClientVersionsForTests(left: string, right: string): number {
+  return compareClientVersions(left, right);
+}
 
 /** Numeric-segment comparison. Only used to pick the highest floor in a known-good set. */
 function compareClientVersions(left: string, right: string): number {
@@ -182,6 +245,7 @@ function memoizedPersistedRuntimeVersion(
   return selected;
 }
 const MODEL_ROSTER_FAILURE_TTL_MS = 15_000;
+const MODEL_ROSTER_NEGATIVE_CREDENTIAL_TTL_MS = 5_000;
 const MODEL_ROSTER_TIMEOUT_MS = 8_000;
 const MODEL_ROSTER_MAX_BYTES = 2 * 1024 * 1024;
 const MODEL_ROSTER_CACHE_MAX = 64;
@@ -220,6 +284,25 @@ export interface CodexModelEntitlementCredentialSnapshot {
   readonly credentialIdentity: string;
 }
 
+export type CodexModelEntitlementProvenance =
+  | { readonly kind: "parsed-empty" }
+  | { readonly kind: "http-error"; readonly httpStatus: number }
+  | { readonly kind: "network-error" }
+  | { readonly kind: "timeout" }
+  | { readonly kind: "unparseable" };
+
+export type CodexModelEntitlementStatus =
+  | { readonly status: "unavailable" }
+  | { readonly status: "fresh" }
+  | { readonly status: "unconfirmed-empty" }
+  | { readonly status: "failed"; readonly reason: "http-error"; readonly httpStatus: number }
+  | {
+      readonly status: "failed";
+      readonly reason: Exclude<CodexModelEntitlementProvenance["kind"], "parsed-empty" | "http-error">;
+      readonly httpStatus?: never;
+    }
+  | { readonly status: "expired-refresh-in-flight" };
+
 interface CachedAccountModels {
   readonly credentialIdentity: string;
   /**
@@ -231,13 +314,17 @@ interface CachedAccountModels {
   readonly expiresAt: number;
   readonly models: ReadonlySet<string>;
   readonly confirmed: boolean;
+  readonly provenance?: CodexModelEntitlementProvenance;
 }
 
 export interface CodexModelEntitlementSnapshot {
   readonly modelsByAccount: ReadonlyMap<string, ReadonlySet<string>>;
+  readonly clientVersionByAccount: ReadonlyMap<string, string>;
   readonly confirmedAccountIds: ReadonlySet<string>;
   readonly credentialIdentities: ReadonlyMap<string, string>;
 }
+
+export type CodexModelEntitlementState = "granted" | "denied" | "unknown";
 
 export interface CodexModelEntitlementResolveOptions {
   readonly fetcher?: typeof fetch;
@@ -261,10 +348,42 @@ export interface CodexModelEntitlementResolveOptions {
   readonly credentialSnapshot?: typeof accountCredentialSnapshot;
   /** Accounts whose credentials must not be read while another lifecycle owns them. */
   readonly excludeAccountIds?: ReadonlySet<string>;
+  /** Ensure-only fence; ordinary request resolvers retain their established flight identity. */
+  readonly credentialMutationEpoch?: number;
+}
+
+export interface CodexEntitlementFreshnessOptions extends Pick<
+  CodexModelEntitlementResolveOptions,
+  | "clientVersion"
+  | "credentialSnapshot"
+  | "fetcher"
+  | "loadPersistedRuntime"
+  | "nativeMainRefreshDependencies"
+  | "now"
+  | "signal"
+> {
+  readonly waitMs?: number;
 }
 
 const accountModelsCache = new Map<string, CachedAccountModels>();
 const accountModelsFlights = new Map<string, Promise<CachedAccountModels>>();
+
+interface NegativeCredentialMemo {
+  readonly credentialIdentity: string | null;
+  readonly mutationEpoch: number;
+  readonly expiresAt: number;
+}
+
+interface EntitlementEnsureFlight {
+  readonly startedAt: number;
+  readonly promise: Promise<void>;
+  readonly clientVersion: string;
+  readonly identityVector: ReadonlyMap<string, string | null>;
+  readonly workset: readonly string[];
+}
+
+const negativeCredentialMemo = new Map<string, NegativeCredentialMemo>();
+const entitlementEnsureFlights = new Map<string, EntitlementEnsureFlight>();
 
 /**
  * Cache key. The roster is version-specific, so the version has to be part of the identity —
@@ -387,6 +506,26 @@ function parseAccountModels(text: string): ReadonlySet<string> | null {
   }
 }
 
+function unconfirmedAccountModels(
+  credential: CodexModelEntitlementCredentialSnapshot,
+  clientVersion: string,
+  now: number,
+  provenance: CodexModelEntitlementProvenance,
+): CachedAccountModels {
+  return {
+    credentialIdentity: credential.credentialIdentity,
+    clientVersion,
+    expiresAt: now + MODEL_ROSTER_FAILURE_TTL_MS,
+    models: new Set(),
+    confirmed: false,
+    provenance,
+  };
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.name === "TimeoutError";
+}
+
 async function fetchAccountModels(
   credential: CodexModelEntitlementCredentialSnapshot,
   fetcher: typeof fetch,
@@ -406,29 +545,53 @@ async function fetchAccountModels(
       redirect: "error",
       signal: controller.signal,
     });
+    if (!response.ok) {
+      return unconfirmedAccountModels(credential, clientVersion, now, {
+        kind: "http-error",
+        httpStatus: response.status,
+      });
+    }
     const body = await readBoundedResponseBody(response, {
       signal: controller.signal,
       maxBytes: MODEL_ROSTER_MAX_BYTES,
       fatalUtf8: true,
     });
-    const models = response.ok && body.displaySafe && !body.truncated
-      ? parseAccountModels(body.text)
-      : null;
+    if (!body.displaySafe || body.truncated) {
+      return unconfirmedAccountModels(credential, clientVersion, now, { kind: "unparseable" });
+    }
+    const models = parseAccountModels(body.text);
+    if (models === null) {
+      return unconfirmedAccountModels(credential, clientVersion, now, { kind: "unparseable" });
+    }
+    // A roster is a confirmation only when it lists something usable. `models` is a Set, and an
+    // empty Set is truthy, so `models !== null` used to call `{"models":[]}` — and a response
+    // whose every row was hidden or api-disabled — a confirmed answer, and lock it in for the
+    // five-minute success TTL. Absence of evidence is not evidence of absence: an entitled
+    // account asked under too old a client version answers with no gated rows, and treating
+    // that as authoritative is exactly how 2.36.0 denied sol/terra/luna to accounts that own
+    // them (#3022). No usable rows means unconfirmed, on the 15s failure TTL, asked again.
+    const usable = models.size > 0;
+    if (!usable) {
+      return unconfirmedAccountModels(credential, clientVersion, now, { kind: "parsed-empty" });
+    }
+    const hasUnknownGatedAbsence = [...ACCOUNT_GATED_NATIVE_MODEL_MINIMUM_CLIENT_VERSIONS]
+      .some(([modelId, minimum]) => (
+        !models.has(modelId) && compareClientVersions(clientVersion, minimum) < 0
+      ));
     return {
       credentialIdentity: credential.credentialIdentity,
       clientVersion,
-      expiresAt: now + (models ? MODEL_ROSTER_TTL_MS : MODEL_ROSTER_FAILURE_TTL_MS),
-      models: models ?? new Set(),
-      confirmed: models !== null,
+      expiresAt: now + (!hasUnknownGatedAbsence
+        ? MODEL_ROSTER_TTL_MS
+        : MODEL_ROSTER_FAILURE_TTL_MS),
+      models,
+      confirmed: true,
     };
-  } catch {
-    return {
-      credentialIdentity: credential.credentialIdentity,
-      clientVersion,
-      expiresAt: now + MODEL_ROSTER_FAILURE_TTL_MS,
-      models: new Set(),
-      confirmed: false,
-    };
+  } catch (error) {
+    const provenance = isTimeoutError(error) || isTimeoutError(controller.signal.reason)
+      ? { kind: "timeout" } as const
+      : { kind: "network-error" } as const;
+    return unconfirmedAccountModels(credential, clientVersion, now, provenance);
   } finally {
     clearTimeout(timer);
   }
@@ -457,6 +620,7 @@ async function modelsForCredential(
   fetcher: typeof fetch,
   now: number,
   clientVersion: string,
+  credentialMutationEpoch?: number,
 ): Promise<CachedAccountModels> {
   const cached = accountModelsCache.get(cacheKeyFor(credential.accountId, clientVersion));
   if (
@@ -465,7 +629,8 @@ async function modelsForCredential(
     && cached.expiresAt > now
   ) return cached;
 
-  const flightKey = `${credential.accountId}\u0000${credential.credentialIdentity}\u0000${clientVersion}`;
+  const flightKey = `${credential.accountId}\u0000${credential.credentialIdentity}\u0000${clientVersion}`
+    + (credentialMutationEpoch === undefined ? "" : `\u0000${credentialMutationEpoch}`);
   const existing = accountModelsFlights.get(flightKey);
   if (existing) return existing;
 
@@ -485,7 +650,11 @@ async function modelsForCredential(
   }
   const flight = fetchAccountModels(credential, fetcher, now, clientVersion)
     .then(result => {
-      if (currentCredentialIdentity(credential.accountId) === credential.credentialIdentity) {
+      if (
+        currentCredentialIdentity(credential.accountId) === credential.credentialIdentity
+        && (credentialMutationEpoch === undefined
+          || codexCredentialMutationEpoch() === credentialMutationEpoch)
+      ) {
         boundedCacheSet(credential.accountId, result);
       }
       return result;
@@ -504,6 +673,232 @@ function candidateAccountIds(config: Pick<OcxConfig, "codexAccounts">): string[]
       .filter(isSelectableCodexPoolAccount)
       .map(account => account.id),
   ];
+}
+
+function normalizedCandidateAccountIds(config: Pick<OcxConfig, "codexAccounts">): string[] {
+  return [...new Set(candidateAccountIds(config))].sort();
+}
+
+function freshNegativeCredentialMemo(
+  accountId: string,
+  credentialIdentity: string | null,
+  mutationEpoch: number,
+  now: number,
+): boolean {
+  const memo = negativeCredentialMemo.get(accountId);
+  if (
+    memo
+    && memo.credentialIdentity === credentialIdentity
+    && memo.mutationEpoch === mutationEpoch
+    && memo.expiresAt > now
+  ) return true;
+  if (memo) negativeCredentialMemo.delete(accountId);
+  return false;
+}
+
+function boundedNegativeCredentialMemoSet(accountId: string, memo: NegativeCredentialMemo): void {
+  negativeCredentialMemo.delete(accountId);
+  negativeCredentialMemo.set(accountId, memo);
+  for (const oldest of [...negativeCredentialMemo.keys()].slice(0, Math.max(
+    0,
+    negativeCredentialMemo.size - MODEL_ROSTER_CACHE_MAX,
+  ))) negativeCredentialMemo.delete(oldest);
+}
+
+function needsEntitlementRefresh(
+  accountId: string,
+  credentialIdentity: string | null,
+  clientVersion: string,
+  mutationEpoch: number,
+  now: number,
+): boolean {
+  const cached = accountModelsCache.get(cacheKeyFor(accountId, clientVersion));
+  if (cached && cached.credentialIdentity !== credentialIdentity) {
+    invalidateCodexModelEntitlementsForAccount(accountId);
+  } else if (cached && cached.expiresAt > now) {
+    return false;
+  }
+  return !freshNegativeCredentialMemo(accountId, credentialIdentity, mutationEpoch, now);
+}
+
+function entitlementEnsureFlightKey(
+  candidateAccountIds: readonly string[],
+  clientVersion: string,
+  mutationEpoch: number,
+  identityVector: readonly (readonly [string, string | null])[],
+  workset: readonly string[],
+): string {
+  return JSON.stringify([candidateAccountIds, clientVersion, mutationEpoch, identityVector, workset]);
+}
+
+async function refreshCodexEntitlementWorkset(
+  config: Pick<OcxConfig, "codexAccounts">,
+  workset: readonly string[],
+  identityVector: ReadonlyMap<string, string | null>,
+  clientVersion: string,
+  mutationEpoch: number,
+  options: CodexEntitlementFreshnessOptions,
+): Promise<void> {
+  const credentialSnapshot = options.credentialSnapshot ?? accountCredentialSnapshot;
+  const observations = await Promise.all(workset.map(async accountId => {
+    const credential = await credentialSnapshot(accountId, options);
+    return {
+      accountId,
+      credential,
+      absenceObservedAt: options.now ?? Date.now(),
+    };
+  }));
+  const credentials = observations.flatMap(observation => observation.credential
+    ? [observation.credential]
+    : []);
+  if (credentials.length > 0) {
+    await resolveCodexModelEntitlements(config, {
+      ...options,
+      clientVersion,
+      credentialMutationEpoch: mutationEpoch,
+      credentials,
+    });
+  }
+
+  for (const observation of observations) {
+    if (observation.credential) continue;
+    const capturedIdentity = identityVector.get(observation.accountId) ?? null;
+    if (codexCredentialMutationEpoch() !== mutationEpoch) continue;
+    if ((currentCredentialIdentity(observation.accountId) ?? null) !== capturedIdentity) continue;
+    boundedNegativeCredentialMemoSet(observation.accountId, {
+      credentialIdentity: capturedIdentity,
+      mutationEpoch,
+      expiresAt: observation.absenceObservedAt + MODEL_ROSTER_NEGATIVE_CREDENTIAL_TTL_MS,
+    });
+  }
+}
+
+function waitForEntitlementEnsureFlight(
+  flight: EntitlementEnsureFlight,
+  waitMs: number,
+): Promise<void> {
+  const remaining = Math.max(0, waitMs - Math.max(0, Date.now() - flight.startedAt));
+  if (remaining === 0) return Promise.resolve();
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, remaining);
+    void flight.promise.then(() => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+/**
+ * Refreshes only missing, expired, or credential-mismatched local entitlement entries.
+ * Management deadlines bound the wait, not the upstream work, so a timed-out poll still warms
+ * the cache for the first poll after the shared flight settles.
+ */
+export async function ensureCodexEntitlementFreshness(
+  config: Pick<OcxConfig, "codexAccounts">,
+  options: CodexEntitlementFreshnessOptions = {},
+): Promise<void> {
+  try {
+    const now = options.now ?? Date.now();
+    const clientVersion = resolveCodexEntitlementClientVersion(
+      options.clientVersion,
+      options.loadPersistedRuntime ?? loadPersistedCodexRuntime,
+    );
+    const candidates = normalizedCandidateAccountIds(config);
+    const mutationEpoch = codexCredentialMutationEpoch();
+    const identityEntries = candidates.map(accountId => (
+      [accountId, currentCredentialIdentity(accountId) ?? null] as const
+    ));
+    const identityVector = new Map(identityEntries);
+    const workset = candidates.filter(accountId => needsEntitlementRefresh(
+      accountId,
+      identityVector.get(accountId) ?? null,
+      clientVersion,
+      mutationEpoch,
+      now,
+    ));
+    if (workset.length === 0) return;
+
+    const key = entitlementEnsureFlightKey(
+      candidates,
+      clientVersion,
+      mutationEpoch,
+      identityEntries,
+      workset,
+    );
+    let flight = entitlementEnsureFlights.get(key);
+    if (!flight) {
+      const startedAt = Date.now();
+      let created!: EntitlementEnsureFlight;
+      const promise = refreshCodexEntitlementWorkset(
+        config,
+        workset,
+        identityVector,
+        clientVersion,
+        mutationEpoch,
+        options,
+      ).catch(() => {
+        // Entitlement discovery is fail-closed: callers project only confirmed cache entries.
+      }).finally(() => {
+        if (entitlementEnsureFlights.get(key) === created) entitlementEnsureFlights.delete(key);
+      });
+      created = { startedAt, promise, clientVersion, identityVector, workset };
+      entitlementEnsureFlights.set(key, created);
+      flight = created;
+    }
+    const requestedWaitMs = options.waitMs ?? 3_000;
+    const waitMs = Number.isFinite(requestedWaitMs) ? Math.max(0, requestedWaitMs) : 0;
+    await waitForEntitlementEnsureFlight(flight, waitMs);
+  } catch {
+    // The shared management boundary must degrade to the last confirmed fail-closed projection.
+  }
+}
+
+export function getCodexModelEntitlementStatus(
+  config: Pick<OcxConfig, "codexAccounts">,
+  now = Date.now(),
+  clientVersion?: string | null,
+): CodexModelEntitlementStatus {
+  const version = resolveCodexEntitlementClientVersion(clientVersion);
+  const accounts = candidateAccountIds(config).flatMap(accountId => {
+    const credentialIdentity = currentCredentialIdentity(accountId);
+    return credentialIdentity ? [{ accountId, credentialIdentity }] : [];
+  });
+  if (accounts.length === 0) return { status: "unavailable" };
+
+  const entries = accounts.map(({ accountId, credentialIdentity }) => ({
+    accountId,
+    credentialIdentity,
+    entry: accountModelsCache.get(cacheKeyFor(accountId, version)),
+  }));
+  const hasRefreshFlight = (accountId: string, credentialIdentity: string): boolean => {
+    return [...entitlementEnsureFlights.values()].some(flight => (
+      flight.clientVersion === version
+      && flight.identityVector.get(accountId) === credentialIdentity
+      && flight.workset.includes(accountId)
+    ));
+  };
+  if (entries.some(({ accountId, credentialIdentity, entry }) => (
+    entry
+    && entry.credentialIdentity === credentialIdentity
+    && entry.expiresAt <= now
+    && hasRefreshFlight(accountId, credentialIdentity)
+  ))) return { status: "expired-refresh-in-flight" };
+  const live = entries.flatMap(({ credentialIdentity, entry }) => (
+    entry && entry.credentialIdentity === credentialIdentity && entry.expiresAt > now ? [entry] : []
+  ));
+  // Deliberate failure-first aggregation keeps a partial Pool refresh failure visible.
+  const failed = live.find(entry => entry.provenance && entry.provenance.kind !== "parsed-empty");
+  if (failed?.provenance?.kind === "http-error") {
+    return { status: "failed", reason: "http-error", httpStatus: failed.provenance.httpStatus };
+  }
+  if (failed?.provenance?.kind === "network-error") return { status: "failed", reason: "network-error" };
+  if (failed?.provenance?.kind === "timeout") return { status: "failed", reason: "timeout" };
+  if (failed?.provenance?.kind === "unparseable") return { status: "failed", reason: "unparseable" };
+  if (live.some(entry => entry.provenance?.kind === "parsed-empty")) {
+    return { status: "unconfirmed-empty" };
+  }
+  if (live.some(entry => entry.confirmed)) return { status: "fresh" };
+  return { status: "unavailable" };
 }
 
 /**
@@ -542,13 +937,52 @@ export async function resolveCodexModelEntitlements(
       .filter((value): value is CodexModelEntitlementCredentialSnapshot => value !== null);
   const results = await Promise.all(credentials.map(async credential => ({
     credential,
-    result: await modelsForCredential(credential, fetcher, now, clientVersion),
+    result: await modelsForCredential(
+      credential,
+      fetcher,
+      now,
+      clientVersion,
+      options.credentialMutationEpoch,
+    ),
   })));
   return {
     modelsByAccount: new Map(results.map(({ credential, result }) => [credential.accountId, result.models])),
+    clientVersionByAccount: new Map(results.map(({ credential, result }) => (
+      [credential.accountId, result.clientVersion]
+    ))),
     confirmedAccountIds: new Set(results.flatMap(({ credential, result }) => result.confirmed ? [credential.accountId] : [])),
     credentialIdentities: new Map(results.map(({ credential }) => [credential.accountId, credential.credentialIdentity])),
   };
+}
+
+function codexModelEntitlementStateForRoster(
+  models: ReadonlySet<string> | undefined,
+  confirmed: boolean,
+  clientVersion: string | undefined,
+  modelId: string,
+): CodexModelEntitlementState {
+  if (!models || !confirmed) return "unknown";
+  // Positive evidence is authoritative regardless of which client version asked for it.
+  if (models.has(modelId)) return "granted";
+  const minimum = ACCOUNT_GATED_NATIVE_MODEL_MINIMUM_CLIENT_VERSIONS.get(modelId);
+  if (minimum && (!clientVersion || compareClientVersions(clientVersion, minimum) < 0)) {
+    return "unknown";
+  }
+  return "denied";
+}
+
+/** Per-account tri-state authority. Positive projections admit only `granted`. */
+export function codexModelEntitlementStateForAccount(
+  snapshot: CodexModelEntitlementSnapshot,
+  accountId: string,
+  modelId: string,
+): CodexModelEntitlementState {
+  return codexModelEntitlementStateForRoster(
+    snapshot.modelsByAccount.get(accountId),
+    snapshot.confirmedAccountIds.has(accountId),
+    snapshot.clientVersionByAccount?.get(accountId),
+    modelId,
+  );
 }
 
 /** Fail-closed entitlement check for a Direct request's own forwarded ChatGPT credential. */
@@ -567,7 +1001,12 @@ export async function isDirectCallerEntitledToCodexModel(
     options.now ?? Date.now(),
     clientVersion,
   );
-  return result.confirmed && result.models.has(modelId);
+  return codexModelEntitlementStateForRoster(
+    result.models,
+    result.confirmed,
+    result.clientVersion,
+    modelId,
+  ) === "granted";
 }
 
 export function entitledCodexAccountIdsForModel(
@@ -575,8 +1014,10 @@ export function entitledCodexAccountIdsForModel(
   modelId: string | undefined,
 ): ReadonlySet<string> | undefined {
   if (!modelId || !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(modelId)) return undefined;
-  return new Set([...snapshot.modelsByAccount].flatMap(([accountId, models]) => (
-    snapshot.confirmedAccountIds.has(accountId) && models.has(modelId) ? [accountId] : []
+  return new Set([...snapshot.modelsByAccount.keys()].flatMap(accountId => (
+    codexModelEntitlementStateForAccount(snapshot, accountId, modelId) === "granted"
+      ? [accountId]
+      : []
   )));
 }
 
@@ -585,10 +1026,9 @@ export function availableAccountGatedNativeModels(
   eligibleAccountIds?: ReadonlySet<string>,
 ): ReadonlySet<string> {
   return new Set([...ACCOUNT_GATED_NATIVE_OPENAI_MODELS].filter(modelId => (
-    [...snapshot.modelsByAccount].some(([accountId, models]) => (
+    [...snapshot.modelsByAccount.keys()].some(accountId => (
       (!eligibleAccountIds || eligibleAccountIds.has(accountId))
-      && snapshot.confirmedAccountIds.has(accountId)
-      && models.has(modelId)
+      && codexModelEntitlementStateForAccount(snapshot, accountId, modelId) === "granted"
     ))
   )));
 }
@@ -613,9 +1053,13 @@ export function cachedAvailableAccountGatedNativeModels(
       (!eligibleAccountIds || eligibleAccountIds.has(accountIdOfCacheKey(accountId)))
       && !accountIdOfCacheKey(accountId).startsWith(DIRECT_CALLER_ACCOUNT_PREFIX)
       && (version === null || entry.clientVersion === version)
-      && entry.confirmed
       && entry.expiresAt > now
-      && entry.models.has(modelId)
+      && codexModelEntitlementStateForRoster(
+        entry.models,
+        entry.confirmed,
+        entry.clientVersion,
+        modelId,
+      ) === "granted"
     ))
   )));
 }
@@ -639,7 +1083,21 @@ export function invalidateCodexModelEntitlementsForAccount(accountId: string | n
 export function resetCodexModelEntitlementCacheForTests(): void {
   accountModelsCache.clear();
   accountModelsFlights.clear();
+  negativeCredentialMemo.clear();
+  entitlementEnsureFlights.clear();
   runtimeVersionMemo = null;
+}
+
+/** Test-only snapshot for proving publication fences, which cache lookup intentionally masks. */
+export function codexEntitlementNegativeMemoForTests(
+  accountId: string,
+): Readonly<{
+  credentialIdentity: string | null;
+  mutationEpoch: number;
+  expiresAt: number;
+}> | null {
+  const memo = negativeCredentialMemo.get(accountId);
+  return memo ? { ...memo } : null;
 }
 
 /**
@@ -661,9 +1119,10 @@ export function seedCodexModelEntitlementsForTests(
   models: readonly string[],
   now = Date.now(),
   clientVersion = "0.146.0",
+  credentialIdentity = `test:${accountId}`,
 ): void {
   boundedCacheSet(accountId, {
-    credentialIdentity: `test:${accountId}`,
+    credentialIdentity,
     clientVersion,
     expiresAt: now + MODEL_ROSTER_TTL_MS,
     models: new Set(models),

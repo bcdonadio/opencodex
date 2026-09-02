@@ -110,6 +110,8 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "api.clientConfig.clientZcode",
   "integrations.tab.prime",
   "api.clientConfig.clientPrime",
+  "integrations.tab.aside",
+  "api.clientConfig.clientAside",
   "models.reasoningEffort.minimal",
   "models.reasoningEffort.max",
   "pws.pacingRpmUnit",
@@ -159,6 +161,9 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "lab.observationCount",
   "lab.verdictCount",
   "lab.detailObservations",
+  // "Clients" is the same word in French, and it is the plural noun the
+  // Integrations page uses to head its client catalog.
+  "integrations.catalog.title",
 ]);
 
 function placeholders(value: string): string[] {

@@ -22,11 +22,19 @@
 
 import { existsSync } from "node:fs";
 import { win32 as windowsPath } from "node:path";
+import { waitForSubprocessExit } from "./bounded-subprocess";
 
 import {
   resolveTrustedWindowsPowerShellExe,
   WindowsSystemDirectoryFfiUnavailableError,
 } from "./windows-elevation";
+
+/**
+ * Shared ceiling for a full effective-token identity lookup. PowerShell startup can
+ * legitimately take several seconds on loaded desktops as well as CI, so every caller
+ * that is not spending a smaller pre-existing deadline uses the same #2914-tested budget.
+ */
+export const WINDOWS_PRINCIPAL_LOOKUP_TIMEOUT_MS = 30_000;
 
 const SID_PATTERN = /^S-1-(?:\d+-)+\d+$/i;
 const IDENTITY_EXPRESSION =
@@ -143,18 +151,8 @@ async function defaultAsyncWindowsPrincipalRunner(
     stderr: "ignore",
     windowsHide: true,
   });
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try { proc.kill(); } catch { /* already exited */ }
-  }, Math.max(1, timeoutMs));
-  let exitCode: number | null = null;
-  try {
-    exitCode = await proc.exited;
-  } finally {
-    clearTimeout(timer);
-  }
-  const stdout = proc.stdout
+  const { exitCode, timedOut } = await waitForSubprocessExit(proc, timeoutMs);
+  const stdout = !timedOut && proc.stdout
     ? await new Response(proc.stdout).text().catch(() => "")
     : "";
   return {
@@ -314,11 +312,11 @@ export async function resolveCurrentWindowsPrincipalAsync(timeoutMs: number): Pr
     return `*${cachedIdentity.sid}`;
   })();
   asyncLookupInFlight = lookup;
-  try {
-    return await lookup;
-  } finally {
-    if (asyncLookupInFlight === lookup) asyncLookupInFlight = null;
-  }
+  void lookup.then(
+    () => { if (asyncLookupInFlight === lookup) asyncLookupInFlight = null; },
+    () => { if (asyncLookupInFlight === lookup) asyncLookupInFlight = null; },
+  );
+  return waitForExistingLookup(lookup, timeoutMs);
 }
 
 /** Test seam: replace the sync resolver process and clear its successful cache. */

@@ -32,7 +32,7 @@ ocx start --port 8080
 
 실행 중인 프록시를 PID 기준으로 중지하고, PID 파일을 삭제한 뒤 기본 Codex를 복원합니다. 관리형
 백그라운드 서비스가 설치되어 있으면 `ocx stop`이 먼저 그 서비스를 중지하므로 프록시가 다시
-올라올 수 없습니다. 같은 동작은 웹 대시보드의 **Stop** 버튼(`POST /api/stop`)에서도 사용할 수 있습니다.
+올라올 수 없습니다. 웹 대시보드의 **Stop** 버튼도 같은 동작(`POST /api/stop`)을 하지만, Windows 작업 스케줄러는 예외입니다. 작업이 끝나도 래퍼가 프록시를 다시 띄울 수 있어서, 대시보드는 `respawnable_service`로 거절하고 아무것도 바꾸지 않은 채 `ocx stop` 실행을 안내합니다.
 
 ### `ocx restart`
 
@@ -205,9 +205,9 @@ Codex의 로컬 모델 선택기 캐시를 무효화하여, 활성 opencodex 카
 
 | 하위 명령 | 동작 |
 | --- | --- |
-| 없음 | 서비스가 없으면 설치하고 시작하며, 이미 있으면 재등록하지 않고 새로 고쳐 재시작합니다. |
+| 없음 | 서비스가 없으면 설치하고 시작하며, 이미 있으면 새로 고쳐 재시작합니다. 정상인 Windows 작업 스케줄러 정의는 재사용하지만, 오래된 정의는 다시 등록되어 관리자 권한 승인이 필요할 수 있습니다. |
 | `install` | 서비스를 생성하고 시작합니다. |
-| `repair` | 설치된 서비스를 다시 등록하지 않고 제자리에서 새로 고친 뒤 재시작합니다. |
+| `repair` | 설치된 서비스를 제자리에서 새로 고친 뒤 재시작합니다. 정상인 Windows 작업 스케줄러 정의는 재사용하지만, 오래된 정의는 다시 등록되어 관리자 권한 승인이 필요할 수 있습니다. |
 | `restart` | `repair`의 별칭입니다. |
 | `start` | 설치된 서비스를 시작합니다. |
 | `stop` | 서비스를 중지하고 기본 Codex를 복원합니다. |
@@ -256,7 +256,7 @@ PATH 항목이 구체적인 실행 파일 또는 런처를 가리키도록 Codex
 런처를 복원합니다.
 
 완료된 외부 Codex 업데이트가 설치된 shim을 덮어쓰면, 다음 일반 `ocx` 명령이 안정적인 새 런처를
-백업하고 명령을 처리하기 전에 shim을 복원합니다. 아직 변경 중인 런처는 건드리지 않고 나중에 다시 시도합니다.
+백업하고 명령을 처리하기 전에 shim을 복원합니다. 부작용 없는 검사 명령 `ocx system codex-cli-update check`와 예약된 `ocx system codex-cli-update` namespace의 잘못된 호출은 이 복구를 수행하지 않습니다. 아직 변경 중인 런처는 건드리지 않고 나중에 다시 시도합니다.
 복구 실패는 요청한 명령을 실패시키지 않고 경고만 표시합니다. 수동 대체 수단은 `ocx codex-shim install`
 입니다. `codexShimAutoRestore`를 `false`로 설정하거나, 프로세스 수준에서 제외하려면
 `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`을 설정합니다.
@@ -293,6 +293,8 @@ Windows 상태 트레이 아이콘을 설치하고 제어합니다. Windows 로�
 `http://localhost:<port>`에서 엽니다.
 
 ## 업데이트
+
+`ocx update`는 OpenCodex 자체를 업데이트하며 Codex CLI를 업데이트하지 않습니다. [system 검사 명령](/ko/reference/cli/agents/)의 `ocx system codex-cli-update check`로 설정된 Codex CLI 후보의 provenance를 제한된 읽기 전용 방식으로 확인할 수 있습니다. 이 명령은 package registry를 조회하거나 업데이트를 설치하지 않습니다.
 
 ### `ocx update [--tag latest|preview]`
 

@@ -30,6 +30,7 @@ import {
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import { modelInList } from "../../types";
 import { CODEX_REASONING_LEVELS, codexEffortRank, configuredReasoningEfforts, modelRecordValue, sanitizeCodexReasoningEfforts } from "../../reasoning-effort";
+import { isModelVisionSidecarConsumer } from "../../vision/eligibility";
 import { getModelMetadata, getModelMetadataCaseInsensitive, listModelMetadata, resolveMetadataProvider } from "../../generated/model-metadata";
 import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../../providers/derive";
 import {
@@ -42,6 +43,7 @@ import { effectiveGoogleMode, getProviderRegistryEntry, providerMatchesRegistryT
 import { parseAntigravityAvailableModels, registerAntigravityDiscoveredWireModels } from "../../providers/antigravity-models";
 import { applyProviderContextCap, providerContextCap, resolveUnknownRoutedContextWindow } from "../../providers/context-cap";
 import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
+import { effectiveModelAliases } from "../../providers/default-aliases";
 import { routedSlug, slugEquals, slugEquivalenceKey, slugsEquivalent } from "../../providers/slug-codec";
 import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
@@ -669,11 +671,14 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
   const configuredMaxInput = configuredMaxInputTokens(prov, model.id);
   const configuredAutoCompact = configuredAutoCompactTokenLimit(prov, model.id);
   let inputModalities = configuredInputModalities(prov, model.id);
-  // Vision-sidecar coverage: `noVisionModels` marks models whose images the PROXY describes
-  // (src/vision/index.ts). The catalog must still advertise image input for them — the Codex app
+  // The shared vision-sidecar consumer predicate keeps catalog advertisement and request-time
+  // planning aligned. The catalog must still advertise image input — the Codex app
   // gates attachments client-side on input_modalities, and a text-only entry would block images
-  // before the sidecar ever runs ("This model does not support image inputs").
-  if (modelInList(prov.noVisionModels, model.id)) {
+  // before the sidecar ever runs ("This model does not support image inputs"). Discovery-derived
+  // text-only rows stay untouched: the runtime predicate only reads these two config sources, so
+  // it would not convert those.
+  const sidecarCovered = isModelVisionSidecarConsumer(prov, model.id);
+  if (sidecarCovered) {
     const base = inputModalities ?? model.inputModalities ?? ["text"];
     inputModalities = base.includes("image") ? [...base] : [...base, "image"];
   }
@@ -935,9 +940,70 @@ export function resolveComboCatalogMember(
   };
 }
 
+const DATED_VARIANT_YYYYMMDD = /^(\d{4})(\d{2})(\d{2})$/;
+const DATED_VARIANT_YYMMDD = /^(2\d)(\d{2})(\d{2})$/;
+const DATED_VARIANT_MMDD_OR_YYMM = /^(\d{2})(\d{2})$/;
+
+/** Whether a Gregorian year contains February 29th. */
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+/**
+ * Whether a month/day pair exists in the given year. Without a year, February 29th is
+ * accepted because it occurs in at least one calendar year.
+ */
+function isValidCalendarDate(year: number | undefined, month: number, day: number): boolean {
+  if (year !== undefined && (year < 1 || year > 9999)) return false;
+  if (month < 1 || month > 12 || day < 1) return false;
+  const daysInMonth = [
+    31, year === undefined || isLeapYear(year) ? 29 : 28, 31, 30, 31, 30,
+    31, 31, 30, 31, 30, 31,
+  ];
+  return day <= daysInMonth[month - 1]!;
+}
+
+/**
+ * Release-date suffixes providers actually publish: `YYYYMMDD` (`-20251001`), `YYMMDD`
+ * (`-260806`), `MMDD` (`-0813`) and `YYMM` (`-2512`). A `\d{8}`-only rule matched none of
+ * the dated ids on a real multi-provider install, so DeepSeek, Kimi, Mistral, Qwen and
+ * Solar aliases all fell through to `droppedConfiguredIds` (#3024).
+ *
+ * Calendar validation rejects impossible month-end and leap-day values as well as ordinary
+ * numeric suffixes such as `-2048`, `-4096` and `-8192`. `-1024` is the one irreducible
+ * collision — it is a valid `MMDD` (October 24th) — so it reads as dated. That is a known,
+ * accepted cost; the test table pins it so it cannot become a surprise later.
+ *
+ * Hyphenated ISO suffixes (`-2024-08-06`, `-05-06`) are deliberately out of scope: a
+ * hyphenated suffix is ambiguous against ordinary name segments and needs its own call.
+ */
+function isDatedVariantSuffix(suffix: string): boolean {
+  const yyyyMmDd = DATED_VARIANT_YYYYMMDD.exec(suffix);
+  if (yyyyMmDd) {
+    return isValidCalendarDate(
+      Number(yyyyMmDd[1]), Number(yyyyMmDd[2]), Number(yyyyMmDd[3]),
+    );
+  }
+
+  const yyMmDd = DATED_VARIANT_YYMMDD.exec(suffix);
+  if (yyMmDd) {
+    return isValidCalendarDate(
+      2000 + Number(yyMmDd[1]), Number(yyMmDd[2]), Number(yyMmDd[3]),
+    );
+  }
+
+  const mmDdOrYyMm = DATED_VARIANT_MMDD_OR_YYMM.exec(suffix);
+  if (!mmDdOrYyMm) return false;
+  const first = Number(mmDdOrYyMm[1]);
+  const second = Number(mmDdOrYyMm[2]);
+  return isValidCalendarDate(undefined, first, second)
+    || (first >= 20 && first <= 29 && second >= 1 && second <= 12);
+}
+
+/** Whether `liveId` is a supported dated release of the configured base id. */
 export function isDatedVariantId(liveId: string, configuredId: string): boolean {
   if (!liveId.startsWith(`${configuredId}-`)) return false;
-  return /^\d{8}$/.test(liveId.slice(configuredId.length + 1));
+  return isDatedVariantSuffix(liveId.slice(configuredId.length + 1));
 }
 
 export const lastDropWarnSignature = new Map<string, string>();
@@ -2112,9 +2178,10 @@ async function gatherRoutedModelsUncached(
       ...(base.codexToolMode === undefined && replaced.codexToolMode !== undefined ? { codexToolMode: replaced.codexToolMode } : {}),
       ...(base.capabilities === undefined && replaced.capabilities !== undefined ? { capabilities: replaced.capabilities } : {}),
     } : base;
-    // Vision-sidecar coverage ONLY: if the custom model is in the enriched provider's
-    // noVisionModels, advertise image input so the Codex app lets images reach the sidecar
-    // (#349/#344). Deliberately NOT the full applyProviderConfigHints pass — custom rows are a
+    // Vision-sidecar coverage only: when the enriched provider's shared predicate matches
+    // noVisionModels or text-without-image modelInputModalities, advertise image input so the
+    // Codex app lets images reach the sidecar (#349/#344). Deliberately NOT the full
+    // applyProviderConfigHints pass — custom rows are a
     // user override, so their explicit contextWindow / inputModalities / reasoning fields must be
     // preserved verbatim (the hint pass would cap context and overwrite modalities from registry).
     const mergedContext = typeof merged.contextWindow === "number" && merged.contextWindow > 0
@@ -2140,7 +2207,8 @@ async function gatherRoutedModelsUncached(
       }
       : mergedWithHardBounds;
     const enrichedProvider = enrichedByName.get(cm.provider) ?? rawProvider;
-    if (enrichedProvider && modelInList(enrichedProvider.noVisionModels, mergedWithAutoCompact.id)) {
+    // Reuse the request-time consumer predicate so custom rows cannot drift from catalog hints.
+    if (enrichedProvider && isModelVisionSidecarConsumer(enrichedProvider, mergedWithAutoCompact.id)) {
       const current = mergedWithAutoCompact.inputModalities ?? ["text"];
       if (!current.includes("image")) {
         return { ...mergedWithAutoCompact, inputModalities: [...current, "image"] };
@@ -2151,6 +2219,21 @@ async function gatherRoutedModelsUncached(
   // Custom rows override discovered rows that encode to the same Codex-facing slug.
   const customKeys = new Set(customModels.map(c => routedSlug(c.provider, c.id)));
   const deduped = all.filter(m => !customKeys.has(routedSlug(m.provider, m.id)));
+  const models = [...deduped, ...customModels];
+  // ponytail: catalog-scale scan; index ids by provider if catalog growth makes this measurable.
+  const aliasDisplayNames = new Map(activeProviders.flatMap(({ name, provider }) => {
+    const providerModels = models.filter(model => model.provider === name);
+    const aliases = [...effectiveModelAliases(config, provider, providerModels.map(model => model.id))];
+    return aliases.flatMap(([id, { alias }]) => {
+      const exact = providerModels.filter(model => model.id === id);
+      const matches = exact.length > 0
+        ? exact
+        : providerModels.filter(model => model.id.toLowerCase() === id.toLowerCase());
+      return matches.length === 1
+        ? [[`${name}/${matches[0]!.id}`, `${provider.alias || name}/${alias}`] as const]
+        : [];
+    });
+  }));
   const providerModelOutcomes = providerResults.map(result => (
     result.outcome.provider === OPENAI_API_PROVIDER_ID
       && capture.openAiApiPolicy.state === "captured"
@@ -2159,7 +2242,10 @@ async function gatherRoutedModelsUncached(
       : result.outcome
   ));
   return {
-    models: [...deduped, ...customModels],
+    models: models.map(model => {
+      const displayName = aliasDisplayNames.get(`${model.provider}/${model.id}`);
+      return displayName && !model.displayName ? { ...model, displayName } : model;
+    }),
     comboOmissions: localOmissions,
     providerAuthOutcomes: localProviderAuthOutcomes,
     providerModelOutcomes,
