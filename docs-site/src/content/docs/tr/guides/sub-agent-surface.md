@@ -163,7 +163,12 @@ Deneysel, varsayılan olarak devre dışı bırakılmış bir `agentTaskRecovery
 seçeneği, `authMode: "forward"` ile kurallı `openai` sağlayıcısı tarafından
 kullanılan gelen kimlik bilgisi şeklini kullanarak sabit ChatGPT `/responses` uç
 noktasına ham Responses doğrudan geçişi aracılığıyla bu belirli yerelden
-yönlendirilen şekli kurtarabilir. Kurtarma yalnızca proxy geri döngüye bağlıyken
+yönlendirilen şekli kurtarabilir. Etkinleştirildiğinde opencodex, yerel ebeveyn
+turu gönderilmeden önce yalnızca v2 `spawn_agent`, `send_message` ve
+`followup_task` araçlarının ileti alanlarındaki `encrypted: true` ek açıklamalarını
+kaldırır. Yeni ilk ve takip iletileri izin verilen her iç içe derinlikte düz metin
+olarak oluşturulur; daha önce oluşturulmuş şifreli metin yine kurtarma isteğini
+geri dönüş olarak kullanır. Kurtarma yalnızca proxy geri döngüye bağlıyken
 kullanılabilir. Asla API anahtarı kimlik doğrulamasının, başka bir sağlayıcı
 kimlik bilgisinin veya başka bir Codex hesabının yerine geçmez. Yalnızca
 `authorization`, eşleşen `chatgpt-account-id` ve isteğe bağlı
@@ -319,4 +324,3 @@ sabitler.
 
 Model bağlam sınırı alt ajan modundan bağımsızdır. Modeller sayfasında
 yapılandırın; yerel OpenAI modelleri gerçek bağlam pencerelerini korur.
-

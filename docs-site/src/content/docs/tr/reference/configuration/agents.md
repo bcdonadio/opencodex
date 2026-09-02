@@ -142,8 +142,12 @@ yönlendirmek yerine başarısız olur.
 
 `agentTaskRecovery`, yönlendirilen bir v2 çocuğu oluşturan yerel bir ChatGPT
 ebeveyni için deneysel bir uyumluluk yoludur. Varsayılan olarak devre dışıdır.
-Açıkça etkinleştirildiğinde ve nihai yönlendirilen çocuk görevi aksi takdirde
-okunamayan bir Fernet yükü içerdiğinde, opencodex iletme modu kimlik
+Açıkça etkinleştirildiğinde opencodex, yerel ebeveyn turunu iletmeden önce yalnızca
+v2 `spawn_agent`, `send_message` ve `followup_task` araçlarının ileti alanlarındaki
+`encrypted: true` ek açıklamalarını kaldırır. Codex böylece iç içe derinlikte de
+yeni ilk ve takip yüklerini düz metin olarak oluşturur. Nihai yönlendirilen çocuk
+görevi daha önce oluşturulmuş, aksi takdirde okunamayan bir Fernet yükü içeriyorsa,
+opencodex iletme modu kimlik
 doğrulamasıyla sabit `https://chatgpt.com/backend-api/codex/responses` uç
 noktasına ham bir Responses doğrudan geçiş isteği kullanır. ChatGPT düz metin
 görevini zorunlu bir fonksiyon çağrısı aracılığıyla döndürür; opencodex daha
@@ -172,6 +176,8 @@ Kabul ve saklama kasıtlı olarak dardır:
 - `x-opencodex-api-key`, `x-api-key`, genel API kimlik bilgileri veya bir proxy
   kabul sırrı kullanan arayanlar mevcut `unreadable_encrypted_agent_task`
   hatasını korur;
+- yalnızca üç işbirliği `message` ek açıklaması kaldırılır; ilgisiz şema alanları,
+  araç adları, parametreler, görev metni ve sıradan sağlayıcı iletimi değişmez;
 - ham ChatGPT kimlik bilgileri yalnızca sabit kodlanmış ChatGPT uç noktasına
   gönderilir ve istek gövdesine, günlüklere, önbellek anahtarlarına veya
   sağlayıcı isteğine asla yerleştirilmez; bellek içi önbellek kapsamı yalnızca
@@ -249,4 +255,3 @@ ile `xhigh` arasını sunar.
 
 v1, varsayılan ve v2 davranışının yeni başlayanlara yönelik açıklaması için [Alt
 ajan yüzeyleri](/tr/guides/sub-agent-surface/) sayfasına bakın.
-

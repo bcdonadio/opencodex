@@ -123,8 +123,11 @@ fails instead of routing unreadable ciphertext elsewhere.
 ## Encrypted v2 task recovery
 
 `agentTaskRecovery` is an experimental compatibility path for a native ChatGPT parent spawning a
-routed v2 child. It is disabled by default. When explicitly enabled and the final routed child task
-contains an otherwise unreadable Fernet payload, opencodex uses a raw Responses passthrough request
+routed v2 child. It is disabled by default. When explicitly enabled, opencodex removes only the
+`encrypted: true` annotations from the message fields of V2 `spawn_agent`, `send_message`, and
+`followup_task` before forwarding a native parent turn. Codex then materializes new initial and
+follow-up payloads as plaintext, including at nested depth. If a final routed child task still
+contains an otherwise unreadable Fernet payload created earlier, opencodex uses a raw Responses passthrough request
 to the fixed `https://chatgpt.com/backend-api/codex/responses` endpoint with forward-mode
 authentication. ChatGPT returns the plaintext assignment through a forced function call; opencodex
 then converts only that task item to a standard user message before routed-provider dispatch.
@@ -147,6 +150,8 @@ Admission and retention are deliberately narrow:
   provider credential, or another Codex account;
 - callers using `x-opencodex-api-key`, `x-api-key`, generic API credentials, or a proxy admission
   secret keep the existing `unreadable_encrypted_agent_task` failure;
+- only the three collaboration `message` annotations are removed; unrelated tool schema fields,
+  tool names, parameters, task text, and ordinary provider forwarding remain unchanged;
 - raw ChatGPT credentials are sent only to the hard-coded ChatGPT endpoint and are never placed in
   the request body, logs, cache keys, or provider request; the in-memory cache scope uses only a
   process-random keyed digest of the caller credential and account;

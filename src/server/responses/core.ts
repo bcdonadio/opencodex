@@ -332,6 +332,7 @@ import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/cat
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { hasUnreadableEncryptedAgentTask, looksLikeBackendCiphertext, sanitizeEncryptedContentInPlace } from "./encrypted-payload";
+import { enablePlaintextCollaborationDelivery } from "../../responses/collaboration-plaintext";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier } from "./fetch-helpers";
 import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upstream-reachability";
 import {
@@ -2734,6 +2735,17 @@ async function handleResponsesInner(
       return clientCancelledResponse();
     }
     return decodeRequestErrorResponse(err, "responses");
+  }
+  if (agentTaskRecovery) {
+    const plaintextDelivery = enablePlaintextCollaborationDelivery(body);
+    body = plaintextDelivery.body;
+    if (plaintextDelivery.changedTools > 0) {
+      console.warn(`[opencodex] agent-task-delivery ${JSON.stringify({
+        stage: "tool_schema",
+        outcome: "plaintext_enabled",
+        toolCount: plaintextDelivery.changedTools,
+      })}`);
+    }
   }
   const comboId = !options.comboAttempt ? comboIdFromRawBody(body, config) : null;
   if (comboId && Object.hasOwn(config.combos ?? {}, comboId)) {

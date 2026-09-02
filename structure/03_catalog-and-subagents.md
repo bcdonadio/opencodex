@@ -176,6 +176,23 @@ the flag and thread count decide what the native runtime allows.
 `multi_agent_version`. Native ChatGPT rows then select v1 from the catalog and routed rows select
 v2. An explicit attempt to enable the global flag while the hybrid pin is active is rejected.
 
+When encrypted agent-task recovery is explicitly enabled, native Responses requests remove only
+the `encrypted: true` annotations on the `message` fields of V2 `spawn_agent`, `send_message`, and
+`followup_task`. The annotation asks ChatGPT to return a Fernet-only tool argument; Codex then
+materializes an empty plaintext `InterAgentCommunication.content`, which routed children cannot
+consume reliably. Removing it at the parent request boundary makes the collaboration runtime carry
+the operator's original plaintext at every allowed depth and leaves unrelated encrypted schema
+fields untouched. The authenticated recovery endpoint remains a fallback for ciphertext already
+created before the parent observed the plaintext schema.
+
+[Decision Log]
+- 목적과 의도: Make heterogeneous V2 delegation reliable at nested depth without asking a model to decrypt and re-emit every new task or follow-up.
+- 기존 구현 및 제약 조건: Codex stamps collaboration `message` fields with `encrypted: true`; app-server records empty plaintext plus Fernet ciphertext, while recovery can time out after HTTP 200 or leave the local task record empty even when provider delivery succeeds.
+- 검토한 주요 대안: Increase recovery timeouts, recover `MESSAGE` as well as `NEW_TASK`, force native children, or remove only the three collaboration annotations before native inference.
+- 선택한 방식: Under the existing explicit `agentTaskRecovery` opt-in, copy-on-write remove the marker only from `spawn_agent`, `send_message`, and `followup_task` message schemas; keep recovery as a compatibility fallback.
+- 다른 대안 대신 이 방식을 선택한 이유: Plaintext is the protocol's supported alternative, preserves the exact caller body, avoids extra quota and transcription, and fixes initial plus subsequent nested delivery at the source.
+- 장점, 단점 및 영향: New nested Opus, Grok, and GLM tasks and messages no longer depend on recovery latency; task bodies are visible in local collaboration state, which is the explicit operational tradeoff of enabling recovery, while unrelated schema encryption remains unchanged.
+
 ### What the five-model `spawn_agent` window is, and how V1 differs from V2
 
 `MAX_SPAWN_AGENT_MODEL_OVERRIDES = 5` (mirrored in `src/codex/catalog/sync.ts`) is **not** a
