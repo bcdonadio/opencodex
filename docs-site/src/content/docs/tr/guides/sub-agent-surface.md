@@ -175,6 +175,11 @@ arayan başlığı sınırı geçmez. Kotayı
 tüketir, gecikme ekler, kurtarılan düz metni sınırlı bir bellek içi önbellekte
 kısa süre tutar ve belgelenmemiş ChatGPT arka uç davranışına bağlıdır. Yönlendirilen kurtarma mesajı,
 taşıma yönlendirme meta verilerini kaldırır ve yalnızca yükü içeren tek bir kullanıcı metin değeri sunar.
+Sonraki bir araç sonucu devamında ve son rota yerel olmayan bir sağlayıcıyı seçtikten sonra
+opencodex, önceki işbirliği iletilerini eşleşen önbellek girdilerinden geri yükler ve kesin önbellek
+eksikleri için aynı kimliği doğrulanmış sabit uç noktayı kullanır. Geçmişin tamamı ayrı hazırlanır
+ve herhangi bir öğe başarısız olursa hiçbiri iletilmez; yerel ChatGPT rotaları özgün şifreli
+işbirliği öğelerini değiştirmeden korur.
 Bir model
 kurtarılan metni döndürdüğü için bayt bayt doğruluk garanti edilmez. Genel/API
 anahtarlı proxy arayanlarını reddeder ve herhangi bir arızada

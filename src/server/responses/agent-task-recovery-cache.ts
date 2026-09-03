@@ -73,13 +73,24 @@ function refreshRecoveryCacheEntry(key: string, entry: RecoveryCacheEntry, now: 
   RECOVERY_CACHE.set(key, entry);
 }
 
-export function readCachedAgentTaskRecovery(key: string, maxEntries: number): string | null {
+export function readCachedAgentTaskRecoveries(keys: string[], maxEntries: number): string[] | null {
   const now = Date.now();
   sweepRecoveryCache(now, maxEntries);
-  const entry = RECOVERY_CACHE.get(key);
-  if (!entry) return null;
-  refreshRecoveryCacheEntry(key, entry, now);
-  return entry.assignment;
+  const entries = keys.map(key => RECOVERY_CACHE.get(key));
+  // A continuation is one recovery unit: do not refresh or expose a partial history when any
+  // ciphertext-scoped entry is unavailable.
+  if (entries.some(entry => entry === undefined)) return null;
+
+  const touched = new Set(keys);
+  // Preserve the cache's existing LRU ordering while moving the batch to the MRU end. History
+  // order is conversational, not recency, and must not rewrite eviction priority item by item.
+  const orderedTouched = [...RECOVERY_CACHE.entries()].filter(([key]) => touched.has(key));
+  for (const [key, entry] of orderedTouched) refreshRecoveryCacheEntry(key, entry, now);
+  return entries.map(entry => entry!.assignment);
+}
+
+export function readCachedAgentTaskRecovery(key: string, maxEntries: number): string | null {
+  return readCachedAgentTaskRecoveries([key], maxEntries)?.[0] ?? null;
 }
 
 function startRecoveryFlight(
@@ -112,6 +123,33 @@ function startRecoveryFlight(
   return flight;
 }
 
+async function waitForRecoveryCapacity(abortSignal?: AbortSignal): Promise<boolean> {
+  if (abortSignal?.aborted) return false;
+  const pending = [...RECOVERY_FLIGHTS.values()].map(flight => (
+    flight.promise.then(() => undefined, () => undefined)
+  ));
+  if (pending.length === 0) return true;
+  if (!abortSignal) {
+    await Promise.race(pending);
+    return true;
+  }
+
+  let onAbort: (() => void) | undefined;
+  try {
+    const cancelled = new Promise<false>((resolve) => {
+      onAbort = () => resolve(false);
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+      if (abortSignal.aborted) onAbort();
+    });
+    return await Promise.race([
+      Promise.race(pending).then(() => true as const),
+      cancelled,
+    ]);
+  } finally {
+    if (onAbort) abortSignal.removeEventListener("abort", onAbort);
+  }
+}
+
 async function waitForRecoveryFlight(
   flight: RecoveryFlight,
   abortSignal?: AbortSignal,
@@ -142,12 +180,17 @@ export async function resolveCachedAgentTaskRecovery(
   request: (signal: AbortSignal) => Promise<string | null>,
   abortSignal?: AbortSignal,
 ): Promise<string | null> {
-  if (abortSignal?.aborted) return null;
-  sweepRecoveryCache(Date.now(), maxEntries);
-  const cached = readCachedAgentTaskRecovery(key, maxEntries);
-  if (cached !== null) return cached;
-  const flight = startRecoveryFlight(key, maxEntries, request);
-  return flight ? waitForRecoveryFlight(flight, abortSignal) : null;
+  for (;;) {
+    if (abortSignal?.aborted) return null;
+    sweepRecoveryCache(Date.now(), maxEntries);
+    const cached = readCachedAgentTaskRecovery(key, maxEntries);
+    if (cached !== null) return cached;
+    const flight = startRecoveryFlight(key, maxEntries, request);
+    if (flight) return waitForRecoveryFlight(flight, abortSignal);
+    // The process-wide cap is a concurrency bound, not a terminal admission failure. Queue until
+    // any active flight settles, then recheck cache/key sharing and claim the freed slot.
+    if (!await waitForRecoveryCapacity(abortSignal)) return null;
+  }
 }
 
 export function discardCachedAgentTaskRecovery(key: string): void {

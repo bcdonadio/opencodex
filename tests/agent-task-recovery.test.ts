@@ -8,7 +8,9 @@ import {
 import { warnAgentTaskRecoveryStartup } from "../src/server";
 import { handleResponses } from "../src/server/responses";
 import {
+  agentTaskRecoveryConfig,
   recoverEncryptedAgentTask,
+  recoverAgentTaskHistory,
   resetAgentTaskRecoveryState,
   verifyRecoveredAgentTaskDelivery,
   type AgentTaskRecoveryResult,
@@ -31,6 +33,15 @@ import {
 } from "./helpers/agent-task-recovery";
 
 const AGENT_TASK_RECOVERY_LOG_PREFIX = "[opencodex] agent-task-recovery ";
+
+function indexedFernetTask(index: number): string {
+  const raw = Buffer.alloc(73, 0x5a);
+  raw[0] = 0x80;
+  raw.writeBigUInt64BE(1_720_000_000n, 1);
+  raw.writeUInt32BE(index, 25);
+  const unpadded = raw.toString("base64url");
+  return `${unpadded}${"=".repeat((4 - (unpadded.length % 4)) % 4)}`;
+}
 
 async function captureAgentTaskRecoveryDiagnostics(
   run: () => Promise<void>,
@@ -527,6 +538,400 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(finalProviderBody).not.toContain(SECOND_FERNET_TASK);
     expect(finalProviderBody).not.toContain("Message Type: NEW_TASK");
     expect(finalProviderBody).not.toContain("Message Type: MESSAGE");
+  });
+
+  test("detaches rehydrated history from the continuation source items", async () => {
+    const assignment = "Detached cached assignment.";
+    globalThis.fetch = (async input => {
+      if (String(input).includes("chatgpt.com")) {
+        return new Response(recoverySse(assignment), { status: 200 });
+      }
+      return providerResponse();
+    }) as typeof fetch;
+    const config = routedConfig();
+    const options = agentTaskRecoveryConfig(config)!;
+    const headers = codexHeaders("acct-detached-history", {
+      "x-codex-parent-thread-id": "parent-detached-history",
+    });
+    const request = new Request("http://localhost/v1/responses", { headers });
+    const seeded = encryptedInput();
+    expect((await recoverEncryptedAgentTask(
+      request,
+      seeded,
+      options,
+      config,
+      { parentThreadId: "parent-detached-history" },
+    )).recovered).toBe(true);
+
+    const sourceItem = encryptedInput()[0] as Record<string, unknown>;
+    const input = [
+      sourceItem,
+      { type: "function_call_output", call_id: "call_detached_history", output: "done" },
+    ];
+    expect(await recoverAgentTaskHistory(
+      request,
+      input,
+      options,
+      config,
+      { parentThreadId: "parent-detached-history" },
+    )).toEqual({ matched: 1, recovered: 1, recoveryCount: 0, complete: true });
+
+    expect(input[0]).not.toBe(sourceItem);
+    expect(JSON.stringify(input[0])).toContain(assignment);
+    expect(JSON.stringify(sourceItem)).toContain(FERNET_TASK);
+    expect(JSON.stringify(sourceItem)).not.toContain(assignment);
+  });
+
+  test("leaves cached encrypted history untouched for native fallback", async () => {
+    const assignment = "Routed-only cached history.";
+    const nativeBodies: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const raw = typeof init?.body === "string" ? init.body : "";
+      if (url.includes("chatgpt.com") && raw.includes("capture_assignment")) {
+        return new Response(recoverySse(assignment), { status: 200 });
+      }
+      if (url.includes("chatgpt.com")) nativeBodies.push(raw);
+      return providerResponse();
+    }) as typeof fetch;
+    const headers = codexHeaders("acct-native-history", {
+      "x-codex-parent-thread-id": "parent-native-history",
+    });
+    const taskInput = encryptedInput();
+    expect((await post(
+      routedConfig(),
+      "xai/grok-4.5",
+      structuredClone(taskInput),
+      headers,
+    )).status).toBe(200);
+
+    const response = await post(routedConfig(), "gpt-5.5", [
+      structuredClone(taskInput[0]),
+      { type: "function_call_output", call_id: "call_native_history", output: "done" },
+    ], headers);
+
+    expect(response.status).toBe(200);
+    expect(nativeBodies).toHaveLength(1);
+    expect(nativeBodies[0]).toContain(FERNET_TASK);
+    expect(nativeBodies[0]).not.toContain(assignment);
+  });
+
+  test("recovers missing routed history entries before provider dispatch", async () => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async (input, init) => {
+      const raw = typeof init?.body === "string" ? init.body : "";
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse(
+          raw.includes("Message Type: MESSAGE") ? "Cached follow-up." : "Evicted task.",
+        ), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const config = routedConfig({ enabled: true, cacheEntries: 1 });
+    const headers = codexHeaders("acct-partial-history", {
+      "x-codex-parent-thread-id": "parent-partial-history",
+    });
+    const taskInput = encryptedInput();
+    const messageInput = encryptedInput({
+      ciphertext: SECOND_FERNET_TASK,
+      messageType: "MESSAGE",
+    });
+    expect((await post(config, "xai/grok-4.5", structuredClone(taskInput), headers)).status).toBe(200);
+    expect((await post(config, "xai/grok-4.5", structuredClone(messageInput), headers)).status).toBe(200);
+
+    const response = await post(config, "xai/grok-4.5", [
+      structuredClone(taskInput[0]),
+      structuredClone(messageInput[0]),
+      { type: "function_call_output", call_id: "call_partial_history", output: "done" },
+    ], headers);
+
+    expect(response.status).toBe(200);
+    expect(recoveryFetches).toBe(3);
+    expect(providerFetches).toBe(3);
+  });
+
+  test("recovers more than thirty-two uncached historical envelopes without a hard cap failure", async () => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async input => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse("Recovered historical message."), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const history = Array.from({ length: 33 }, (_, index) => encryptedInput({
+      ciphertext: indexedFernetTask(index),
+      taskName: `/root/worker-${index}`,
+    })[0]);
+    const response = await post(
+      routedConfig(),
+      "xai/grok-4.5",
+      [...history, { type: "function_call_output", call_id: "call_large_history", output: "done" }],
+      codexHeaders("acct-large-history", { "x-codex-parent-thread-id": "parent-large-history" }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(recoveryFetches).toBe(33);
+    expect(providerFetches).toBe(1);
+  });
+
+  test("rejects an excessive historical envelope count before recovery fetch", async () => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async (input, init) => {
+      const raw = typeof init?.body === "string" ? init.body : "";
+      if (String(input).includes("chatgpt.com") && raw.includes("capture_assignment")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse("Must not recover."), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const history = Array.from({ length: 129 }, (_, index) => encryptedInput({
+      ciphertext: indexedFernetTask(index),
+      taskName: `/root/excess-${index}`,
+    })[0]);
+
+    const response = await post(
+      routedConfig(),
+      "xai/grok-4.5",
+      [...history, encryptedInput({
+        ciphertext: SECOND_FERNET_TASK,
+        messageType: "MESSAGE",
+      })[0]],
+      codexHeaders("acct-excess-history", { "x-codex-parent-thread-id": "parent-excess-history" }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(recoveryFetches).toBe(0);
+    expect(providerFetches).toBe(0);
+  });
+
+  test("rejects malformed historical Fernet collaboration before recovery fetch", async () => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async (input, init) => {
+      const raw = typeof init?.body === "string" ? init.body : "";
+      if (String(input).includes("chatgpt.com") && raw.includes("capture_assignment")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse("Must not recover."), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const malformed = encryptedInput()[0] as Record<string, unknown>;
+    (malformed.content as Array<Record<string, unknown>>)[0] = {
+      type: "input_text",
+      text: "Message Type: MESSAGE\nTask name: /root/other\nSender: /root\nPayload:\n",
+    };
+
+    const response = await post(
+      routedConfig(),
+      "xai/grok-4.5",
+      [malformed, { type: "function_call_output", call_id: "call_malformed_history", output: "done" }],
+      codexHeaders("acct-malformed-history", { "x-codex-parent-thread-id": "parent-malformed-history" }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(recoveryFetches).toBe(0);
+    expect(providerFetches).toBe(0);
+  });
+
+  test("rejects excessive aggregate recovered history before provider dispatch", async () => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    const largeAssignment = "x".repeat(2 * 1024 * 1024 - 1);
+    globalThis.fetch = (async (input, init) => {
+      const raw = typeof init?.body === "string" ? init.body : "";
+      if (String(input).includes("chatgpt.com") && raw.includes("capture_assignment")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse(largeAssignment), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const history = Array.from({ length: 5 }, (_, index) => encryptedInput({
+      ciphertext: indexedFernetTask(index),
+      taskName: `/root/large-${index}`,
+    })[0]);
+
+    const response = await post(
+      routedConfig({ enabled: true, cacheEntries: 10 }),
+      "xai/grok-4.5",
+      [...history, { type: "function_call_output", call_id: "call_large_plaintext", output: "done" }],
+      codexHeaders("acct-large-plaintext", { "x-codex-parent-thread-id": "parent-large-plaintext" }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(recoveryFetches).toBe(5);
+    expect(providerFetches).toBe(0);
+  });
+
+  test.each([
+    { label: "translated Anthropic wire", options: { inboundWire: "anthropic" as const } },
+    { label: "synthetic combo child", options: { comboAttempt: true } },
+  ])("does not recover encrypted history for a $label", async ({ options }) => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async (input, init) => {
+      const raw = typeof init?.body === "string" ? init.body : "";
+      if (String(input).includes("chatgpt.com") && raw.includes("capture_assignment")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse("Out-of-scope historical payload."), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const headers = codexHeaders("acct-history-scope", {
+      "x-codex-parent-thread-id": "parent-history-scope",
+    });
+    const request = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...Object.fromEntries(headers) },
+      body: JSON.stringify({
+        model: "xai/grok-4.5",
+        input: [
+          encryptedInput()[0],
+          { type: "function_call_output", call_id: "call_history_scope", output: "done" },
+        ],
+        stream: false,
+      }),
+    });
+
+    const response = await handleResponses(
+      request,
+      routedConfig(),
+      { model: "", provider: "" },
+      options,
+    );
+
+    expect(response.status).toBe(200);
+    expect(recoveryFetches).toBe(0);
+    expect(providerFetches).toBe(1);
+  });
+
+  test("fails closed without provider dispatch when historical recovery fails", async () => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async (input, init) => {
+      const raw = typeof init?.body === "string" ? init.body : "";
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        if (recoveryFetches === 3) return new Response("unavailable", { status: 503 });
+        return new Response(recoverySse(
+          raw.includes("Message Type: MESSAGE") ? "Cached follow-up." : "Evicted task.",
+        ), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const config = routedConfig({ enabled: true, cacheEntries: 1 });
+    const headers = codexHeaders("acct-history-failure", {
+      "x-codex-parent-thread-id": "parent-history-failure",
+    });
+    const taskInput = encryptedInput();
+    const messageInput = encryptedInput({
+      ciphertext: SECOND_FERNET_TASK,
+      messageType: "MESSAGE",
+    });
+    expect((await post(config, "xai/grok-4.5", structuredClone(taskInput), headers)).status).toBe(200);
+    expect((await post(config, "xai/grok-4.5", structuredClone(messageInput), headers)).status).toBe(200);
+
+    const response = await post(config, "xai/grok-4.5", [
+      structuredClone(taskInput[0]),
+      structuredClone(messageInput[0]),
+      { type: "function_call_output", call_id: "call_history_failure", output: "done" },
+    ], headers);
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: "unreadable_encrypted_agent_task" },
+    });
+    expect(recoveryFetches).toBe(3);
+    expect(providerFetches).toBe(2);
+  });
+
+  test("recovers missing history before current-item recovery", async () => {
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    globalThis.fetch = (async (input, init) => {
+      const raw = typeof init?.body === "string" ? init.body : "";
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse(
+          raw.includes(SECOND_FERNET_TASK) ? "Current cached message." : "Evicted prior task.",
+        ), { status: 200 });
+      }
+      providerFetches += 1;
+      return providerResponse();
+    }) as typeof fetch;
+    const config = routedConfig({ enabled: true, cacheEntries: 1 });
+    const headers = codexHeaders("acct-current-after-miss", {
+      "x-codex-parent-thread-id": "parent-current-after-miss",
+    });
+    const prior = encryptedInput();
+    const current = encryptedInput({
+      ciphertext: SECOND_FERNET_TASK,
+      messageType: "MESSAGE",
+    });
+    expect((await post(config, "xai/grok-4.5", structuredClone(prior), headers)).status).toBe(200);
+    expect((await post(config, "xai/grok-4.5", structuredClone(current), headers)).status).toBe(200);
+
+    const response = await post(config, "xai/grok-4.5", [
+      structuredClone(prior[0]),
+      structuredClone(current[0]),
+    ], headers);
+
+    expect(response.status).toBe(200);
+    expect(recoveryFetches).toBe(4);
+    expect(providerFetches).toBe(3);
+  });
+
+  test.each([
+    { type: "additional_tools", role: "developer", tools: [] },
+    { type: "compaction_trigger" },
+  ])("recovers the current encrypted item before trailing $type metadata", async (trailer) => {
+    const assignment = `Current task before ${trailer.type}.`;
+    let recoveryFetches = 0;
+    let providerFetches = 0;
+    let providerBody = "";
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse(assignment), { status: 200 });
+      }
+      providerFetches += 1;
+      providerBody = typeof init?.body === "string" ? init.body : "";
+      return providerResponse();
+    }) as typeof fetch;
+
+    const headers = codexHeaders("acct-trailing-metadata", {
+      "x-codex-parent-thread-id": `parent-${trailer.type}`,
+    });
+    expect((await post(
+      routedConfig(),
+      "xai/grok-4.5",
+      encryptedInput(),
+      headers,
+    )).status).toBe(200);
+
+    const response = await post(
+      routedConfig(),
+      "xai/grok-4.5",
+      [...encryptedInput(), trailer],
+      headers,
+    );
+
+    expect(response.status).toBe(200);
+    expect(recoveryFetches).toBe(1);
+    expect(providerFetches).toBe(2);
+    expect(providerBody).toContain(assignment);
+    expect(providerBody).not.toContain(FERNET_TASK);
   });
 
   test("emits matching keyed assignment metadata for extraction and delivery", async () => {

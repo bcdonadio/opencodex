@@ -66,7 +66,7 @@ describe("agent task recovery cache", () => {
     expect(requests).toBe(1);
   });
 
-  test("fails a thirty-third distinct recovery closed without starting it", async () => {
+  test("queues a thirty-third distinct recovery until global capacity is available", async () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>(resolve => {
       release = resolve;
@@ -80,14 +80,16 @@ describe("agent task recovery cache", () => {
       })
     ));
 
-    const overflow = await resolveCachedAgentTaskRecovery("task-overflow", 200, async () => {
+    const overflow = resolveCachedAgentTaskRecovery("task-overflow", 200, async () => {
       requests += 1;
-      return "must-not-run";
+      return "queued-assignment";
     });
-    expect(overflow).toBeNull();
+    await new Promise<void>(resolve => setImmediate(resolve));
     expect(requests).toBe(32);
     release?.();
     expect((await Promise.all(pending)).filter(Boolean)).toHaveLength(32);
+    expect(await overflow).toBe("queued-assignment");
+    expect(requests).toBe(33);
   });
 
   test("evicts oldest recovered plaintext when the byte budget is exceeded", async () => {

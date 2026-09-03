@@ -149,6 +149,10 @@ locally. `content-type` and `accept` are generated locally, and no other caller 
 cross the boundary.
 The routed recovery message strips transport routing metadata and presents exactly one
 payload-only user text value.
+On later tool-result continuations and only after the final route is non-native, opencodex restores
+earlier collaboration messages from matching cache entries and uses the same authenticated fixed
+endpoint for exact cache misses. It stages the complete history and forwards none of it unless every
+item succeeds; native ChatGPT routes keep the original encrypted collaboration items unchanged.
 It consumes quota, adds latency, briefly retains recovered plaintext in a bounded in-memory cache,
 and depends on undocumented ChatGPT backend behavior. Because a model returns the recovered text,
 byte-for-byte fidelity is not guaranteed. It rejects generic/API-key proxy callers and preserves

@@ -300,7 +300,7 @@ import {
   discardEncryptedAgentTaskRecovery,
   logAgentTaskRecoveryDiagnostic,
   recoverEncryptedAgentTask,
-  rehydrateCachedAgentTaskHistory,
+  recoverAgentTaskHistory,
   verifyRecoveredAgentTaskDelivery,
   type AgentTaskRecoveryResult,
 } from "./agent-task-recovery";
@@ -2767,23 +2767,6 @@ async function handleResponsesInner(
   const previousResponseInputExpanded = options.comboReplaySnapshot?.previousResponseInputExpanded
     ?? (body !== originalBody
       && typeof (body as { previous_response_id?: unknown }).previous_response_id === "string");
-  const rehydratedAgentMessages = agentTaskRecovery && isThreadSpawnRequest(req.headers)
-    ? rehydrateCachedAgentTaskHistory(
-      req,
-      (body as { input?: unknown } | undefined)?.input,
-      agentTaskRecovery,
-      config,
-      { parentThreadId: inboundClientThreadId },
-    )
-    : 0;
-  if (rehydratedAgentMessages > 0) {
-    logAgentTaskRecoveryDiagnostic({
-      traceId: createAgentTaskRecoveryTraceId(),
-      stage: "history",
-      outcome: "recovered",
-      messageCount: rehydratedAgentMessages,
-    });
-  }
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
     { strictEnvelope: !!agentTaskRecovery && isThreadSpawnRequest(req.headers) },
@@ -2808,7 +2791,7 @@ async function handleResponsesInner(
   let toolBridgeMaps: ReturnType<typeof buildToolBridgeMaps>;
   try {
     parsed = parseRequest(body);
-    if (options.comboReplaySnapshot?.recoveredPlaintext || rehydratedAgentMessages > 0) {
+    if (options.comboReplaySnapshot?.recoveredPlaintext) {
       markBodyNonPersistable(parsed._rawBody);
     }
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
@@ -3086,11 +3069,6 @@ async function handleResponsesInner(
     previewSelectionAdmission?.release();
   }
 
-  // Native fallback can consume ciphertext, so recover only after final route selection.
-  const agentTaskRecoveryTraceId = unreadableEncryptedAgentTask
-    && !isCanonicalOpenAiForwardProvider(route.provider)
-    ? createAgentTaskRecoveryTraceId()
-    : undefined;
   const agentTaskRecoveryGateReason = inboundWire !== "responses"
     ? "non_responses_wire"
     : !threadSpawn
@@ -3100,6 +3078,92 @@ async function handleResponsesInner(
         : options.comboAttempt
           ? "combo_child"
           : null;
+
+  // Native ChatGPT can consume its own ciphertext and must receive the reserved collaboration
+  // schema byte-for-byte. Only detach and rehydrate cached history after the final routed-provider
+  // selection has settled, then reparse so the routed adapter sees the recovered messages.
+  const historyRecoveryTraceId = agentTaskRecovery
+    && threadSpawn
+    && !agentTaskRecoveryGateReason
+    && !isCanonicalOpenAiForwardProvider(route.provider)
+    ? createAgentTaskRecoveryTraceId()
+    : undefined;
+  const recoveryInput = (body as { input?: unknown } | undefined)?.input;
+  // A second fallback pass exists only after current-item recovery. Snapshot just that rare path;
+  // injectAssignment replaces cloned items, so a shallow array preserves the original ciphertext
+  // without deep-cloning ordinary plaintext continuations.
+  const encryptedAgentInputBeforeRecovery = unreadableEncryptedAgentTask && Array.isArray(recoveryInput)
+    ? recoveryInput.slice()
+    : undefined;
+  const historyRehydration = agentTaskRecovery
+    && threadSpawn
+    && !agentTaskRecoveryGateReason
+    && !isCanonicalOpenAiForwardProvider(route.provider)
+    ? await recoverAgentTaskHistory(
+      req,
+      recoveryInput,
+      agentTaskRecovery,
+      config,
+      {
+        parentThreadId: inboundClientThreadId,
+        abortSignal: options.abortSignal,
+        traceId: historyRecoveryTraceId,
+      },
+    )
+    : { matched: 0, recovered: 0, recoveryCount: 0, complete: true };
+  const historyRehydrationFailed = !historyRehydration.complete;
+  if (historyRehydrationFailed) {
+    unreadableEncryptedAgentTask = true;
+    logAgentTaskRecoveryDiagnostic({
+      traceId: historyRecoveryTraceId!,
+      stage: "history",
+      outcome: "rejected",
+      reason: historyRehydration.reason,
+      messageCount: historyRehydration.matched,
+      recoveryCount: historyRehydration.recoveryCount,
+    });
+  }
+  if (historyRehydration.recovered > 0) {
+    logAgentTaskRecoveryDiagnostic({
+      traceId: historyRecoveryTraceId!,
+      stage: "history",
+      outcome: "recovered",
+      messageCount: historyRehydration.recovered,
+      recoveryCount: historyRehydration.recoveryCount,
+    });
+    // Recovery has already injected plaintext into `body`. Bar this object before reparsing so a
+    // parser exception cannot leave a future recording path holding an unmarked plaintext body.
+    markBodyNonPersistable(body);
+    try {
+      const reparsed = parseRequest(body);
+      const kept: Array<keyof OcxParsedRequest> = [
+        "_previousResponseInputExpanded",
+        "_providerContinuation",
+        "_providerContinuationCandidate",
+        "_providerContinuationOwner",
+        "_cursorConversationId",
+        "_clientThreadId",
+        "_cursorClientThreadId",
+        "_reasoningReplayScope",
+        "_cursorIsolateConversation",
+      ];
+      for (const key of kept) {
+        if (parsed[key] !== undefined) {
+          (reparsed as unknown as Record<string, unknown>)[key] = parsed[key];
+        }
+      }
+      parsed = reparsed;
+    } catch {
+      unreadableEncryptedAgentTask = true;
+    }
+  }
+
+  // Native fallback can consume ciphertext, so recover only after final route selection.
+  const agentTaskRecoveryTraceId = unreadableEncryptedAgentTask
+    && !historyRehydrationFailed
+    && !isCanonicalOpenAiForwardProvider(route.provider)
+    ? createAgentTaskRecoveryTraceId()
+    : undefined;
   if (agentTaskRecoveryTraceId) {
     logAgentTaskRecoveryDiagnostic({
       traceId: agentTaskRecoveryTraceId,
@@ -3143,7 +3207,7 @@ async function handleResponsesInner(
       options.recoveryDeliveryTestHook?.((body as { input?: unknown } | undefined)?.input, recoveryResult);
     }
     if (recoveryResult.recovered) {
-      unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
+      unreadableEncryptedAgentTask = historyRehydrationFailed || hasUnreadableEncryptedAgentTask(
         (body as { input?: unknown } | undefined)?.input,
       );
       if (!unreadableEncryptedAgentTask) {
@@ -3268,6 +3332,24 @@ async function handleResponsesInner(
                 err instanceof Error ? err.message : String(err),
               );
             }
+          }
+          if (
+            encryptedAgentInputBeforeRecovery !== undefined
+            && isCanonicalOpenAiForwardProvider(route.provider)
+          ) {
+            const plaintextBody = body;
+            body = {
+              ...(body as Record<string, unknown>),
+              input: encryptedAgentInputBeforeRecovery,
+            };
+            copyPreviousResponseReplayProvenance(plaintextBody, body);
+            const nativeReparse = parseRequest(body);
+            for (const key of kept) {
+              if (parsed[key] !== undefined) {
+                (nativeReparse as unknown as Record<string, unknown>)[key] = parsed[key];
+              }
+            }
+            parsed = nativeReparse;
           }
           logAgentTaskRecoveryDiagnostic({
             traceId: agentTaskRecoveryTraceId,

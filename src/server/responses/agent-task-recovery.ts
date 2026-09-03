@@ -7,7 +7,7 @@ import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
 import { AGENT_MESSAGE_CONTROL_PREAMBLE, structurallyValidFernetTokens } from "./encrypted-payload";
 import {
   discardCachedAgentTaskRecovery,
-  readCachedAgentTaskRecovery,
+  readCachedAgentTaskRecoveries,
   resetAgentTaskRecoveryCache,
   resolveCachedAgentTaskRecovery,
 } from "./agent-task-recovery-cache";
@@ -28,6 +28,11 @@ const OPENAI_TOKEN_AUDIENCE = "https://api.openai.com/v1";
 const MAX_CIPHERTEXT_BYTES = 2 * 1024 * 1024;
 const MAX_ASSIGNMENT_BYTES = 2 * 1024 * 1024;
 const MAX_RECOVERY_RESPONSE_BYTES = 4 * 1024 * 1024;
+const MAX_HISTORY_RECOVERY_WORKERS = 4;
+const MAX_HISTORY_ENVELOPES = 128;
+const MAX_HISTORY_CIPHERTEXT_BYTES = 8 * 1024 * 1024;
+const MAX_HISTORY_PLAINTEXT_BYTES = 8 * 1024 * 1024;
+const MAX_HISTORY_RECOVERY_MS = 120_000;
 const CACHE_SCOPE_KEY = randomBytes(32);
 const ASSIGNMENT_FINGERPRINT_KEY = randomBytes(32);
 const AGENT_TASK_RECOVERY_LOG_PREFIX = "[opencodex] agent-task-recovery ";
@@ -59,6 +64,7 @@ export interface AgentTaskRecoveryDiagnostic {
   assignmentFingerprint?: string;
   recoveryModel?: string;
   messageCount?: number;
+  recoveryCount?: number;
 }
 
 export function createAgentTaskRecoveryTraceId(): string {
@@ -223,12 +229,7 @@ function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): 
   return envelope;
 }
 
-function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
-  const reject = (reason: string): null => {
-    diagnose(traceId, { stage: "envelope", outcome: "rejected", reason });
-    return null;
-  };
-  if (!Array.isArray(input)) return reject("input_not_array");
+function terminalInputIndex(input: unknown[]): number {
   let itemIndex = input.length - 1;
   while (itemIndex >= 0) {
     const type = input[itemIndex] && typeof input[itemIndex] === "object"
@@ -237,8 +238,17 @@ function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
     if (type !== "compaction_trigger" && type !== "additional_tools") break;
     itemIndex -= 1;
   }
+  return itemIndex;
+}
 
-  return findEnvelopeAt(input, itemIndex, traceId);
+function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
+  const reject = (reason: string): null => {
+    diagnose(traceId, { stage: "envelope", outcome: "rejected", reason });
+    return null;
+  };
+  if (!Array.isArray(input)) return reject("input_not_array");
+
+  return findEnvelopeAt(input, terminalInputIndex(input), traceId);
 }
 
 function stripMatchingEnvelope(assignment: string, envelope: AgentEnvelope): string | null {
@@ -279,8 +289,12 @@ function validateAssignment(assignment: unknown, envelope: AgentEnvelope): strin
 
 function injectAssignment(input: unknown, envelope: AgentEnvelope, assignment: string): boolean {
   if (!Array.isArray(input)) return false;
-  const item = input[envelope.itemIndex];
-  if (!item || typeof item !== "object") return false;
+  const sourceItem = input[envelope.itemIndex];
+  if (!sourceItem || typeof sourceItem !== "object") return false;
+  // Continuation expansion shares stored item objects with the current input array. Detach the
+  // item before replacing ciphertext so recovered plaintext cannot mutate an older persisted
+  // response-state entry through that alias.
+  const item = structuredClone(sourceItem) as Record<string, unknown>;
   const content = (item as { content?: unknown }).content;
   if (!Array.isArray(content)) return false;
   const part = content[envelope.encryptedIndex] as { type?: unknown; encrypted_content?: unknown } | undefined;
@@ -292,13 +306,14 @@ function injectAssignment(input: unknown, envelope: AgentEnvelope, assignment: s
 
   // Once recovery succeeds the transport envelope is no longer meaningful to a routed
   // provider. Replace the whole message content so no routing/control blocks survive.
-  (item as Record<string, unknown>).content = [{ type: "input_text", text: assignment }];
-  const message = item as Record<string, unknown>;
+  item.content = [{ type: "input_text", text: assignment }];
+  const message = item;
   message.type = "message";
   message.role = "user";
   delete message.id;
   delete message.author;
   delete message.recipient;
+  input[envelope.itemIndex] = item;
   return true;
 }
 
@@ -423,28 +438,220 @@ function cacheKeyForEnvelope(
 /**
  * Restore already-recovered collaboration inputs on later tool-result turns. Codex app-server
  * retains the original ciphertext, so a provider continuation would otherwise see only the
- * routing header after encrypted-content sanitization. Cache admission is rechecked before reads;
- * misses stay encrypted and no historical recovery request is started from this path.
+ * routing header after encrypted-content sanitization. Cache admission is rechecked before reads.
+ * Exact cache misses use the same authenticated fixed-endpoint recovery as a current item, and all
+ * recovered history is staged until every item succeeds.
  */
-export function rehydrateCachedAgentTaskHistory(
+export interface AgentTaskHistoryRehydrationResult {
+  matched: number;
+  recovered: number;
+  recoveryCount: number;
+  complete: boolean;
+  reason?: "history_envelope" | "admission" | "history_limit" | "history_plaintext_limit" | "caller_aborted" | "history_timeout" | "recovery_failed" | "injection_failed";
+}
+
+function itemHasStandaloneFernet(input: unknown[], itemIndex: number): boolean {
+  const item = input[itemIndex];
+  if (!item || typeof item !== "object" || (item as { type?: unknown }).type !== "agent_message") {
+    return false;
+  }
+  const content = (item as { content?: unknown }).content;
+  if (!Array.isArray(content)) return false;
+  return content.some(part => (
+    !!part
+    && typeof part === "object"
+    && (part as { type?: unknown }).type === "encrypted_content"
+    && typeof (part as { encrypted_content?: unknown }).encrypted_content === "string"
+    && structurallyValidFernetTokens((part as { encrypted_content: string }).encrypted_content).length > 0
+  ));
+}
+
+export async function recoverAgentTaskHistory(
   req: Request,
   input: unknown,
   options: AgentTaskRecoveryOptions,
   config: OcxConfig,
-  context: { parentThreadId?: string | null } = {},
-): number {
-  if (!Array.isArray(input)) return 0;
-  const admission = recoveryAdmission(req, config);
-  if (!admission) return 0;
-  let recovered = 0;
-  for (let itemIndex = 0; itemIndex < input.length; itemIndex += 1) {
-    const envelope = findEnvelopeAt(input, itemIndex);
-    if (!envelope) continue;
-    const cacheKey = cacheKeyForEnvelope(admission, context.parentThreadId, envelope);
-    const assignment = readCachedAgentTaskRecovery(cacheKey, options.cacheEntries ?? 200);
-    if (assignment !== null && injectAssignment(input, envelope, assignment)) recovered += 1;
+  context: { parentThreadId?: string | null; abortSignal?: AbortSignal; traceId?: string } = {},
+): Promise<AgentTaskHistoryRehydrationResult> {
+  if (!Array.isArray(input)) {
+    return { matched: 0, recovered: 0, recoveryCount: 0, complete: true };
   }
-  return recovered;
+  const envelopes: AgentEnvelope[] = [];
+  // The current request payload is handled by recoverEncryptedAgentTask. Trailing control items
+  // are metadata, so use the same terminal index as current-envelope recovery and inspect only
+  // the earlier collaboration history.
+  const terminalIndex = terminalInputIndex(input);
+  for (let itemIndex = 0; itemIndex < terminalIndex; itemIndex += 1) {
+    const envelope = findEnvelopeAt(input, itemIndex);
+    if (envelope) {
+      envelopes.push(envelope);
+    } else if (itemHasStandaloneFernet(input, itemIndex)) {
+      return {
+        matched: envelopes.length + 1,
+        recovered: 0,
+        recoveryCount: 0,
+        complete: false,
+        reason: "history_envelope",
+      };
+    }
+  }
+  if (envelopes.length === 0) {
+    return { matched: 0, recovered: 0, recoveryCount: 0, complete: true };
+  }
+  if (
+    envelopes.length > MAX_HISTORY_ENVELOPES
+    || envelopes.reduce((bytes, envelope) => bytes + Buffer.byteLength(envelope.ciphertext), 0)
+      > MAX_HISTORY_CIPHERTEXT_BYTES
+  ) {
+    return {
+      matched: envelopes.length,
+      recovered: 0,
+      recoveryCount: 0,
+      complete: false,
+      reason: "history_limit",
+    };
+  }
+  const admission = recoveryAdmission(req, config, context.traceId);
+  if (!admission) {
+    return {
+      matched: envelopes.length,
+      recovered: 0,
+      recoveryCount: 0,
+      complete: false,
+      reason: "admission",
+    };
+  }
+  const cacheKeys = envelopes.map(envelope => (
+    cacheKeyForEnvelope(admission, context.parentThreadId, envelope)
+  ));
+  let recoveryCount = 0;
+  const cachedAssignments = readCachedAgentTaskRecoveries(cacheKeys, options.cacheEntries ?? 200);
+  let assignments: Array<string | null>;
+  if (cachedAssignments) {
+    assignments = cachedAssignments;
+  } else {
+    const historyController = new AbortController();
+    const historyTimeout = setTimeout(
+      () => historyController.abort(new DOMException("Agent task history recovery timed out", "TimeoutError")),
+      MAX_HISTORY_RECOVERY_MS,
+    );
+    const historySignal = context.abortSignal
+      ? AbortSignal.any([context.abortSignal, historyController.signal])
+      : historyController.signal;
+    assignments = Array<string | null>(envelopes.length).fill(null);
+    let nextIndex = 0;
+    let recoveredBytes = 0;
+    let plaintextLimitExceeded = false;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        if (plaintextLimitExceeded) return;
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= envelopes.length) return;
+        const envelope = envelopes[index]!;
+        const assignment = await resolveCachedAgentTaskRecovery(
+          cacheKeys[index]!,
+          options.cacheEntries ?? 200,
+          signal => {
+            recoveryCount += 1;
+            return requestRecovery(admission, envelope, options, signal, context.traceId);
+          },
+          historySignal,
+        );
+        assignments[index] = assignment;
+        if (assignment !== null) {
+          recoveredBytes += Buffer.byteLength(assignment);
+          if (recoveredBytes > MAX_HISTORY_PLAINTEXT_BYTES) {
+            plaintextLimitExceeded = true;
+            historyController.abort(new DOMException(
+              "Agent task history plaintext limit exceeded",
+              "AbortError",
+            ));
+          }
+        }
+      }
+    };
+    try {
+      await Promise.all(Array.from(
+        { length: Math.min(MAX_HISTORY_RECOVERY_WORKERS, envelopes.length) },
+        () => worker(),
+      ));
+    } finally {
+      clearTimeout(historyTimeout);
+    }
+    if (plaintextLimitExceeded) {
+      return {
+        matched: envelopes.length,
+        recovered: 0,
+        recoveryCount,
+        complete: false,
+        reason: "history_plaintext_limit",
+      };
+    }
+    if (context.abortSignal?.aborted || historyController.signal.aborted) {
+      return {
+        matched: envelopes.length,
+        recovered: 0,
+        recoveryCount,
+        complete: false,
+        reason: context.abortSignal?.aborted ? "caller_aborted" : "history_timeout",
+      };
+    }
+    if (assignments.some(assignment => assignment === null)) {
+      return {
+        matched: envelopes.length,
+        recovered: 0,
+        recoveryCount,
+        complete: false,
+        reason: "recovery_failed",
+      };
+    }
+  }
+
+  if (
+    assignments.reduce(
+      (bytes, assignment) => bytes + (assignment === null ? 0 : Buffer.byteLength(assignment)),
+      0,
+    ) > MAX_HISTORY_PLAINTEXT_BYTES
+  ) {
+    return {
+      matched: envelopes.length,
+      recovered: 0,
+      recoveryCount,
+      complete: false,
+      reason: "history_plaintext_limit",
+    };
+  }
+
+  const detachedInput = input.slice();
+  for (let index = 0; index < envelopes.length; index += 1) {
+    const assignment = assignments[index];
+    if (assignment === null || !injectAssignment(detachedInput, envelopes[index]!, assignment)) {
+      return {
+        matched: envelopes.length,
+        recovered: 0,
+        recoveryCount,
+        complete: false,
+        reason: "injection_failed",
+      };
+    }
+  }
+  if (context.abortSignal?.aborted) {
+    return {
+      matched: envelopes.length,
+      recovered: 0,
+      recoveryCount,
+      complete: false,
+      reason: "caller_aborted",
+    };
+  }
+  for (const envelope of envelopes) input[envelope.itemIndex] = detachedInput[envelope.itemIndex];
+  return {
+    matched: envelopes.length,
+    recovered: envelopes.length,
+    recoveryCount,
+    complete: true,
+  };
 }
 
 function recoveryPayload(envelope: AgentEnvelope, model: string): string {

@@ -131,6 +131,15 @@ authentication. ChatGPT returns the plaintext payload through a forced function 
 then converts only that collaboration item to a standard user message before routed-provider dispatch.
 The routed recovery message strips transport routing metadata and contains exactly one
 payload-only user text value.
+On a later tool-result continuation and only after the final route selects a non-native provider,
+earlier encrypted collaboration items are rehydrated from matching cache entries and exact cache
+misses use the same authenticated fixed endpoint. The complete history is staged and none is
+forwarded unless every item succeeds; a native ChatGPT route retains the original encrypted
+collaboration schema.
+Historical recovery uses at most four concurrent workers, queues behind the process-wide recovery
+cap, and fails closed before dispatch above 128 envelopes, 8 MiB of aggregate ciphertext, or the
+two-minute whole-history deadline. Recovered historical plaintext is independently capped at
+8 MiB before input mutation or provider dispatch.
 
 This is not local decryption and does not fix the Codex wire protocol. It depends on undocumented
 ChatGPT backend behavior and may stop working after a backend change. The recovered payload is

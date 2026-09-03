@@ -152,6 +152,14 @@ sonra yönlendirilen sağlayıcı dağıtımından önce yalnızca bu işbirliğ
 standart bir kullanıcı mesajına dönüştürür.
 Yönlendirilen kurtarma mesajı, taşıma yönlendirme meta verilerini kaldırır ve yalnızca yükü içeren tek
 bir kullanıcı metin değeri sunar.
+Sonraki bir araç sonucu devamında ve son rota yerel olmayan bir sağlayıcıyı seçtikten sonra önceki
+şifreli işbirliği öğeleri eşleşen önbellek girdilerinden geri yüklenir; kesin önbellek eksikleri aynı
+kimliği doğrulanmış sabit uç noktayı kullanır. Geçmişin tamamı ayrı hazırlanır ve herhangi bir öğe
+başarısız olursa hiçbiri iletilmez; yerel ChatGPT rotası özgün şifreli işbirliği şemasını korur.
+Geçmiş kurtarma en fazla dört eşzamanlı çalışan kullanır, süreç genelindeki kurtarma sınırının
+arkasında sıraya girer ve 128 zarfı, toplam 8 MiB şifreli metni veya iki dakikalık tüm-geçmiş
+süresini aşarsa iletimden önce kapalı biçimde başarısız olur. Kurtarılan geçmiş düz metni de girdi
+değiştirilmeden veya iletilmeden önce toplam 8 MiB ile sınırlandırılır.
 
 Bu yerel şifre çözme değildir ve Codex hat protokolünü düzeltmez. Belgelenmemiş
 ChatGPT arka uç davranışına bağlıdır ve bir arka uç değişikliğinden sonra
