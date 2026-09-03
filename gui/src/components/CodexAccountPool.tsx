@@ -21,6 +21,7 @@ import { accountNeedsReauth } from "../oauth-health-display";
 import { useCopyFeedback } from "./use-copy-feedback";
 import { DEFAULT_ACCOUNT_POOL_STRATEGY } from "../account-pool-strategy";
 import type { CodexAccountMutationCompletion } from "../codex-account-mutation";
+import { useAliasEditor } from "../hooks/useAliasEditor";
 
 // Single definition lives with the controller that owns this data (WP3).
 export type { CodexAccountEntry } from "../hooks/useCodexAccountPool";
@@ -50,6 +51,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
   controller?: CodexAccountPoolController;
 }) {
   const t = useT();
+  const { requestAlias, dialog: aliasDialog } = useAliasEditor();
   const autoSwitch = useCodexAutoSwitch(apiBase, {
     updated: t("codexAuth.autoSwitchUpdated"),
     updateFailed: t("codexAuth.autoSwitchUpdateFailed"),
@@ -177,7 +179,11 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
   };
 
   const editAlias = async (account: CodexAccountEntry) => {
-    const entered = window.prompt(t("prov.aliasPrompt"), account.alias ?? "");
+    const entered = await requestAlias({
+      title: t("prov.editAlias"),
+      label: t("prov.aliasPrompt"),
+      initialValue: account.alias ?? "",
+    });
     if (entered === null) return;
     const result = await controller.saveAlias(account.id, entered);
     showActionFeedback(t(result.ok ? "prov.aliasSaved" : "prov.aliasSaveFailed"), result.ok ? "ok" : "err");
@@ -486,6 +492,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
           onAdded={handleAccountAdded}
         />
       )}
+      {aliasDialog}
     </div>
   );
 }

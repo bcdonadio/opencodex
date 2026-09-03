@@ -130,7 +130,7 @@ export function CodexAccountPoolCards({
                 saving={pauseUpdatingId === a.id}
               />
             </button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => void onEditAlias(a)}>
+            <button type="button" className="btn btn-ghost btn-sm" aria-haspopup="dialog" onClick={() => void onEditAlias(a)}>
               {t("prov.editAlias")}
             </button>
             <button

@@ -3,6 +3,7 @@ import type { AccountLoadState } from "../components/provider-workspace/types";
 import { accountNeedsReauth } from "../oauth-health-display";
 import type { AccountQuota } from "../codex-quota-utils";
 import { oauthAccountDisplayLabel } from "../provider-workspace/auth";
+import type { RequestAlias } from "./useAliasEditor";
 
 export interface Config {
   port: number;
@@ -46,6 +47,7 @@ export function buildActiveAccountNeedsReauthMap(
 export function useProviderAccountPools(deps: {
   apiBase: string;
   t: (key: string, ...args: unknown[]) => string;
+  requestAlias: RequestAlias;
   config: Config | null;
   oauthStatus: Record<string, OAuthStatus>;
   aliveRef: MutableRefObject<boolean>;
@@ -56,7 +58,7 @@ export function useProviderAccountPools(deps: {
   codexActiveNeedsReauth: boolean;
 }) {
   const {
-    apiBase, t, config, aliveRef, notify,
+    apiBase, t, requestAlias, config, aliveRef, notify,
     fetchConfig, fetchOauth, fetchProviderQuotas, codexActiveNeedsReauth,
   } = deps;
   const [accountSets, setAccountSets] = useState<Record<string, { activeAccountId: string | null; accounts: OAuthAccount[] }>>({});
@@ -206,7 +208,11 @@ export function useProviderAccountPools(deps: {
   };
 
   const editCredentialAlias = async (provider: string, type: "oauth" | "api-key", id: string, current?: string) => {
-    const entered = window.prompt(t("prov.aliasPrompt"), current ?? "");
+    const entered = await requestAlias({
+      title: t("prov.editAlias"),
+      label: t("prov.aliasPrompt"),
+      initialValue: current ?? "",
+    });
     if (entered === null) return;
     const alias = entered.trim();
     const response = await fetch(type === "oauth" ? `${apiBase}/api/oauth/accounts/alias` : `${apiBase}/api/providers/keys/alias`, {

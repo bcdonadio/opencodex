@@ -223,6 +223,72 @@ test("picking the order an account already has writes nothing", async () => {
   expect(host.querySelector(".codex-auth-page-head__feedback.is-err")).toBeNull();
 });
 
+test("editing a pool account alias uses an in-page dialog", async () => {
+  const saved: Array<{ id: string; alias: string }> = [];
+  await mountPool(makeController({
+    accounts: [
+      { id: "main", email: "main@example.test", isMain: true, paused: false, priority: 0, hasCredential: true, quota: null },
+      { ...account, alias: "Existing alias" },
+    ],
+    saveAlias: async (id, alias) => {
+      saved.push({ id, alias });
+      return { ok: true };
+    },
+  }));
+
+  const trigger = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    .find(button => button.textContent?.trim() === "Edit alias");
+  expect(trigger).toBeTruthy();
+  expect(trigger?.getAttribute("aria-haspopup")).toBe("dialog");
+  trigger!.focus();
+
+  await act(async () => {
+    trigger!.click();
+    await Promise.resolve();
+  });
+
+  const dialog = win.document.querySelector<HTMLDialogElement>("dialog");
+  expect(dialog?.open).toBe(true);
+  expect(dialog?.querySelector("h3")?.textContent).toBe("Edit alias");
+  const input = dialog?.querySelector<HTMLInputElement>("input");
+  expect(input?.value).toBe("Existing alias");
+  expect(dialog?.querySelector(`label[for="${input?.id}"]`)?.textContent).toBe("Display name (leave empty to clear)");
+
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, "Renamed account");
+    input!.dispatchEvent(new win.Event("input", { bubbles: true }));
+    dialog!.querySelector<HTMLFormElement>("form")!
+      .dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+  });
+
+  expect(saved).toEqual([{ id: "pool-1", alias: "Renamed account" }]);
+  expect(win.document.querySelector("dialog")).toBeNull();
+  expect(win.document.activeElement).toBe(trigger);
+});
+
+test("canceling a pool account alias edit never calls the controller", async () => {
+  let saves = 0;
+  await mountPool(makeController({
+    saveAlias: async () => {
+      saves += 1;
+      return { ok: true };
+    },
+  }));
+
+  const trigger = [...host.querySelectorAll<HTMLButtonElement>("button")]
+    .find(button => button.textContent?.trim() === "Edit alias")!;
+  await act(async () => { trigger.click(); await Promise.resolve(); });
+  const dialog = win.document.querySelector<HTMLDialogElement>("dialog")!;
+  const cancel = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+    .find(button => button.textContent?.trim() === "Cancel")!;
+  await act(async () => { cancel.click(); await Promise.resolve(); });
+
+  expect(saves).toBe(0);
+  expect(win.document.querySelector("dialog")).toBeNull();
+});
+
 test("successful redeem clears a stale error toast tone", async () => {
   await mountPool(makeController());
 

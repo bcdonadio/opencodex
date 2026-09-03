@@ -20,9 +20,11 @@ import { useProvidersFetch } from "./use-providers-fetch";
 import { ProvidersPageModals } from "./providers-page-modals";
 import { buildAccountLoginStatus, buildAddModalAccountRows } from "./providers-page-utils";
 import type { CodexAccountMutationCompletion } from "../codex-account-mutation";
+import { useAliasEditor } from "../hooks/useAliasEditor";
 
 export default function Providers({ apiBase }: { apiBase: string }) {
   const t = useT();
+  const { requestAlias, dialog: aliasDialog } = useAliasEditor();
   const configCacheKey = `ocx.providers.config.v1:${apiBase}`;
   const [config, setConfig] = useState<ProvidersConfig | null>(
     () => readSessionListCache<ProvidersConfig>(configCacheKey),
@@ -179,6 +181,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
 
   const pools = useProviderAccountPools({
     apiBase, t: t as unknown as Parameters<typeof useProviderAccountPools>[0]["t"],
+    requestAlias,
     config, oauthStatus: oauthStatusWithCodex, aliveRef,
     notify,
     fetchConfig, fetchOauth, fetchProviderQuotas, codexActiveNeedsReauth,
@@ -456,6 +459,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
           void loginOAuth(pending.provider, pending.addAccount, pending.accountId);
         }}
       />
+      {aliasDialog}
     </>
   );
 }

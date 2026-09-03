@@ -68,6 +68,7 @@ import {
 import { EmptyProviderHint } from "./models-provider-hints";
 import { shadowCallModelOptions } from "./dashboard-shared";
 import { shadowSourceModelBadge, shadowSourceModelLabel } from "./shadow-call-source";
+import { useAliasEditor } from "../hooks/useAliasEditor";
 
 type CachedModelsPage = {
   models: ModelRow[];
@@ -204,6 +205,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [compatibilityCount, setCompatibilityCount] = useState<number | null>(null);
 
   const t: TFn = useT();
+  const { requestAlias, dialog: aliasDialog } = useAliasEditor();
   const cacheKey = `ocx.models.catalog.v1:${apiBase}`;
   const cached = useMemo(() => readSessionListCache<CachedModelsPage>(cacheKey), [cacheKey]);
   const [models, setModels] = useState<ModelRow[]>(() => cached?.models ?? []);
@@ -276,7 +278,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   }, [reloadAliases]);
 
   const saveProviderAlias = async (provider: string) => {
-    const entered = window.prompt(t("models.aliasPrompt"), aliases.providers[provider] ?? "");
+    const entered = await requestAlias({
+      title: t("models.editProviderAlias"),
+      label: t("models.aliasPrompt"),
+      initialValue: aliases.providers[provider] ?? "",
+    });
     if (entered === null) return;
     const response = await fetch(`${apiBase}/api/providers/${encodeURIComponent(provider)}/alias`, {
       method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ alias: entered.trim() || null }),
@@ -288,7 +294,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
 
   const saveModelAlias = async (provider: string, model: string) => {
     const current = aliases.models[provider]?.[model]?.alias ?? "";
-    const entered = window.prompt(t("models.modelAliasPrompt"), current);
+    const entered = await requestAlias({
+      title: t("models.editModelAlias"),
+      label: t("models.modelAliasPrompt"),
+      initialValue: current,
+    });
     if (entered === null) return;
     const body = entered.trim() ? { set: { [model]: entered.trim() } } : { remove: [model] };
     const response = await fetch(`${apiBase}/api/providers/${encodeURIComponent(provider)}/model-aliases`, {
@@ -1245,7 +1255,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
           {recentForProvider.length > 0 && <span className="models-chip mono text-caption">{t("models.newCount", { count: recentForProvider.length })}</span>}
           </button>
            <div className="row models-provider-actions">
-             <button type="button" className="btn btn-ghost btn-sm models-alias-edit" aria-label={t("models.editProviderAlias")} title={t("models.editProviderAlias")} onClick={() => void saveProviderAlias(provider)}><IconPencil style={{ width: 14, height: 14 }} /></button>
+             <button type="button" className="btn btn-ghost btn-sm models-alias-edit" aria-label={t("models.editProviderAlias")} title={t("models.editProviderAlias")} aria-haspopup="dialog" onClick={() => void saveProviderAlias(provider)}><IconPencil style={{ width: 14, height: 14 }} /></button>
             <Switch
               on={aliases.defaults.providers[provider] ?? aliases.defaults.global}
               onClick={() => void setDefaultAliases(!(aliases.defaults.providers[provider] ?? aliases.defaults.global), provider)}
@@ -1463,7 +1473,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                      {aliases.models[provider]?.[m.id] && <strong className="mono text-control">{aliases.models[provider][m.id].alias}</strong>}
                       <code className="mono text-control" style={{ color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{m.native ? modelLabel(m.id) : formatNamespacedModelId(m.namespaced, t)}</code>
                      {aliases.models[provider]?.[m.id]?.source === "builtin" && <span className="models-chip muted text-caption">{t("models.aliasAuto")}</span>}
-                     <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editModelAlias")} title={t("models.editModelAlias")} onClick={() => void saveModelAlias(provider, m.id)}><IconPencil style={{ width: 13, height: 13 }} /></button>
+                     <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editModelAlias")} title={t("models.editModelAlias")} aria-haspopup="dialog" onClick={() => void saveModelAlias(provider, m.id)}><IconPencil style={{ width: 13, height: 13 }} /></button>
                      {m.custom && (
                        <span className="models-chip muted mono text-caption">
                          {t("models.customBadge")}
@@ -1779,6 +1789,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
 
   const modalsBlock = (
     <>
+      {aliasDialog}
       {v2HelpOpen && (
         <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={t("models.v2Label")} onClick={() => setV2HelpOpen(false)} onKeyDown={e => { if (e.key === "Escape") setV2HelpOpen(false); }}>
           <div className="modal-card" onClick={e => e.stopPropagation()}>
@@ -2181,7 +2192,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                   <strong className="mono text-control">{value.alias}</strong>
                   <span className="models-chip muted text-caption">{value.source === "builtin" ? t("models.aliasAuto") : t("models.aliasUser")}</span>
                   {value.stale && <span className="badge badge-amber">{t("models.aliasStale")}</span>}
-                  <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editModelAlias")} onClick={() => void saveModelAlias(provider, model)}><IconPencil style={{ width: 13, height: 13 }} /></button>
+                  <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editModelAlias")} aria-haspopup="dialog" onClick={() => void saveModelAlias(provider, model)}><IconPencil style={{ width: 13, height: 13 }} /></button>
                 </div>
               )))}
             </div>
