@@ -1,4 +1,4 @@
-import { resolveEnvValue } from "../config";
+import { resolveProviderApiKey } from "./key-store";
 import {
   CodexPoolAuthenticationError,
   headersForCodexAuthContext,
@@ -211,7 +211,7 @@ export function selectOpenAiImagesProvider(config: OcxConfig): OpenAiImagesProvi
     && provider.authMode !== "forward"
     && provider.baseUrl.replace(/\/+$/, "") === "https://api.openai.com/v1"
   ) {
-    const apiKey = resolveEnvValue(provider.apiKey)?.trim();
+    const apiKey = resolveProviderApiKey(provider.apiKey)?.trim();
     if (apiKey) selection.keyed = { providerName: OPENAI_API_PROVIDER_ID, provider, apiKey };
   }
   return selection;
@@ -249,7 +249,7 @@ export function selectImagesProvider(config: OcxConfig): OpenAiImagesProviderSel
     };
   }
 
-  const apiKey = resolveEnvValue(provider.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(provider.apiKey)?.trim();
   if (!apiKey) {
     return { forwardCandidates: [], error: `images.provider "${providerName}" has no usable API key` };
   }

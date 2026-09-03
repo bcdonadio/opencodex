@@ -10,6 +10,7 @@ import {
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-state";
 import { isCodexAccountPaused } from "./account-pause";
 import { ConfigMutationLockError } from "../config";
+import { NativeProfileError } from "./native-profile-types";
 import { isCodexAccountUsable } from "./account-usability";
 import { reconcileMainCodexAccountRuntimeState } from "./account-lifecycle";
 import {
@@ -25,7 +26,9 @@ import { isNativeMainTrafficBlocked, nativeMainStartupGateSnapshot } from "./nat
 import type { NativeMainStartupBlockReason } from "./native-profile-startup";
 import {
   codexQuotaScopeForModel,
+  computeCodexUsageScore,
   getCodexQuotaHealthSnapshot,
+  isEffectiveCodexAccountPinned,
   releaseCodexQuotaProbeLease,
   releaseCodexQuotaScopeProbeLease,
   tryAcquireCodexQuotaProbeLease,
@@ -45,7 +48,7 @@ import { hasLegacyMainCodexPoolAccount, isSelectableCodexPoolAccount } from "./a
 import type { CodexCooldownSource, CodexQuotaScope } from "./routing";
 import { maskAccountId } from "../lib/privacy";
 import { formatErrorResponse } from "../bridge";
-import { getAccountQuota } from "./quota";
+import { CODEX_UNKNOWN_USAGE_SCORE, getAccountQuota } from "./quota";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
 import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
@@ -54,6 +57,21 @@ import { extractAccountId } from "../oauth/chatgpt";
 
 const CODEX_AFFINITY_COMPONENT_MAX_BYTES = 512;
 const CODEX_APP_AFFINITY_KEY = randomBytes(32);
+
+/**
+ * A request-owned bearer cannot inspect the physical main credential for its plan, but cached
+ * WHAM usage is still valid routing evidence for the same logical main account. Score it with
+ * the conservative unknown-plan rule: an unobserved governing window preserves the pin, while
+ * any known weekly/monthly/short value at the threshold releases it through the ordinary Pool
+ * path. This keeps the keyring boundary intact instead of reading auth.json just to classify a
+ * request that already brought its own credential (#3157).
+ */
+function requestOwnedMainPinHasQuotaHeadroom(config: OcxConfig): boolean {
+  const threshold = config.autoSwitchThreshold ?? 80;
+  if (threshold <= 0) return true;
+  const usage = computeCodexUsageScore(getAccountQuota(MAIN_CODEX_ACCOUNT_ID));
+  return usage >= CODEX_UNKNOWN_USAGE_SCORE || usage < threshold;
+}
 
 function boundedCodexAffinityComponent(value: string | null): string | undefined {
   const normalized = value?.trim();
@@ -351,6 +369,8 @@ export function shouldMarkAccountNeedsReauthForCodexAuthFailure(cause: unknown):
     && !(cause instanceof CodexCredentialRefreshStaleError)
     && !(cause instanceof MainAuthJsonChangedDuringRefreshError)
     && !(cause instanceof MainAccountTokenRefreshError && cause.reason === "transient")
+    && !(cause instanceof NativeProfileError && cause.retryable)
+    && !(cause instanceof DOMException && cause.name === "AbortError")
     && !(cause instanceof ConfigMutationLockError);
 }
 
@@ -399,6 +419,12 @@ export async function resolveCodexAuthContext(
   const requestScopedMainCredential = options.requestScopedMainCredential === true
     && hasCallerCodexBearer(headers);
   const fixedAccountId = options.accountId;
+  const preserveRequestOwnedMainPin = requestScopedMainCredential
+    && fixedAccountId === undefined
+    && config.activeCodexAccountPinned === MAIN_CODEX_ACCOUNT_ID
+    && isEffectiveCodexAccountPinned(config)
+    && !isCodexAccountPaused(config, MAIN_CODEX_ACCOUNT_ID)
+    && requestOwnedMainPinHasQuotaHeadroom(config);
   if (fixedAccountId !== undefined && options.excludeAccountId !== undefined) {
     throw new Error("Codex auth context cannot select and exclude an account simultaneously");
   }
@@ -476,6 +502,7 @@ export async function resolveCodexAuthContext(
   };
   const resolveCallerBackedPoolMain = async (): Promise<CodexAuthContext | null> => {
     if (!requestScopedMainCredential || fixedAccountId !== undefined) return null;
+    if (!preserveRequestOwnedMainPin) return null;
     if (!callerBackedMainIsSelected()) return null;
     // The native-profile drain protects auth.json ownership. This context never reads,
     // refreshes, replaces, or materializes that file-backed credential, so fencing it would
@@ -530,6 +557,7 @@ export async function resolveCodexAuthContext(
     const excludeAccountIds = nativeMainReadsForbidden
       ? new Set([MAIN_CODEX_ACCOUNT_ID])
       : undefined;
+    const mainModelGrantUnobserved = excludeAccountIds?.has(MAIN_CODEX_ACCOUNT_ID) === true;
     const entitlementSnapshot = options.modelId && ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)
       ? await (options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements)(config, {
         excludeAccountIds,
@@ -550,6 +578,7 @@ export async function resolveCodexAuthContext(
     if (callerBackedPoolMainAfterEntitlements) return callerBackedPoolMainAfterEntitlements;
     const selectedCallerBackedMain = requestScopedMainCredential
       && fixedAccountId === undefined
+      && preserveRequestOwnedMainPin
       && callerBackedMainIsSelected();
     const selectionChangedWhileAwaiting = admittedSelection.active !== config.activeCodexAccountId
       || admittedSelection.pinned !== config.activeCodexAccountPinned;
@@ -563,10 +592,10 @@ export async function resolveCodexAuthContext(
       isMainAccountTokenLive: selectedCallerBackedMain
         ? () => true
         : requestScopedMainCredential
-          ? () => false
+          ? () => preserveRequestOwnedMainPin
           : options.isMainAccountTokenLive,
       callerBackedMainSelection: selectedCallerBackedMain,
-      preserveCallerMainPin: requestScopedMainCredential,
+      preserveCallerMainPin: preserveRequestOwnedMainPin,
       suppressSharedStateMutations: selectionChangedWhileAwaiting,
       modelEligibleAccountIds,
     };
@@ -600,7 +629,15 @@ export async function resolveCodexAuthContext(
     if (resolution.status === "expired") throw new CodexThreadAffinityExpiredError(resolution.accountId);
     const selected = resolution.status === "selected" ? resolution.accountId : null;
     if (!selected) {
-      if (requestScopedMainCredential && fixedAccountId === undefined && !options.excludeAccountId) {
+      // A retry that excluded a failed Pool account may still use the validated caller-owned
+      // main credential. Treating every exclusion as if main itself had failed strands a healthy
+      // native bearer after the first Pool attempt. Preserve the exactly-once boundary by refusing
+      // this fallback only when the excluded credential is main.
+      if (
+        requestScopedMainCredential
+        && fixedAccountId === undefined
+        && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
+      ) {
         return await resolveCallerOwnedMainContext();
       }
       if (fixedAccountId !== undefined) {
@@ -620,7 +657,11 @@ export async function resolveCodexAuthContext(
         throw new CodexMainProfileDrainingError();
       }
       throw new CodexPoolAuthenticationError(
-        modelEligibleAccountIds ? "No eligible Codex account supports this model" : undefined,
+        modelEligibleAccountIds === undefined
+          ? undefined
+          : entitledAccountIds?.size === 0 && !mainModelGrantUnobserved
+          ? "No eligible Codex account supports this model"
+          : "Codex accounts that support this model are currently unavailable",
       );
     }
     accountId = selected;
@@ -708,7 +749,7 @@ export async function resolveCodexAuthContext(
     } catch (cause) {
       if (probeLeaseId && probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, probeQuotaScope, probeLeaseId);
       else if (probeLeaseId) releaseCodexQuotaProbeLease(accountId, probeLeaseId);
-      if (shouldMarkAccountNeedsReauthForCodexAuthFailure(cause)) {
+      if (!options.signal?.aborted && shouldMarkAccountNeedsReauthForCodexAuthFailure(cause)) {
         markAccountNeedsReauth(accountId, writerGeneration);
       }
       throw new CodexAuthContextError(accountId, cause);
@@ -753,7 +794,7 @@ export async function resolveCodexAuthContext(
   } catch (cause) {
     if (probeLeaseId && probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, probeQuotaScope, probeLeaseId);
     else if (probeLeaseId) releaseCodexQuotaProbeLease(accountId, probeLeaseId);
-    if (shouldMarkAccountNeedsReauthForCodexAuthFailure(cause)) {
+    if (!options.signal?.aborted && shouldMarkAccountNeedsReauthForCodexAuthFailure(cause)) {
       markAccountNeedsReauth(accountId, writerGeneration);
     }
     throw new CodexAuthContextError(accountId, cause);
