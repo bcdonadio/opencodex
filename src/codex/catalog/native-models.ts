@@ -1,12 +1,23 @@
 /** ChatGPT/Codex wire id observed for the account-native Daybreak Blue surface. */
 export const NATIVE_DAYBREAK_BLUE_MODEL = "gpt-daybreak-blue-latest";
 
+/**
+ * Leaked Responses API identifier for the announced next-generation OpenAI model
+ * (2026-09-03: OpenAI teased the launch on X; community probes report `gpt-6-astra` returning
+ * the same 404 as other internal staging slugs where an arbitrary slug returns 400).
+ * Registered preemptively so an entitled account can route it the moment it ships, before any
+ * codex-rs catalog carries it. Unlike Daybreak it is NOT wire-normalized to a serving id —
+ * the leaked slug IS the wire id.
+ */
+export const NATIVE_GPT6_ASTRA_MODEL = "gpt-6-astra";
+
 /** Native ChatGPT/Codex ids whose availability is proven per authenticated account. */
 export const ACCOUNT_GATED_NATIVE_OPENAI_MODELS: ReadonlySet<string> = new Set([
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
   NATIVE_DAYBREAK_BLUE_MODEL,
+  NATIVE_GPT6_ASTRA_MODEL,
 ]);
 
 /**
@@ -23,6 +34,7 @@ export const ACCOUNT_GATED_NATIVE_OPENAI_MODELS: ReadonlySet<string> = new Set([
  */
 const NATIVE_OPENAI_CAPABILITY_SOURCES: Readonly<Record<string, string>> = Object.freeze({
   [NATIVE_DAYBREAK_BLUE_MODEL]: "gpt-5.6-sol",
+  [NATIVE_GPT6_ASTRA_MODEL]: "gpt-5.6-sol",
 });
 
 /**
@@ -70,6 +82,7 @@ export const NATIVE_OPENAI_MODELS = [
   "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark",
   "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
   NATIVE_DAYBREAK_BLUE_MODEL,
+  NATIVE_GPT6_ASTRA_MODEL,
 ];
 
 export const SUPPORTED_NATIVE_OPENAI_SLUGS = new Set(NATIVE_OPENAI_MODELS);
