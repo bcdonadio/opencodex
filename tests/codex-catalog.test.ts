@@ -3460,6 +3460,43 @@ describe("Codex catalog routed normalization", () => {
       .toMatchObject({ contextWindow: 1_050_000, maxInputTokens: 922_000 });
   });
 
+  test("a ChatGPT-forward custom Astra row projects the Astra product identity", async () => {
+    globalThis.fetch = (() => { throw new Error("forward providers must not fetch /models"); }) as typeof fetch;
+    const forwardConfig: OcxConfig = {
+      port: 10100,
+      defaultProvider: "openai",
+      providers: {
+        openai: {
+          adapter: "openai-responses",
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          codexAccountMode: "pool",
+        },
+      },
+      codexAccountPickerEnabled: false,
+      codexAccountNamespaces: { main: "@main" },
+      customModels: [{
+        id: "astra-codex-forward",
+        provider: "openai",
+        modelId: NATIVE_GPT6_ASTRA_MODEL,
+      }],
+    };
+
+    const models = await gatherRoutedModels(forwardConfig);
+    const model = models.find(row => row.provider === "openai" && row.id === NATIVE_GPT6_ASTRA_MODEL);
+    // Per-alias presentation (review follow-up): the custom row must not borrow Daybreak's label.
+    expect(model).toMatchObject({
+      displayName: "GPT-6 Astra",
+      codexForwardNativeCapabilityAlias: true,
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    });
+
+    const entries = buildCatalogEntries(nativeTemplate(), [], models);
+    const astra = entries.find(entry => entry.slug === `openai/${NATIVE_GPT6_ASTRA_MODEL}`);
+    expect(astra).toMatchObject({ display_name: "GPT-6 Astra" });
+    expect(astra?.base_instructions).toContain("powered by the gpt-6-astra");
+    expect(astra?.base_instructions).not.toContain("daybreak");
+  });
+
   test("Daybreak metadata inheritance rejects noncanonical providers", async () => {
     const models = await gatherRoutedModels({
       port: 10100,
