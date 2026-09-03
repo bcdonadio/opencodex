@@ -46,6 +46,7 @@ import {
   NATIVE_OPENAI_MODELS,
   SUPPORTED_NATIVE_OPENAI_SLUGS,
   isNativeOpenAiCapabilityAliasModel,
+  nativeOpenAiAliasPresentation,
   nativeOpenAiCapabilitySourceSlug,
 } from "./native-models";
 import { cachedAvailableAccountGatedNativeModels } from "../model-entitlements";
@@ -58,6 +59,7 @@ export {
   NATIVE_OPENAI_MODELS,
   SUPPORTED_NATIVE_OPENAI_SLUGS,
   isNativeOpenAiCapabilityAliasModel,
+  nativeOpenAiAliasPresentation,
   nativeOpenAiCapabilitySourceSlug,
 } from "./native-models";
 
@@ -512,8 +514,10 @@ function upstreamNativeEntryForSlug(slug: string): RawEntry | undefined {
 
   const alias = structuredClone(source) as RawEntry;
   alias.slug = slug;
-  alias.display_name = "Daybreak Blue";
-  alias.description = "Frontier general-purpose model with safeguards for defensive cybersecurity work.";
+  const presentation = nativeOpenAiAliasPresentation(slug);
+  if (!presentation) return undefined; // an alias with no product identity must not ship a wrong one
+  alias.display_name = presentation.displayName;
+  alias.description = presentation.description;
   if (typeof alias.base_instructions === "string") {
     alias.base_instructions = identifyRoutedModel(alias.base_instructions, slug);
   }

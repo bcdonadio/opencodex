@@ -63,6 +63,27 @@ export function nativeOpenAiCapabilitySourceSlug(slug: string): string {
 }
 
 /**
+ * Presentation identity per capability alias. Capability metadata (context, ladder, modalities)
+ * is inherited from the source model; the NAME and description are the alias's own product
+ * identity — hardcoding one alias's label would present every other alias as the wrong product.
+ */
+export const NATIVE_OPENAI_ALIAS_PRESENTATION: Readonly<Record<string, { displayName: string; description: string }>> = Object.freeze({
+  [NATIVE_DAYBREAK_BLUE_MODEL]: {
+    displayName: "Daybreak Blue",
+    description: "Frontier general-purpose model with safeguards for defensive cybersecurity work.",
+  },
+  [NATIVE_GPT6_ASTRA_MODEL]: {
+    displayName: "GPT-6 Astra",
+    // Provisional until the official announcement names the product.
+    description: "Next-generation OpenAI model (preemptively registered from the leaked API identifier; presentation provisional).",
+  },
+});
+
+export function nativeOpenAiAliasPresentation(slug: string): { displayName: string; description: string } | undefined {
+  return NATIVE_OPENAI_ALIAS_PRESENTATION[slug];
+}
+
+/**
  * Native OpenAI model ids that this release can route and restore with authoritative metadata.
  *
  * `gpt-daybreak-blue-latest` is entitlement-gated upstream: it is absent from codex-rs's

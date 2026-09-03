@@ -3384,6 +3384,12 @@ describe("Codex catalog routed normalization", () => {
     expect(projected.filter(entry => entry.slug === NATIVE_GPT6_ASTRA_MODEL)).toHaveLength(1);
     expect(projected.filter(entry => entry.slug === `main/${NATIVE_GPT6_ASTRA_MODEL}`)).toHaveLength(1);
 
+    // Its own product identity, not the Daybreak label (review: alias presentation is per-alias).
+    expect(upstreamNativeEntry(NATIVE_GPT6_ASTRA_MODEL)).toMatchObject({
+      display_name: "GPT-6 Astra",
+    });
+    expect(upstreamNativeEntry(NATIVE_GPT6_ASTRA_MODEL)?.description).toContain("leaked API identifier");
+
     // Never rewritten to another model on the wire: the leaked slug IS the API id.
     expect(codexAccountGatedCanonicalWireModel(NATIVE_GPT6_ASTRA_MODEL)).toBeUndefined();
   });
