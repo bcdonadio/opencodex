@@ -41,10 +41,12 @@ import { CODEX_NATIVE_ALIAS_CATALOG_KIND } from "./kinds";
 import {
   ACCOUNT_GATED_NATIVE_OPENAI_MODELS,
   NATIVE_DAYBREAK_BLUE_MODEL,
+  NATIVE_GPT6_ASTRA_MODEL,
   NATIVE_OPENAI_CAPABILITY_ALIAS_MODELS,
   NATIVE_OPENAI_MODELS,
   SUPPORTED_NATIVE_OPENAI_SLUGS,
   isNativeOpenAiCapabilityAliasModel,
+  nativeOpenAiAliasPresentation,
   nativeOpenAiCapabilitySourceSlug,
 } from "./native-models";
 import { cachedAvailableAccountGatedNativeModels } from "../model-entitlements";
@@ -52,10 +54,12 @@ import { MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 export { CODEX_NATIVE_ALIAS_CATALOG_KIND } from "./kinds";
 export {
   NATIVE_DAYBREAK_BLUE_MODEL,
+  NATIVE_GPT6_ASTRA_MODEL,
   NATIVE_OPENAI_CAPABILITY_ALIAS_MODELS,
   NATIVE_OPENAI_MODELS,
   SUPPORTED_NATIVE_OPENAI_SLUGS,
   isNativeOpenAiCapabilityAliasModel,
+  nativeOpenAiAliasPresentation,
   nativeOpenAiCapabilitySourceSlug,
 } from "./native-models";
 
@@ -146,6 +150,8 @@ const NATIVE_GPT56_FAMILY = new Set<string>([
   "gpt-5.6-terra",
   "gpt-5.6-luna",
   NATIVE_DAYBREAK_BLUE_MODEL,
+  // Unmeasured; rides the measured GPT-5.6-era clamp until the real ceiling is observed.
+  NATIVE_GPT6_ASTRA_MODEL,
 ]);
 
 export const NATIVE_OPENAI_CONTEXT_OVERRIDES: Record<string, { contextWindow?: number; maxContextWindow?: number; maxInputTokens?: number }> = {
@@ -161,6 +167,11 @@ export const NATIVE_OPENAI_CONTEXT_OVERRIDES: Record<string, { contextWindow?: n
   // ChatGPT account."`), so the promotion rests on a report from an account that has
   // access rather than on a probe. Treat it as the weaker evidence of the four.
   [NATIVE_DAYBREAK_BLUE_MODEL]: { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_MAX_INPUT_TOKENS, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
+  // gpt-6-astra: leak-based preemptive registration (2026-09-03 X/community: the slug 404s like
+  // internal staging ids instead of 400ing like arbitrary slugs; OpenAI teased the launch the same
+  // day). No probe, no observed roster entry, no measured window — inherits the GPT-5.6-era native
+  // contract until the first entitled account proves otherwise. Weakest evidence tier of the set.
+  [NATIVE_GPT6_ASTRA_MODEL]: { contextWindow: NATIVE_GPT56_CONTEXT_WINDOW, maxContextWindow: NATIVE_GPT56_MAX_INPUT_TOKENS, maxInputTokens: NATIVE_GPT56_MAX_INPUT_TOKENS },
 };
 
 const PINNED_UPSTREAM_MODELS: Map<string, RawEntry> = new Map(
@@ -503,8 +514,10 @@ function upstreamNativeEntryForSlug(slug: string): RawEntry | undefined {
 
   const alias = structuredClone(source) as RawEntry;
   alias.slug = slug;
-  alias.display_name = "Daybreak Blue";
-  alias.description = "Frontier general-purpose model with safeguards for defensive cybersecurity work.";
+  const presentation = nativeOpenAiAliasPresentation(slug);
+  if (!presentation) return undefined; // an alias with no product identity must not ship a wrong one
+  alias.display_name = presentation.displayName;
+  alias.description = presentation.description;
   if (typeof alias.base_instructions === "string") {
     alias.base_instructions = identifyRoutedModel(alias.base_instructions, slug);
   }
