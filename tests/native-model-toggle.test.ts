@@ -92,7 +92,7 @@ describe("native GPT model toggles (bare slugs in disabledModels)", () => {
 
     seedCodexModelEntitlementsForTests(
       "main",
-      ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-daybreak-blue-latest"],
+      ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-daybreak-blue-latest", "gpt-6-astra"],
     );
     const confirmed = nativeModelRows({ disabledModels: ["gpt-5.6-sol"] });
     expect(confirmed.map(r => r.slug)).toEqual(NATIVE_OPENAI_MODELS);
