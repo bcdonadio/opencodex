@@ -137,8 +137,8 @@ Les options de récupération consistent à sélectionner un enfant ChatGPT nati
 v1 pour la délégation de fournisseurs hétérogènes, ou renvoyer la tâche en texte brut v2 `agent_message`
 contenu lorsque vous contrôlez l’appelant.
 
-L’option expérimentale `agentTaskRecovery`, désactivée par défaut, peut récupérer cette forme précise de
-tâche native envoyée vers une route externe. Elle utilise un transfert Responses brut vers le point de
+L’option expérimentale `agentTaskRecovery`, désactivée par défaut, peut récupérer les charges
+`NEW_TASK` et `MESSAGE` chiffrées de cette forme native envoyée vers une route externe. Elle utilise un transfert Responses brut vers le point de
 terminaison ChatGPT `/responses` fixe et la forme d’identification entrante du fournisseur canonique
 `openai` configuré avec `authMode: "forward"`.
 

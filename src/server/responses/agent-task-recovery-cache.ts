@@ -60,6 +60,28 @@ function insertRecoveryCacheEntry(key: string, assignment: string, maxEntries: n
   sweepRecoveryCache(insertedAt, maxEntries);
 }
 
+function refreshRecoveryCacheEntry(key: string, entry: RecoveryCacheEntry, now: number): void {
+  if (entry.expiryTimer) clearTimeout(entry.expiryTimer);
+  entry.expiresAt = now + CACHE_TTL_MS;
+  entry.expiryTimer = setTimeout(
+    () => deleteRecoveryCacheEntry(key, entry),
+    CACHE_TTL_MS,
+  );
+  entry.expiryTimer.unref?.();
+  // Reinsert to keep byte/entry eviction ordered by most recent use.
+  RECOVERY_CACHE.delete(key);
+  RECOVERY_CACHE.set(key, entry);
+}
+
+export function readCachedAgentTaskRecovery(key: string, maxEntries: number): string | null {
+  const now = Date.now();
+  sweepRecoveryCache(now, maxEntries);
+  const entry = RECOVERY_CACHE.get(key);
+  if (!entry) return null;
+  refreshRecoveryCacheEntry(key, entry, now);
+  return entry.assignment;
+}
+
 function startRecoveryFlight(
   key: string,
   maxEntries: number,
@@ -122,8 +144,8 @@ export async function resolveCachedAgentTaskRecovery(
 ): Promise<string | null> {
   if (abortSignal?.aborted) return null;
   sweepRecoveryCache(Date.now(), maxEntries);
-  const cached = RECOVERY_CACHE.get(key)?.assignment;
-  if (cached) return cached;
+  const cached = readCachedAgentTaskRecovery(key, maxEntries);
+  if (cached !== null) return cached;
   const flight = startRecoveryFlight(key, maxEntries, request);
   return flight ? waitForRecoveryFlight(flight, abortSignal) : null;
 }

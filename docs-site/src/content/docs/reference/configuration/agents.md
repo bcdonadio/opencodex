@@ -122,17 +122,18 @@ fails instead of routing unreadable ciphertext elsewhere.
 
 ## Encrypted v2 task recovery
 
-`agentTaskRecovery` is an experimental compatibility path for a native ChatGPT parent spawning a
-routed v2 child. It is disabled by default. When explicitly enabled and the final routed child task
-contains an otherwise unreadable Fernet payload, opencodex uses a raw Responses passthrough request
+`agentTaskRecovery` is an experimental compatibility path for encrypted v2 collaboration messages
+from a native ChatGPT parent to a routed child. It is disabled by default. When explicitly enabled
+and the final routed child input contains an otherwise unreadable Fernet `NEW_TASK` or `MESSAGE`
+payload, opencodex uses a raw Responses passthrough request
 to the fixed `https://chatgpt.com/backend-api/codex/responses` endpoint with forward-mode
-authentication. ChatGPT returns the plaintext assignment through a forced function call; opencodex
-then converts only that task item to a standard user message before routed-provider dispatch.
+authentication. ChatGPT returns the plaintext payload through a forced function call; opencodex
+then converts only that collaboration item to a standard user message before routed-provider dispatch.
 The routed recovery message strips transport routing metadata and contains exactly one
 payload-only user text value.
 
 This is not local decryption and does not fix the Codex wire protocol. It depends on undocumented
-ChatGPT backend behavior and may stop working after a backend change. The recovered assignment is
+ChatGPT backend behavior and may stop working after a backend change. The recovered payload is
 model output, not a cryptographically verified plaintext, so byte-for-byte fidelity is not
 guaranteed. A scoped cache miss may add an authenticated ChatGPT request, consume account quota, and
 add latency before the routed request. Concurrent requests for the same scoped task share one
@@ -155,7 +156,7 @@ Admission and retention are deliberately narrow:
   and this recovery-only request generates `originator: codex_cli_rs` locally. opencodex sets
   `content-type` and `accept` itself, and no other caller headers cross this boundary;
 - recovered plaintext is never logged or persisted; the process-local cache is credential-, parent-
-  thread-, and ciphertext-scoped, expires after 15 minutes, and is bounded by both configured entry
+  thread-, and ciphertext-scoped, expires 15 minutes after its last use, and is bounded by both configured entry
   count (200 by default, 512 maximum) and 8 MiB total;
 - any malformed envelope, failed recovery, timeout, or validation failure preserves the existing
   fail-closed error; client cancellation returns 499. Neither path forwards ciphertext to the

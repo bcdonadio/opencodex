@@ -7,6 +7,7 @@ import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
 import { AGENT_MESSAGE_CONTROL_PREAMBLE, structurallyValidFernetTokens } from "./encrypted-payload";
 import {
   discardCachedAgentTaskRecovery,
+  readCachedAgentTaskRecovery,
   resetAgentTaskRecoveryCache,
   resolveCachedAgentTaskRecovery,
 } from "./agent-task-recovery-cache";
@@ -41,6 +42,7 @@ export type AgentTaskRecoveryDiagnosticStage =
   | "response_body"
   | "extraction"
   | "injection"
+  | "history"
   | "delivery"
   | "reparse"
   | "complete";
@@ -56,6 +58,7 @@ export interface AgentTaskRecoveryDiagnostic {
   assignmentBytes?: number;
   assignmentFingerprint?: string;
   recoveryModel?: string;
+  messageCount?: number;
 }
 
 export function createAgentTaskRecoveryTraceId(): string {
@@ -102,7 +105,7 @@ interface AgentEnvelope {
   itemIndex: number;
   encryptedIndex: number;
   headerText: string;
-  messageType: "NEW_TASK";
+  messageType: "NEW_TASK" | "MESSAGE";
   taskName: string;
   sender: string;
   ciphertext: string;
@@ -130,23 +133,17 @@ function isControlPreambleOnly(text: string): boolean {
   return remaining.length === 0;
 }
 
-const ROUTING_HEADER = /(?:^|\n)Message Type\s*:\s*(NEW_TASK)\s*\nTask name\s*:\s*(\S+)\s*\nSender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
+// Both collaboration delivery forms carry the same account-bound Fernet payload and exact
+// sender/recipient envelope. MESSAGE recovery stays behind the same opt-in, loopback-only native
+// OAuth admission and identity checks as NEW_TASK; the fixed ChatGPT endpoint remains the
+// ciphertext authority and refuses payloads outside the authenticated account.
+const ROUTING_HEADER = /(?:^|\n)Message Type\s*:\s*(NEW_TASK|MESSAGE)\s*\nTask name\s*:\s*(\S+)\s*\nSender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
 
-function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
+function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): AgentEnvelope | null {
   const reject = (reason: string): null => {
     diagnose(traceId, { stage: "envelope", outcome: "rejected", reason });
     return null;
   };
-  if (!Array.isArray(input)) return reject("input_not_array");
-  let itemIndex = input.length - 1;
-  while (itemIndex >= 0) {
-    const type = input[itemIndex] && typeof input[itemIndex] === "object"
-      ? (input[itemIndex] as { type?: unknown }).type
-      : undefined;
-    if (type !== "compaction_trigger" && type !== "additional_tools") break;
-    itemIndex -= 1;
-  }
-
   const item = input[itemIndex];
   if (!item || typeof item !== "object" || (item as { type?: unknown }).type !== "agent_message") {
     return reject("tail_not_agent_message");
@@ -155,7 +152,7 @@ function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
   if (!Array.isArray(content)) return reject("content_not_array");
 
   let headerText: string | null = null;
-  let messageType: "NEW_TASK" | null = null;
+  let messageType: "NEW_TASK" | "MESSAGE" | null = null;
   let taskName: string | null = null;
   let sender: string | null = null;
   let encryptedIndex = -1;
@@ -178,7 +175,7 @@ function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
           || part.text.slice(match.index + match[0].length).trim().length > 0
         ) return reject("routing_header_has_extra_text");
         headerText = match[0].startsWith("\n") ? match[0].slice(1) : match[0];
-        messageType = "NEW_TASK";
+        messageType = match[1] as "NEW_TASK" | "MESSAGE";
         taskName = match[2]!;
         sender = match[3]!;
       } else if (!isControlPreambleOnly(part.text)) {
@@ -224,6 +221,24 @@ function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
   };
   diagnose(traceId, { stage: "envelope", outcome: "accepted" });
   return envelope;
+}
+
+function findEnvelope(input: unknown, traceId?: string): AgentEnvelope | null {
+  const reject = (reason: string): null => {
+    diagnose(traceId, { stage: "envelope", outcome: "rejected", reason });
+    return null;
+  };
+  if (!Array.isArray(input)) return reject("input_not_array");
+  let itemIndex = input.length - 1;
+  while (itemIndex >= 0) {
+    const type = input[itemIndex] && typeof input[itemIndex] === "object"
+      ? (input[itemIndex] as { type?: unknown }).type
+      : undefined;
+    if (type !== "compaction_trigger" && type !== "additional_tools") break;
+    itemIndex -= 1;
+  }
+
+  return findEnvelopeAt(input, itemIndex, traceId);
 }
 
 function stripMatchingEnvelope(assignment: string, envelope: AgentEnvelope): string | null {
@@ -381,7 +396,16 @@ function admittedRecovery(
   if (!envelope) return null;
   const admission = recoveryAdmission(req, config, traceId);
   if (!admission) return null;
-  const cacheKey = createHash("sha256")
+  const cacheKey = cacheKeyForEnvelope(admission, parentThreadId, envelope);
+  return { envelope, admission, cacheKey };
+}
+
+function cacheKeyForEnvelope(
+  admission: RecoveryAdmission,
+  parentThreadId: string | null | undefined,
+  envelope: AgentEnvelope,
+): string {
+  return createHash("sha256")
     .update(admission.cacheScope)
     .update("\0")
     .update(parentThreadId ?? "")
@@ -394,7 +418,33 @@ function admittedRecovery(
     .update("\0")
     .update(envelope.ciphertext)
     .digest("hex");
-  return { envelope, admission, cacheKey };
+}
+
+/**
+ * Restore already-recovered collaboration inputs on later tool-result turns. Codex app-server
+ * retains the original ciphertext, so a provider continuation would otherwise see only the
+ * routing header after encrypted-content sanitization. Cache admission is rechecked before reads;
+ * misses stay encrypted and no historical recovery request is started from this path.
+ */
+export function rehydrateCachedAgentTaskHistory(
+  req: Request,
+  input: unknown,
+  options: AgentTaskRecoveryOptions,
+  config: OcxConfig,
+  context: { parentThreadId?: string | null } = {},
+): number {
+  if (!Array.isArray(input)) return 0;
+  const admission = recoveryAdmission(req, config);
+  if (!admission) return 0;
+  let recovered = 0;
+  for (let itemIndex = 0; itemIndex < input.length; itemIndex += 1) {
+    const envelope = findEnvelopeAt(input, itemIndex);
+    if (!envelope) continue;
+    const cacheKey = cacheKeyForEnvelope(admission, context.parentThreadId, envelope);
+    const assignment = readCachedAgentTaskRecovery(cacheKey, options.cacheEntries ?? 200);
+    if (assignment !== null && injectAssignment(input, envelope, assignment)) recovered += 1;
+  }
+  return recovered;
 }
 
 function recoveryPayload(envelope: AgentEnvelope, model: string): string {

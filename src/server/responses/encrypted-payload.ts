@@ -178,19 +178,17 @@ function textWithoutFernetRuns(payload: string, runs: readonly FernetTokenRun[])
 /**
  * The routing header codex-rs writes above a delegated agent payload.
  *
- * `MESSAGE` is matched as well as `NEW_TASK`, and only for the unreadability CHECK --
- * recovery stays NEW_TASK-only. #3021 reported a subagent `MESSAGE` arriving in the
+ * `MESSAGE` is matched as well as `NEW_TASK`. #3021 reported a subagent `MESSAGE` arriving in the
  * parent conversation as raw `gAAAA...` ciphertext after an `adapter_eof`. The detector
  * decides "unreadable" by stripping the envelope and asking whether any plaintext
  * survives, so an envelope shape it does not recognise counts as surviving text: a
  * `MESSAGE` whose entire body is one Fernet token measured as READABLE and was forwarded
  * verbatim.
  *
- * Widening the strip is not the same as widening recovery. Recovery decrypts, and
- * decrypting a `MESSAGE` on the parent's behalf would build a plaintext oracle out of a
- * payload the parent's session may have no right to read. This only lets the proxy
- * NOTICE that what it is about to forward is unreadable ciphertext, which is what the
- * report asks for: fail closed with a structured error rather than paste the token.
+ * Recovery remains a separate opt-in boundary. When enabled, both envelope types use the
+ * same loopback-only native OAuth/account admission and exact agent-identity checks before
+ * the fixed ChatGPT endpoint can return plaintext. With recovery disabled or inadmissible,
+ * this detector still fails closed rather than forwarding the token.
  */
 export const AGENT_MESSAGE_ROUTING_ENVELOPE = /(?:^|\n)Message Type\s*:\s*(?:NEW_TASK|MESSAGE)[^\n]*\nTask name\s*:[^\n]*\nSender\s*:[^\n]*\nPayload\s*:\s*(?:\n|$)/gi;
 

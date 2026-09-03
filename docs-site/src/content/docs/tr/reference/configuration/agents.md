@@ -140,21 +140,22 @@ yönlendirmek yerine başarısız olur.
 
 ## Şifrelenmiş v2 görev kurtarma
 
-`agentTaskRecovery`, yönlendirilen bir v2 çocuğu oluşturan yerel bir ChatGPT
-ebeveyni için deneysel bir uyumluluk yoludur. Varsayılan olarak devre dışıdır.
-Açıkça etkinleştirildiğinde ve nihai yönlendirilen çocuk görevi aksi takdirde
-okunamayan bir Fernet yükü içerdiğinde, opencodex iletme modu kimlik
+`agentTaskRecovery`, yerel bir ChatGPT ebeveyninden yönlendirilen bir çocuğa
+gönderilen şifreli v2 işbirliği iletileri için deneysel bir uyumluluk yoludur.
+Varsayılan olarak devre dışıdır. Açıkça etkinleştirildiğinde ve yönlendirilen
+çocuğun son girdisi aksi takdirde okunamayan bir Fernet `NEW_TASK` veya `MESSAGE`
+yükü içerdiğinde, opencodex iletme modu kimlik
 doğrulamasıyla sabit `https://chatgpt.com/backend-api/codex/responses` uç
 noktasına ham bir Responses doğrudan geçiş isteği kullanır. ChatGPT düz metin
-görevini zorunlu bir fonksiyon çağrısı aracılığıyla döndürür; opencodex daha
-sonra yönlendirilen sağlayıcı dağıtımından önce yalnızca bu görev öğesini
+yükünü zorunlu bir fonksiyon çağrısı aracılığıyla döndürür; opencodex daha
+sonra yönlendirilen sağlayıcı dağıtımından önce yalnızca bu işbirliği öğesini
 standart bir kullanıcı mesajına dönüştürür.
 Yönlendirilen kurtarma mesajı, taşıma yönlendirme meta verilerini kaldırır ve yalnızca yükü içeren tek
 bir kullanıcı metin değeri sunar.
 
 Bu yerel şifre çözme değildir ve Codex hat protokolünü düzeltmez. Belgelenmemiş
 ChatGPT arka uç davranışına bağlıdır ve bir arka uç değişikliğinden sonra
-çalışmayı durdurabilir. Kurtarılan görev model çıktısıdır, kriptografik olarak
+çalışmayı durdurabilir. Kurtarılan yük model çıktısıdır, kriptografik olarak
 doğrulanmış bir düz metin değildir, bu nedenle bayt bayt doğruluk garanti
 edilmez. Kapsamlı bir önbellek ıskalaması kimliği doğrulanmış bir ChatGPT isteği
 ekleyebilir, hesap kotasını tüketebilir ve yönlendirilen istekten önce gecikme
@@ -184,7 +185,7 @@ Kabul ve saklama kasıtlı olarak dardır:
   ayarlar ve başka hiçbir arayan başlığı bu sınırı geçmez;
 - kurtarılan düz metin asla günlüğe kaydedilmez veya kalıcı hale getirilmez;
   süreç içi yerel önbellek kimlik bilgisi, üst iş parçacığı ve şifreli metin
-  kapsamındadır, 15 dakika sonra sona erer ve hem yapılandırılmış girdi sayısı
+  kapsamındadır, son kullanımından 15 dakika sonra sona erer ve hem yapılandırılmış girdi sayısı
   (varsayılan olarak 200, maksimum 512) hem de toplam 8 MiB ile
   sınırlandırılmıştır;
 - hatalı biçimlendirilmiş herhangi bir zarf, başarısız kurtarma, zaman aşımı

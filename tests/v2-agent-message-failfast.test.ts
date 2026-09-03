@@ -148,9 +148,8 @@ describe("V2 routed agent-message ciphertext guard", () => {
    * as surviving text. The envelope pattern matched only NEW_TASK, so a MESSAGE whose
    * entire body was one Fernet token measured as READABLE and was forwarded verbatim.
    *
-   * This is the detection half only. Recovery stays NEW_TASK-only on purpose:
-   * decrypting a MESSAGE on the parent's behalf would build a plaintext oracle out of
-   * a payload the parent's session may not be entitled to read.
+   * Detection is independent of the optional recovery path: disabled or inadmissible
+   * recovery must still fail closed instead of forwarding ciphertext.
    */
   test("blocks a MESSAGE reply envelope followed only by a Fernet payload", () => {
     expect(hasUnreadableEncryptedAgentTask(agentMessage([

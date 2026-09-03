@@ -138,8 +138,8 @@ Recovery options are to select a native ChatGPT child, add a native ChatGPT targ
 v1 for heterogeneous-provider delegation, or resend the task as plaintext v2 `agent_message`
 content when you control the caller.
 
-An experimental, disabled-by-default `agentTaskRecovery` option can recover this specific native-
-to-routed shape through a raw Responses passthrough to the fixed ChatGPT `/responses` endpoint using
+An experimental, disabled-by-default `agentTaskRecovery` option can recover encrypted `NEW_TASK`
+and `MESSAGE` payloads in this native-to-routed shape through a raw Responses passthrough to the fixed ChatGPT `/responses` endpoint using
 the incoming credential shape used by the canonical `openai` provider with `authMode: "forward"`.
 Recovery is available only while the proxy is bound to loopback. It never substitutes API-key
 authentication, another provider credential, or another Codex account. Only `authorization`, matching

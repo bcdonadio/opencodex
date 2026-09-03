@@ -300,6 +300,7 @@ import {
   discardEncryptedAgentTaskRecovery,
   logAgentTaskRecoveryDiagnostic,
   recoverEncryptedAgentTask,
+  rehydrateCachedAgentTaskHistory,
   verifyRecoveredAgentTaskDelivery,
   type AgentTaskRecoveryResult,
 } from "./agent-task-recovery";
@@ -2766,6 +2767,23 @@ async function handleResponsesInner(
   const previousResponseInputExpanded = options.comboReplaySnapshot?.previousResponseInputExpanded
     ?? (body !== originalBody
       && typeof (body as { previous_response_id?: unknown }).previous_response_id === "string");
+  const rehydratedAgentMessages = agentTaskRecovery && isThreadSpawnRequest(req.headers)
+    ? rehydrateCachedAgentTaskHistory(
+      req,
+      (body as { input?: unknown } | undefined)?.input,
+      agentTaskRecovery,
+      config,
+      { parentThreadId: inboundClientThreadId },
+    )
+    : 0;
+  if (rehydratedAgentMessages > 0) {
+    logAgentTaskRecoveryDiagnostic({
+      traceId: createAgentTaskRecoveryTraceId(),
+      stage: "history",
+      outcome: "recovered",
+      messageCount: rehydratedAgentMessages,
+    });
+  }
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
     { strictEnvelope: !!agentTaskRecovery && isThreadSpawnRequest(req.headers) },
@@ -2790,7 +2808,7 @@ async function handleResponsesInner(
   let toolBridgeMaps: ReturnType<typeof buildToolBridgeMaps>;
   try {
     parsed = parseRequest(body);
-    if (options.comboReplaySnapshot?.recoveredPlaintext) {
+    if (options.comboReplaySnapshot?.recoveredPlaintext || rehydratedAgentMessages > 0) {
       markBodyNonPersistable(parsed._rawBody);
     }
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);

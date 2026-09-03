@@ -160,7 +160,8 @@ arayanı denetlediğinizde görevi düz metin v2 `agent_message` içeriği olara
 yeniden göndermektir.
 
 Deneysel, varsayılan olarak devre dışı bırakılmış bir `agentTaskRecovery`
-seçeneği, `authMode: "forward"` ile kurallı `openai` sağlayıcısı tarafından
+seçeneği, bu yerelden yönlendirilmiş biçimdeki şifreli `NEW_TASK` ve `MESSAGE`
+yüklerini, `authMode: "forward"` ile kurallı `openai` sağlayıcısı tarafından
 kullanılan gelen kimlik bilgisi şeklini kullanarak sabit ChatGPT `/responses` uç
 noktasına ham Responses doğrudan geçişi aracılığıyla bu belirli yerelden
 yönlendirilen şekli kurtarabilir. Kurtarma yalnızca proxy geri döngüye bağlıyken

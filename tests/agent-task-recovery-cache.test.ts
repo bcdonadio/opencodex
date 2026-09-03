@@ -27,6 +27,20 @@ describe("agent task recovery cache", () => {
     expect(requests).toBe(2);
   });
 
+  test("active history rehydration extends the fifteen-minute cache lifetime", async () => {
+    let now = 1_800_000_000_000;
+    Date.now = () => now;
+    let requests = 0;
+    const recover = async (): Promise<string> => `assignment-${++requests}`;
+
+    expect(await resolveCachedAgentTaskRecovery("active-task", 200, recover)).toBe("assignment-1");
+    now += 14 * 60 * 1000;
+    expect(await resolveCachedAgentTaskRecovery("active-task", 200, recover)).toBe("assignment-1");
+    now += 2 * 60 * 1000;
+    expect(await resolveCachedAgentTaskRecovery("active-task", 200, recover)).toBe("assignment-1");
+    expect(requests).toBe(1);
+  });
+
   test("keeps a shared request alive while one authenticated waiter remains", async () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>(resolve => {

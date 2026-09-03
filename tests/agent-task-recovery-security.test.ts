@@ -163,6 +163,27 @@ describe("agent task recovery security", () => {
     expect(providerFetches).toBe(1);
   });
 
+  test("MESSAGE recovery keeps the native caller authentication boundary", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("an unauthenticated MESSAGE must not reach recovery or provider dispatch");
+    }) as typeof fetch;
+
+    const response = await post(
+      routedConfig(),
+      "xai/grok-4.5",
+      encryptedInput({ messageType: "MESSAGE" }),
+      { originator: "codex_cli_rs", "x-openai-subagent": "collab_spawn" },
+    );
+
+    expect(response.status).toBe(400);
+    expect(fetchCalls).toBe(0);
+    expect(await response.json()).toMatchObject({
+      error: { code: "unreadable_encrypted_agent_task" },
+    });
+  });
+
   test("a proxy admission secret is never forwarded to ChatGPT", async () => {
     let forwardedBody = "";
     globalThis.fetch = (async (input, init) => {

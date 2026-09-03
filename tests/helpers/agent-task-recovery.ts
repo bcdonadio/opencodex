@@ -35,9 +35,10 @@ export const SECOND_FERNET_TASK = fernetFixture(16, 0x80, 0x4b);
 function routingEnvelope(
   taskName = "/root/worker",
   sender = "/root",
+  messageType: "NEW_TASK" | "MESSAGE" = "NEW_TASK",
 ): string {
   return [
-    "Message Type: NEW_TASK",
+    `Message Type: ${messageType}`,
     `Task name: ${taskName}`,
     `Sender: ${sender}`,
     "Payload:",
@@ -161,6 +162,7 @@ export async function post(
 
 export function encryptedInput(options: {
   ciphertext?: string;
+  messageType?: "NEW_TASK" | "MESSAGE";
   taskName?: string;
   sender?: string;
 } = {}): unknown[] {
@@ -171,7 +173,7 @@ export function encryptedInput(options: {
     author: sender,
     recipient: taskName,
     content: [
-      { type: "input_text", text: routingEnvelope(taskName, sender) },
+      { type: "input_text", text: routingEnvelope(taskName, sender, options.messageType) },
       { type: "encrypted_content", encrypted_content: options.ciphertext ?? FERNET_TASK },
     ],
   }];
