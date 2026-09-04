@@ -8,6 +8,14 @@ export const NATIVE_DAYBREAK_BLUE_MODEL = "gpt-daybreak-blue-latest";
  * Registered preemptively so an entitled account can route it the moment it ships, before any
  * codex-rs catalog carries it. Unlike Daybreak it is NOT wire-normalized to a serving id —
  * the leaked slug IS the wire id.
+ *
+ * Deliberately NOT account-gated (owner decision, 2026-09-04). Entitlement gating hides a slug
+ * until an authenticated `/models` roster carries it, and no roster carries this one yet, so
+ * gating made the row invisible on every install — including the accounts meant to try it. The
+ * row is listed unconditionally instead: selecting it dispatches `gpt-6-astra` upstream and
+ * surfaces the real upstream status (404 while the slug is unreleased) rather than silently
+ * omitting the model. Add it back to `ACCOUNT_GATED_NATIVE_OPENAI_MODELS` once an entitled
+ * roster actually reports it and per-account availability becomes the honest answer.
  */
 export const NATIVE_GPT6_ASTRA_MODEL = "gpt-6-astra";
 
@@ -17,7 +25,6 @@ export const ACCOUNT_GATED_NATIVE_OPENAI_MODELS: ReadonlySet<string> = new Set([
   "gpt-5.6-terra",
   "gpt-5.6-luna",
   NATIVE_DAYBREAK_BLUE_MODEL,
-  NATIVE_GPT6_ASTRA_MODEL,
 ]);
 
 /**

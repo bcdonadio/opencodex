@@ -105,6 +105,18 @@ describe("native GPT model toggles (bare slugs in disabledModels)", () => {
       .toContain("gpt-daybreak-blue-latest");
   });
 
+  test("gpt-6-astra lists without any roster so the request reaches upstream", () => {
+    // Owner decision (2026-09-04): the leaked slug appears on every install rather than waiting
+    // for an entitlement roster that does not carry it yet. With the cache reset there is no
+    // confirmed account at all, and the row must still be present and selectable.
+    resetCodexModelEntitlementCacheForTests();
+    expect(ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has("gpt-6-astra")).toBe(false);
+    expect(nativeModelRows({ disabledModels: [] }).map(row => row.slug)).toContain("gpt-6-astra");
+    expect(visibleNativeSlugs({ disabledModels: [] })).toContain("gpt-6-astra");
+    // The user visibility lever still owns hiding it; only entitlement gating was removed.
+    expect(visibleNativeSlugs({ disabledModels: ["gpt-6-astra"] })).not.toContain("gpt-6-astra");
+  });
+
   test("Direct bare rows use only main entitlement while Pool may use any eligible account", () => {
     seedCodexModelEntitlementsForTests("pool-a", ["gpt-daybreak-blue-latest"]);
     const direct = makeConfig({

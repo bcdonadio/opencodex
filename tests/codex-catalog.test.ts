@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexAccountGatedCanonicalWireModel } from "../src/server/responses/core";
+import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../src/codex/catalog/native-models";
 import { applyNativeVisibility, augmentRoutedModelsWithMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, CODEX_ACCOUNT_BOUND_CATALOG_KIND, CODEX_NATIVE_ALIAS_CATALOG_KIND, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_DAYBREAK_BLUE_MODEL, NATIVE_GPT6_ASTRA_MODEL, NATIVE_OPENAI_MODELS, nativeDefaultReasoningEffort, nativeInputModalities, nativeOpenAiCapabilitySourceSlug, nativeOpenAiContextWindow, nativeReasoningEfforts, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, resolveComboCatalogMember, shouldExposeRoutedModel, upstreamNativeEntry } from "../src/codex/catalog";
 import { applyProviderConfigHints, mergeConfiguredModelsIntoLiveCatalog } from "../src/codex/catalog/provider-fetch";
 import {
@@ -3354,11 +3355,13 @@ describe("Codex catalog routed normalization", () => {
     expect(projected.some(entry => entry.slug === "daybreak-blue-latest")).toBe(false);
   });
 
-  test("gpt-6-astra is registered gated with Sol capabilities and no wire normalization", () => {
-    // Leak-based preemptive registration (2026-09-03): the slug must be a gated native with
-    // Sol's capability shape so an entitled account routes it the moment it ships, and it must
-    // go to the wire AS gpt-6-astra (it is NOT a Daybreak-style serving alias).
+  test("gpt-6-astra is registered ungated with Sol capabilities and no wire normalization", () => {
+    // Leak-based preemptive registration (2026-09-03), ungated 2026-09-04: the slug carries
+    // Sol's capability shape, is NOT entitlement-gated (no roster reports it yet, and gating
+    // therefore hid it everywhere), and goes to the wire AS gpt-6-astra (it is NOT a
+    // Daybreak-style serving alias), so a selection surfaces the real upstream status.
     expect(NATIVE_GPT6_ASTRA_MODEL).toBe("gpt-6-astra");
+    expect(ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(NATIVE_GPT6_ASTRA_MODEL)).toBe(false);
     expect(nativeOpenAiCapabilitySourceSlug(NATIVE_GPT6_ASTRA_MODEL)).toBe("gpt-5.6-sol");
     expect(nativeOpenAiContextWindow(NATIVE_GPT6_ASTRA_MODEL)).toBe(272_000);
     expect(nativeReasoningEfforts(NATIVE_GPT6_ASTRA_MODEL))
