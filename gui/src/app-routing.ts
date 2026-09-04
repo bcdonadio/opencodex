@@ -55,11 +55,13 @@ export function readPageFromHash(hash?: string): Page {
 }
 
 /**
- * Dashboard section tabs live in the hash so refresh/bookmark/back-forward keep the
- * choice, mirroring Logs (`#logs` / `#logs/debug`). Overview is the bare `#dashboard`,
- * so it has no suffix entry here.
+ * The dashboard used to have Providers and Models tabs at these hashes. They were read-only
+ * copies of the real pages, so the bookmarks now redirect there (see resolveAppHashChange).
  */
-export const DASHBOARD_TAB_HASHES = ["dashboard/providers", "dashboard/models"] as const;
+export const LEGACY_DASHBOARD_TAB_REDIRECTS: Readonly<Record<string, Page>> = {
+  "dashboard/providers": "providers",
+  "dashboard/models": "models",
+};
 
 /**
  * Models owns four tabs: the catalog, Combos, Routing, and Compatibility. The catalog
@@ -107,8 +109,7 @@ export function hashBelongsToPage(rawHash: string, page: Page): boolean {
     || (page === "logs" && rawHash === "logs/debug")
     || (page === "codex-set" && rawHash === "codex-set/prompt")
     || (page === "models" && (MODELS_TAB_HASHES as readonly string[]).includes(rawHash))
-    || (page === "dashboard"
-      && (rawHash === DASHBOARD_UPDATE_HASH || (DASHBOARD_TAB_HASHES as readonly string[]).includes(rawHash)))
+    || (page === "dashboard" && rawHash === DASHBOARD_UPDATE_HASH)
     || (page === "integrations"
       && (INTEGRATION_TAB_HASHES as readonly string[]).includes(rawHash));
 }
@@ -132,6 +133,9 @@ export function resolveAppHashChange(rawHash: string): AppHashChangeAction {
   if (rawHash === "debug" || rawHash.startsWith("debug/")) {
     return { page: "logs", replaceTo: "logs/debug" };
   }
+  // Legacy: the dashboard's Providers / Models tabs. Passive replace, like the others.
+  const legacyDashboardTarget = LEGACY_DASHBOARD_TAB_REDIRECTS[rawHash];
+  if (legacyDashboardTarget) return { page: legacyDashboardTarget, replaceTo: legacyDashboardTarget };
 
   /* Legacy: Codex Auth is now the Multi-auth tab of Codex Set. */
   if (rawHash === "codex-auth" || rawHash.startsWith("codex-auth/")) {

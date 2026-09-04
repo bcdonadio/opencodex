@@ -327,15 +327,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .sidebar-link:hover { background: var(--accent-soft); color: var(--text); text-decoration: none; }
 .sidebar-link svg { width: 16px; height: 16px; }
 
-/* GitHub row: the label keeps the full-width link affordance, the two circular
-   satellites (star, update) sit at the trailing edge without shrinking the label's
-   hover target. That edge is the sidebar's 10px content inset, not the rail wall, so
-   the orbs stack under the lang chevron and the proxy orbs instead of hanging 10px
-   further out than both. The update orb only exists when an update is available, so the row
-   is one or two circles wide — never a placeholder. */
-.sidebar-github-row { display: flex; align-items: center; gap: 4px; min-width: 0; padding-right: 10px; }
-.sidebar-github-link { flex: 1 1 auto; min-width: 0; }
-.sidebar-github-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
 .sidebar-orb {
   position: relative;
   display: inline-flex; align-items: center; justify-content: center;
@@ -347,8 +338,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .sidebar-orb svg { width: 14px; height: 14px; }
 .sidebar-orb:hover:not(:disabled) { background: var(--accent-soft); color: var(--text); border-color: var(--accent-ring); }
 .sidebar-orb:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; }
-/* Already starred: a settled state, not a disabled control that looks broken. */
-.sidebar-orb--starred { color: var(--amber); cursor: default; opacity: 1; }
 /* Update pending: the one blue accent in the sidebar, so a waiting release is visible
    at a glance without shouting like an error state. */
 .sidebar-orb--update {
@@ -370,37 +359,34 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   background: var(--blue); border: 1.5px solid var(--rail);
 }
 
-.lang-toggle { display: flex; align-items: center; gap: 9px; padding: 8px 10px; width: 100%; color: var(--muted); font-size: var(--text-control); border-radius: var(--radius-sm); transition: background var(--motion-fast), color var(--motion-fast); position: relative; }
-.lang-toggle:hover { background: var(--accent-soft); color: var(--text); }
-.lang-toggle svg { width: 16px; height: 16px; flex-shrink: 0; }
+/* Language: the existing Select, sized to an orb. The trigger's own children (value text and
+   chevron) are hidden and the globe icon sits over the empty trigger; the dropdown still
+   opens beside the rail. Keeps Select's keyboard model without adding a trigger prop. */
+.lang-toggle { position: relative; display: inline-flex; align-items: center; width: 28px; height: 28px; flex: 0 0 28px; }
+.lang-toggle > svg { position: absolute; left: 6px; top: 6px; width: 14px; height: 14px; pointer-events: none; color: var(--muted); }
+.lang-toggle:hover > svg { color: var(--text); }
 .lang-toggle .custom-select { width: 100%; position: static !important; }
-.lang-toggle .select-trigger { width: 100%; justify-content: space-between; border: none; background: none; color: inherit; font-size: var(--text-control); padding: 0; min-height: auto; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
-.lang-toggle .select-trigger:hover:not(:disabled) { border: none; background: none; color: inherit; box-shadow: none; }
+.lang-toggle .select-trigger { width: 28px; height: 28px; min-height: 28px; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--raised); color: var(--muted); box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.lang-toggle .select-trigger > span, .lang-toggle .select-trigger > svg { display: none; }
+.lang-toggle .select-trigger:hover:not(:disabled) { background: var(--accent-soft); color: var(--text); border-color: var(--accent-ring); box-shadow: none; }
 .lang-toggle .select-dropdown { background: var(--glass-rail); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); border: 1px solid var(--border); box-shadow: var(--shadow-sm); }
 /* Clear the sidebar's 14px padding + 1px border so the menu's left edge sits in the
    main pane instead of straddling the divider (trigger ends at the content edge). */
-.lang-toggle .select-dropdown-beside { top: auto; bottom: 0; left: calc(100% + 20px); right: auto; min-width: 10rem; max-height: min(60vh, 20rem); overflow-y: auto; }
-.theme-toggle { display: flex; align-items: center; gap: 9px; padding: 8px 10px; width: 100%; text-align: left; background: none; border: none; cursor: pointer; color: var(--muted); font: inherit; font-size: var(--text-control); border-radius: var(--radius-sm); transition: background var(--motion-fast), color var(--motion-fast); }
-.theme-toggle:hover { background: var(--accent-soft); color: var(--text); }
-.theme-toggle svg { width: 16px; height: 16px; flex-shrink: 0; }
-.theme-toggle .mode { text-transform: capitalize; }
+/* The trigger is a 28px orb now, so "beside" would land inside the rail. Open upward from
+   the orb instead (the mobile drawer already does), still bottom-anchored and height-bounded
+   so it never runs past the sidebar regardless of how many locales exist. */
+.lang-toggle .select-dropdown-beside { top: auto; bottom: calc(100% + 6px); left: 0; right: auto; min-width: 10rem; max-height: min(60vh, 20rem); overflow-y: auto; }
 .stop-toggle { color: var(--red); }
 .stop-toggle:hover { background: var(--red-soft); color: var(--red); }
 .stop-toggle:disabled { opacity: 0.5; cursor: default; }
-/* Proxy lifecycle actions: two circular satellites (stop, restart Codex) sharing the
-   row with a quiet label. The stop control used to be a full-width button; pairing it
-   with restart as icons keeps the foot from growing a fifth stacked row and puts the
-   destructive action next to the recovery action it is most often confused with. */
-.sidebar-action-row { display: flex; align-items: center; gap: 4px; min-width: 0; padding-right: 10px; }
-/* Left padding matches .sidebar-link, plus the 16px icon + 9px gap gutter the
-   iconless label has to clear to sit in the same text column as its neighbours.
-   Owning the block padding here (rather than on the row) keeps the row the same
-   height as the other three, which the 28px orbs would otherwise inflate. */
-.sidebar-action-label { flex: 1 1 auto; min-width: 0; padding: 8px 10px 8px calc(10px + 16px + 9px); color: var(--muted); font-size: var(--text-control); }
-.sidebar-action-orbs { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+/* Footer: two rows of 28px orbs — preferences/links, then runtime actions. The rows share
+   the sidebar's 10px content inset on both sides so the orbs line up under the nav text. */
+.sidebar-foot-row { display: flex; align-items: center; gap: 4px; padding: 4px 10px; min-width: 0; }
 .sidebar-orb--danger { color: var(--red); }
 .sidebar-orb--danger:hover:not(:disabled) { background: var(--red-soft); color: var(--red); border-color: var(--red); }
 .sidebar-orb:disabled { opacity: 0.5; cursor: default; }
+/* Starred: a settled state, not a disabled control that looks broken. */
+.github-star-button--starred { color: var(--amber); opacity: 1; cursor: default; }
 
 .main { min-width: 0; }
 .main-inner { max-width: 980px; margin: 0 auto; padding: 32px 36px 64px; container-type: inline-size; }
@@ -449,6 +435,46 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   padding-inline: 36px;
 }
 .main-inner.main-inner--combos > .page-sub { margin-bottom: 10px; }
+
+/* Keep the Models tab strip border aligned with its tab buttons in the full-bleed layout. */
+.main-inner.main-inner--combos > .page-tabs {
+  margin-inline: 36px;
+  padding-inline: 0;
+}
+
+/*
+  Full-bleed is for the combos WORKSPACE grid only. Its loading and error fallbacks render
+  no `.combos-workspace-shell` (Combos.tsx returns a bare skeleton or an error notice), yet
+  `main-inner--combos` is applied on tab selection alone — so with no workspace to fill, the
+  lone subtitle/notice/retry stretched edge to edge (padding:0, max-width:none, flex column)
+  while every sibling Models tab stayed boxed. That is the "콤보만 영역이 이상해짐" report.
+
+  When no workspace shell is present, drop the full-bleed and box the page like the other
+  tabs: reset the container, its chrome inset, and the fill panel back to normal flow.
+*/
+/*
+  Each rule below is a SINGLE selector on purpose. Vite's Rolldown CSS minifier corrupts a
+  comma-separated selector list whose selectors carry `:not(:has(...))` — it emits a stray
+  `)` before the block and the browser then drops the whole rule. A single `:not(:has())`
+  selector minifies correctly, so the chrome inset is handled without a list: the container
+  drops its own horizontal padding and the page chrome keeps the 36px inline padding it
+  already gets above (`.main-inner--combos > .page-head` etc.), which the panel matches.
+*/
+.main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 32px 0 64px;
+  min-height: 0;
+  height: auto;
+  overflow: visible;
+  display: block;
+}
+.main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .models-tab-panel--fill:not([hidden]) {
+  flex: 0 1 auto;
+  height: auto;
+  display: block;
+  padding-inline: 36px;
+}
 
 /* ---- page header ---- */
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 6px; }
@@ -972,7 +998,19 @@ a.btn, a.btn:hover { text-decoration: none; }
 
 .dash-overview-head .stat-row {
   margin-bottom: 0;
+  /* Three cards (status, providers, tokens) since the version, uptime and subagent-mode
+     cards left; six columns would leave half the row empty. */
+  grid-template-columns: repeat(3, 1fr);
 }
+
+/* Sidecar routing settings: closed by default so the first viewport is proxy state. The
+   summary reads as a card title; the two sidecar cards render inside once opened. */
+.dash-sidecars > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
+.dash-sidecars > summary::-webkit-details-marker { display: none; }
+.dash-sidecars > summary::before { content: ""; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform var(--motion-fast); }
+.dash-sidecars[open] > summary::before { transform: rotate(90deg); }
+.dash-sidecars[open] > summary { margin-bottom: 12px; }
+.dash-sidecars .dash-sidecar-grid .panel { box-shadow: none; }
 
 .dash-overview-head .startup-health-bar,
 .dash-overview-head .startup-health-bar--pending {
@@ -1197,6 +1235,20 @@ select.input { appearance: none; }
   flex: 0 0 auto;
   line-height: normal;
 }
+/* Catalog-wide policy lives behind one disclosure; per-provider rarely-used actions behind a
+   ⋯ disclosure in the header row. Both are native details: keyboard and aria-expanded come
+   free, and the revealed controls stay inline (DOM tab order), so neither claims a menu role. */
+.models-advanced { margin: 0 0 12px; }
+.models-advanced > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 6px; padding: 4px 0; }
+.models-advanced > summary::-webkit-details-marker { display: none; }
+.models-advanced > summary::before { content: ""; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform var(--motion-fast); }
+.models-advanced[open] > summary::before { transform: rotate(90deg); }
+.models-advanced[open] > summary { margin-bottom: 8px; }
+.models-group-more { display: inline-flex; align-items: center; }
+.models-group-more > summary { list-style: none; cursor: pointer; min-width: 28px; justify-content: center; }
+.models-group-more > summary::-webkit-details-marker { display: none; }
+.models-group-more-body { flex-wrap: wrap; gap: 8px; }
+.models-group-more[open] { flex-wrap: wrap; }
 .switch.switch-labeled::before {
   content: "";
   width: 34px;
@@ -1885,13 +1937,18 @@ dialog.modal-overlay::backdrop {
 .codex-pool-strategy-card .card-sub { padding: 0; }
 /* Inline selection-order row on an account card: label and trigger share one line, and the
    trigger is scaled down to the card's hint text so it reads as part of the card, not a form. */
+/* Per-account ⋯: a labelled disclosure in the action row (no menu role). Its body sits on its
+   own line under the actions so the revealed controls keep DOM tab order. */
+.codex-account-more { display: inline-flex; flex-wrap: wrap; align-items: center; }
+.codex-account-more > summary { list-style: none; cursor: pointer; min-width: 28px; justify-content: center; }
+.codex-account-more > summary::-webkit-details-marker { display: none; }
+.codex-account-more-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex-basis: 100%; padding-top: 6px; }
 .codex-account-identity { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 16px 6px; min-width: 0; }
 .codex-account-identity-copy { font-size: var(--text-label); line-height: var(--leading-body); color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .codex-account-priority { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0; min-width: 0; flex: 0 0 auto; }
 .codex-account-priority-label { font-size: var(--text-label); color: var(--muted); font-weight: var(--weight-medium); white-space: nowrap; }
 .codex-account-priority .select-trigger { max-width: 100%; padding: 4px 9px; font-size: var(--text-label); }
 
-.startup-page-sub { margin-bottom: 0; }
 .startup-page-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .startup-runtime-notice-slot {
   margin-bottom: 12px;
@@ -1943,8 +2000,12 @@ dialog.modal-overlay::backdrop {
 .startup-hero-icon svg { width: 21px; height: 21px; }
 .startup-hero-copy h3 { margin: 10px 0 4px; font-size: var(--text-title); }
 .startup-hero-copy p { margin: 0; color: var(--muted); line-height: var(--leading-body); max-width: var(--prose-measure); }
-.startup-state-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
-.startup-state-grid .value { font-size: var(--text-subtitle); }
+.startup-state-line { margin: 8px 0 0; font-size: var(--text-control); }
+.startup-recovery-details > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 6px; }
+.startup-recovery-details > summary::-webkit-details-marker { display: none; }
+.startup-recovery-details > summary::before { content: ""; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform var(--motion-fast); }
+.startup-recovery-details[open] > summary::before { transform: rotate(90deg); }
+.startup-recovery-details[open] > summary { margin-bottom: 8px; }
 .startup-details, .startup-actions { margin-bottom: 16px; }
 .startup-actions .panel-head > svg { width: 18px; height: 18px; flex: 0 0 auto; }
 .startup-detail-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-top: 1px solid var(--border-soft); }
@@ -1962,7 +2023,6 @@ dialog.modal-overlay::backdrop {
 .startup-command-row code { color: var(--muted); font-size: var(--text-label); overflow-wrap: anywhere; }
 .startup-action-notice { margin: 14px 0 0; }
 @media (max-width: 700px) {
-  .startup-state-grid { grid-template-columns: 1fr; }
   .startup-command-row { align-items: flex-start; }
   .startup-detail-row { align-items: flex-start; }
   .startup-detail-row > .startup-detail-actions { flex-direction: column; align-items: flex-end; }
@@ -2335,6 +2395,28 @@ button.prov-account-row.active { cursor: default; }
   .main-inner.main-inner--combos > .page-head,
   .main-inner.main-inner--combos > .page-tabs,
   .main-inner.main-inner--combos > .page-sub { padding-inline: 18px; }
+  .main-inner.main-inner--combos > .page-tabs {
+    margin-inline: 18px;
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .models-tab-panel--fill:not([hidden]) {
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) {
+    padding: 22px 18px 48px;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .page-head {
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .page-tabs {
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .page-sub {
+    padding-inline: 0;
+  }
+  .main-inner.main-inner--combos:not(:has(.combos-workspace-shell)) > .page-tabs {
+    margin-inline: 0;
+  }
   /* settings rows: copy takes the full width, controls drop underneath */
   .setting-row { flex-wrap: wrap; }
   .setting-row .setting-copy { flex: 1 1 100% !important; }
@@ -2360,6 +2442,14 @@ button.prov-account-row.active { cursor: default; }
 }
 
 .usage-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.usage-cards-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+@container (max-width: 1100px) { .usage-cards-5 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+/* Year heatmap behind a disclosure for 30d; the summary reads as the panel title. */
+.usage-heatmap-details > summary { cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 8px; }
+.usage-heatmap-details > summary::-webkit-details-marker { display: none; }
+.usage-heatmap-details > summary::before { content: ""; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform var(--motion-fast); }
+.usage-heatmap-details[open] > summary::before { transform: rotate(90deg); }
+.usage-heatmap-details[open] > summary { margin-bottom: 10px; }
 .usage-cards .stat-value { font-size: var(--text-title); font-weight: var(--weight-semibold); margin-top: 4px; }
 /* Top-align with Storage: centering against the taller filter chips dropped the "Usage" title. */
 .usage-head { flex-wrap: wrap; align-items: flex-start; }

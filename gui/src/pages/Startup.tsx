@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconRefresh } from "../icons";
 import { type TFn, useI18n } from "../i18n/shared";
-import { navigateHash } from "../hash-routing";
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { Notice } from "../ui";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
+import { useCodexAutostart } from "./use-codex-autostart";
 import {
   StartupDetailsSection,
   StartupHeroSection,
@@ -72,6 +72,7 @@ function deriveCodexRuntimeNotice(
 
 export default function Startup({ apiBase, machineApiBase = apiBase, connected = false }: { apiBase: string; machineApiBase?: string; connected?: boolean }) {
   const { t } = useI18n();
+  const autostart = useCodexAutostart(apiBase);
   const cacheKey = `${STARTUP_PAGE_CACHE_PREFIX}${apiBase}`;
   const cached = useMemo(() => readSessionListCache<StartupPageCache>(cacheKey), [cacheKey]);
   const startupResourceKey = `startup-page:${apiBase}`;
@@ -317,14 +318,9 @@ export default function Startup({ apiBase, machineApiBase = apiBase, connected =
   return (
     <>
       <div className="page-head">
-        <div>
-          <h2>{t("startup.title")}</h2>
-          <p className="page-sub startup-page-sub">{t("startup.subtitle")}</p>
-        </div>
+        <h2>{t("startup.title")}</h2>
+        {/* The back button duplicated the sidebar; the explanatory sentence moved into the hero. */}
         <div className="startup-page-head-actions">
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => navigateHash("dashboard")}>
-            {t("startup.backToDashboard")}
-          </button>
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => refresh()} disabled={loading}>
             <IconRefresh /> {t("startup.refresh")}
           </button>
@@ -385,6 +381,7 @@ export default function Startup({ apiBase, machineApiBase = apiBase, connected =
             installBusy={installBusy}
             installResult={installResult}
             onInstall={(action, opts) => { void runInstallAction(action, opts); }}
+            autostart={autostart}
           />
           {data.platform === "win32" && (
             <StartupTraySection
