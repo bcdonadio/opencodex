@@ -363,6 +363,14 @@ async function mockManagementApi(req: Request): Promise<Response> {
     return json(oauthLoginStatus);
   }
 
+  if (req.method === "POST" && url.pathname === "/api/codex-auth/reset-credits/consume") {
+    return json({ code: "reset", remaining: 1 });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/codex-auth/reset-credits") {
+    return json({ credits: [], available_count: 0 });
+  }
+
   return json({ error: `unhandled mock endpoint: ${req.method} ${url.pathname}` }, 404);
 }
 
@@ -2062,5 +2070,61 @@ describe("ocx account CLI (issue #180 matrix)", () => {
     } finally {
       sleepSpy.mockRestore();
     }
+  });
+
+  /**
+   * #3375 axis D. A reset credit is an irreversible spend, so a retried consume
+   * has to carry the same caller-owned identity rather than a fresh random one.
+   * This is the only place the CLI surface itself is observable: `requests`
+   * records the body the command actually sent.
+   */
+  describe("account reset-credits --operation-id", () => {
+    const OP_ID = "11111111-1111-4111-8111-111111111111";
+
+    function consumeRequests(): RecordedRequest[] {
+      return requests.filter(entry => entry.path === "/api/codex-auth/reset-credits/consume");
+    }
+
+    test("R7-a: the id reaches the consume body verbatim", async () => {
+      const result = await run(["reset-credits", "main", "--consume", "--yes", "--operation-id", OP_ID]);
+
+      expect(result.code).toBe(0);
+      const sent = consumeRequests();
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.body).toEqual({ accountId: "__main__", operationId: OP_ID });
+    });
+
+    test("R7-b: omitting the flag omits the key, not sends undefined", async () => {
+      const result = await run(["reset-credits", "main", "--consume", "--yes"]);
+
+      expect(result.code).toBe(0);
+      const sent = consumeRequests();
+      expect(sent).toHaveLength(1);
+      // Absent key, not `operationId: undefined`: the server distinguishes a
+      // caller who wants idempotency from one who did not ask for it.
+      expect(Object.prototype.hasOwnProperty.call(sent[0]!.body as object, "operationId")).toBe(false);
+    });
+
+    test("R7-c: the id without --consume is a usage error, not a silent read", async () => {
+      const result = await run(["reset-credits", "main", "--operation-id", OP_ID]);
+
+      expect(result.code).toBe(2);
+      expect(requests).toHaveLength(0);
+    });
+
+    test("R7-d: a malformed id is refused locally, before any server round trip", async () => {
+      const result = await run(["reset-credits", "main", "--consume", "--yes", "--operation-id", "nope"]);
+
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain("UUIDv4");
+      expect(requests).toHaveLength(0);
+    });
+
+    test("R7-e: a missing value is refused by the option parser", async () => {
+      const result = await run(["reset-credits", "main", "--consume", "--yes", "--operation-id"]);
+
+      expect(result.code).toBe(2);
+      expect(requests).toHaveLength(0);
+    });
   });
 });

@@ -246,6 +246,7 @@ import {
 } from "../../providers/key-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
 import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
+import { resolveOpenCodeGoTransport } from "../../providers/opencode-go-transport";
 import type { WsData } from "../ws-bridge";
 import {
   codexAccountSelectionForTurn,
@@ -292,6 +293,7 @@ import {
   conversationIdFromResponsesRequest,
   normalizeLogConversationId,
   reasoningReplayConversationIdFromResponsesRequest,
+  sessionLaneIdFromRequest,
   sessionIdHeaderFromRequest,
 } from "../request-log-conversation";
 import type { AttemptRecoveryKind } from "../../usage/log";
@@ -343,6 +345,7 @@ import {
 } from "../responses-image-gen-repair";
 import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from "../responses-model-rewrite";
 import { parseRequestEffortRowId } from "../effort-row";
+import { parseSyntheticRowId } from "../fast-row";
 import {
   collectSelfNamedNamespaceScrubAuthorization,
   createSelfNamedToolCallNamespaceScrubRewrite,
@@ -2112,6 +2115,7 @@ async function applyFinalRouteRequestNormalization(args: {
 
   // Settle the wire once so logging, fast-mode, auth, and sidecars read the adapter
   // this request will actually use (#404).
+  route.provider = resolveOpenCodeGoTransport(route.provider, sessionLaneIdFromRequest(req.headers));
   route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
   if (preserveAnthropicResponseModel) parsed._responseModelId = responseModelId;
   logCtx.model = route.modelId;
@@ -2852,10 +2856,22 @@ async function handleResponsesInner(
   }
   // An effort row naming a table-less combo (`combo/x--high`) must reach the combo dispatcher
   // as its base id, so the selector is normalized here, before comboIdFromRawBody reads model.
-  const comboEffortRow = !options.comboAttempt && body && typeof body === "object" && !Array.isArray(body)
+  const comboRows = !options.comboAttempt && body && typeof body === "object" && !Array.isArray(body)
     && typeof (body as { model?: unknown }).model === "string"
-    ? parseRequestEffortRowId((body as { model: string }).model, config)
-    : null;
+    // One parse for both grammars, from the selector as the client sent it. Parsing them
+    // separately made the outcome depend on which ran first.
+    ? parseSyntheticRowId((body as { model: string }).model, config)
+    : { fastRow: null, effortRow: null };
+  const comboEffortRow = comboRows.effortRow;
+  if (comboRows.fastRow) {
+    // Same reason as the effort row above: the combo dispatcher reads `model` next, so the
+    // selector has to be normalized before it, or a combo child is built from a synthetic id.
+    const raw = body as Record<string, unknown>;
+    raw.model = comboRows.fastRow.baseId;
+    // A caller INTENT, not a decision. decideTier still rules on eligibility downstream, so
+    // fastMode:false and an ineligible route both still suppress it.
+    raw.service_tier = "priority";
+  }
   if (comboEffortRow) {
     const raw = body as Record<string, unknown>;
     raw.model = comboEffortRow.baseId;
@@ -2922,7 +2938,15 @@ async function handleResponsesInner(
   let toolBridgeMaps: ReturnType<typeof buildToolBridgeMaps>;
   try {
     parsed = parseRequest(body);
-    const effortRow = parseRequestEffortRowId(parsed.modelId, config);
+    // Captured before any parser mutates it, so both grammars see the client's id.
+    const { fastRow, effortRow } = parseSyntheticRowId(parsed.modelId, config);
+    if (fastRow) {
+      parsed.modelId = fastRow.baseId;
+      parsed.options.serviceTier = "priority";
+      const raw = parsed._rawBody as Record<string, unknown>;
+      raw.model = fastRow.baseId;
+      raw.service_tier = "priority";
+    }
     if (effortRow) {
       parsed.modelId = effortRow.baseId;
       parsed.options.reasoning = effortRow.effort;
@@ -5485,6 +5509,36 @@ async function handleResponsesInner(
         releaseUpstreamHostAdmission(hostAdmissionLease);
         releaseCodexAuthContextProbeLease(authCtx);
       }
+    }
+  }
+
+  // Tool results are PAIRED by call_id. parseRequest writes it into OcxToolResultMessage.toolCallId
+  // (parser.ts:738/752) without validating it, because inputItemSchema's permissive catch-all
+  // (schema.ts:106) accepts a tool item whose strict schema failed only for a missing call_id. A
+  // translating adapter then consumes `toolCallId: string` holding undefined: kiro-wire.ts:32
+  // TypeErrors, ollama-native.ts:334 throws, and anthropic.ts:775 sends
+  // "[tool_result without adjacent tool_use: undefined]" upstream (issue #3259).
+  //
+  // This CANNOT move into the schema. parseRequest (:2812) runs before the passthrough branch
+  // (:3719), so a parse-time rejection would also kill forward/key passthrough and routed
+  // compaction — paths that never read context.messages, build from _rawBody, and already
+  // degrade an unpaired output to "[tool output for unknown call]" on their own.
+  //
+  // Keyed on the adapter, not on position: routedCompaction skips the passthrough branch above
+  // yet still builds from _rawBody (see the :3703 comment).
+  if (!("passthrough" in adapter && adapter.passthrough)) {
+    const unpaired = parsed.context.messages.find(
+      message => message.role === "toolResult"
+        && (typeof (message as { toolCallId?: unknown }).toolCallId !== "string"
+          || (message as { toolCallId: string }).toolCallId.length === 0),
+    );
+    if (unpaired) {
+      // Never interpolate the tool output: this message reaches the client and the logs.
+      return formatErrorResponse(
+        400,
+        "invalid_request_error",
+        "tool result requires a non-empty string call_id",
+      );
     }
   }
 

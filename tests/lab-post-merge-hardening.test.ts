@@ -180,7 +180,7 @@ test("replay discards an oversized unterminated line after reporting it once", (
   expect(replay.corruptions[0]?.kind).toBe("malformed_line");
 });
 
-test("event privacy admission rejects raw POSIX path bypass forms", () => {
+test("event privacy admission rejects raw filesystem path bypass forms", () => {
   for (const detail of [
     "config=/home/alice/work/repo",
     "cwd=/usr/local/bin",
@@ -192,6 +192,22 @@ test("event privacy admission rejects raw POSIX path bypass forms", () => {
     "cwd=/home/@alice",
     "cwd=/home/josé/work",
     "x-/home/alice",
+    "file:///etc/passwd",
+    "FiLe:///home/alice/secret.txt",
+    "file://localhost/home/alice/secret.txt",
+    "detail_file:///etc/passwd",
+    "file://server/share/secret",
+    String.raw`file:\\server\share\secret`,
+    String.raw`file:\C:\secret\data`,
+    String.raw`file:C:\private\secret`,
+    "file:etc/passwd",
+    "fi\nle:///etc/passwd",
+    "fil\te:///etc/passwd",
+    "file\r:///etc/passwd",
+    "file\n:///etc/passwd",
+    "detail\nfile:///etc/passwd",
+    "detail\rfile:etc/passwd",
+    "detail\tfile:C:\\private\\secret",
   ]) {
     try {
       enforceEventStructureLimits({ detail });
@@ -199,6 +215,10 @@ test("event privacy admission rejects raw POSIX path bypass forms", () => {
     } catch (err) {
       expect((err as { code?: string }).code).toBe("raw_path");
     }
+  }
+
+  for (const detail of ["https://example.com/path", "profile:///etc/passwd"]) {
+    expect(() => enforceEventStructureLimits({ detail })).not.toThrow();
   }
 });
 

@@ -9,8 +9,7 @@
 import { useState } from "react";
 import { Select, Tooltip } from "../../ui";
 import { IconInfo } from "../../icons";
-import type { TKey } from "../../i18n/shared";
-import { useT } from "../../i18n/shared";
+import { useT, type TKey } from "../../i18n/shared";
 import { formatNamespacedModelId } from "../../provider-icons";
 import type { DelegationPatch, DelegationModelOption } from "../../pages/use-subagent-delegation";
 import type { UltraModePatch, UltraModeState } from "../../pages/use-subagent-delegation";

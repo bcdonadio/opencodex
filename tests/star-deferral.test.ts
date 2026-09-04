@@ -94,6 +94,7 @@ describe("maybeShowStarPrompt deferral flow (behavior)", () => {
     setStarPromptDepsForTests({
       ghAvailable: () => true,
       interactiveConfirm: async () => false,
+      isTty: () => true,
     });
     const log = spyOn(console, "log").mockImplementation(() => {});
     try {
@@ -120,6 +121,7 @@ describe("maybeShowStarPrompt deferral flow (behavior)", () => {
           asked += 1;
           return false;
         },
+        isTty: () => true,
       });
       await maybeShowStarPrompt();
       expect(asked).toBe(1);

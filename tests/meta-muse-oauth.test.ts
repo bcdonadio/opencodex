@@ -177,8 +177,77 @@ describe("meta-muse credential import", () => {
     expect(received).toBe(ac.signal);
   });
 
+  // The old refusal blamed the macOS Keychain on EVERY platform. On Windows that
+  // is simply false — Meta ships no Windows CLI — and a user who believed it
+  // would go looking for a credential store instead of WSL2.
+  // Off darwin there is no store to import from, but Meta shows the same key in its
+  // own console — so these hosts get a paste field, not a dead end.
+  test("Windows offers a paste field pointing at Meta's console", async () => {
+    const seen: string[] = [];
+    let prompted = false;
+    const creds = await loginMetaMuse(
+      {
+        onAuth: info => { seen.push(info.instructions ?? ""); seen.push(info.url); },
+        onManualCodeInput: async () => { prompted = true; return CANARY; },
+      },
+      deps({ platform: "win32" }),
+    );
+    expect(prompted).toBe(true);
+    expect(creds.access).toBe(CANARY);
+    expect(creds.source).toBe("manual");
+    expect(seen.join(" ")).toContain("dev.meta.ai");
+  });
+
+  test("Linux offers the same paste field", async () => {
+    const creds = await loginMetaMuse(
+      { onManualCodeInput: async () => CANARY },
+      deps({ platform: "linux" }),
+    );
+    expect(creds.access).toBe(CANARY);
+    expect(creds.refresh).toBe(CANARY);
+    expect(creds.source).toBe("manual");
+  });
+
+  // The paste path must not be a weaker credential wearing the same provider id.
+  test("a pasted key still faces the grammar check and the live validation", async () => {
+    await expect(loginMetaMuse(
+      { onManualCodeInput: async () => "not-a-meta-key" },
+      deps({ platform: "win32" }),
+    )).rejects.toThrow(/expected Meta API key format/);
+
+    const denied = (async () => new Response("nope", { status: 401 })) as unknown as typeof fetch;
+    await expect(loginMetaMuse(
+      { onManualCodeInput: async () => CANARY },
+      deps({ platform: "win32", fetchImpl: denied }),
+    )).rejects.toThrow(/401/);
+  });
+
+  test("a host with no paste surface still refuses with an actionable message", async () => {
+    await expect(loginMetaMuse({}, deps({ platform: "win32" }))).rejects.toThrow(/dev\.meta\.ai/);
+    await expect(loginMetaMuse({}, deps({ platform: "win32" }))).rejects.toThrow(/META_MODEL_API_KEY/);
+    await expect(loginMetaMuse({}, deps({ platform: "linux" }))).rejects.toThrow(/dev\.meta\.ai/);
+  });
+
+  test("an empty paste refuses instead of storing a blank credential", async () => {
+    await expect(loginMetaMuse(
+      { onManualCodeInput: async () => "   " },
+      deps({ platform: "win32" }),
+    )).rejects.toThrow(/no credential to import/);
+  });
+
+  test("the consent warning still precedes every unsupported-platform path", async () => {
+    for (const platform of ["win32", "linux"] as const) {
+      const seen: string[] = [];
+      await expect(
+        loginMetaMuse({ onProgress: m => seen.push(m) }, deps({ platform })),
+      ).rejects.toThrow();
+      expect(seen[0]).toContain("UNSUPPORTED");
+    }
+  });
   for (const [label, over] of [
-    ["a non-darwin platform", { platform: "linux" }],
+    // Non-darwin without a paste surface: still a refusal, and the table asserts it
+    // stays actionable rather than silently succeeding.
+    ["a non-darwin platform with no paste surface", { platform: "linux" }],
     ["no credential file", { readPointer: async () => null }],
     ["a malformed credential file", { readPointer: async () => "{not json" }],
     ["no signed-in Meta account", { readPointer: async () => JSON.stringify({ providers: {} }) }],
@@ -205,15 +274,43 @@ describe("meta-muse credential import", () => {
    */
   test("no failure path echoes the credential", async () => {
     const denied = (async () => new Response("nope", { status: 401 })) as unknown as typeof fetch;
-    const progress: string[] = [];
-    let message = "";
-    try {
-      await loginMetaMuse({ onProgress: m => progress.push(m) }, deps({ fetchImpl: denied }));
-    } catch (error) {
-      message = String((error as Error).message) + String((error as Error).stack ?? "");
+    const torn = (async () => { throw new Error("socket hang up"); }) as unknown as typeof fetch;
+
+    // Both origins and both failure shapes. The import path alone used to stand in for
+    // "no failure path", which stopped being true once a pasted key could reach the
+    // same validator by a different route.
+    const cases = [
+      { label: "imported/rejected", platform: "darwin", fetchImpl: denied },
+      { label: "imported/unreachable", platform: "darwin", fetchImpl: torn },
+      { label: "pasted/rejected", platform: "win32", fetchImpl: denied },
+      { label: "pasted/unreachable", platform: "linux", fetchImpl: torn },
+    ] as const;
+
+    for (const c of cases) {
+      const progress: string[] = [];
+      const auth: string[] = [];
+      // Tracked separately: catching our own sentinel would let a case that
+      // unexpectedly SUCCEEDED satisfy the non-disclosure assertions vacuously.
+      let failed = false;
+      let message = "";
+      try {
+        await loginMetaMuse(
+          {
+            onProgress: m => progress.push(m),
+            onAuth: info => auth.push(`${info.url} ${info.instructions ?? ""}`),
+            onManualCodeInput: async () => CANARY,
+          },
+          deps({ platform: c.platform, fetchImpl: c.fetchImpl }),
+        );
+      } catch (error) {
+        failed = true;
+        message = String((error as Error).message) + String((error as Error).stack ?? "");
+      }
+      expect(failed, `${c.label} should have failed`).toBe(true);
+      expect(message).not.toContain(CANARY);
+      for (const line of progress) expect(line).not.toContain(CANARY);
+      for (const line of auth) expect(line).not.toContain(CANARY);
     }
-    expect(message).not.toContain(CANARY);
-    for (const line of progress) expect(line).not.toContain(CANARY);
   });
 });
 
@@ -228,5 +325,27 @@ describe("meta-muse refresh", () => {
 
   test("an empty key is refused rather than replayed", async () => {
     await expect(refreshMetaMuseToken("")).rejects.toThrow(/ocx login meta-muse/);
+  });
+
+  // merged() in index.ts keeps any source that is not "local-cli", so asserting
+  // "local-cli" here would relabel a hand-pasted key as an imported one and
+  // misreport where the credential came from.
+  test("refresh preserves a manually pasted origin", async () => {
+    const pasted = await refreshMetaMuseToken(CANARY, undefined, {
+      access: CANARY,
+      refresh: CANARY,
+      expires: Number.MAX_SAFE_INTEGER,
+      source: "manual",
+    });
+    expect(pasted.source).toBe("manual");
+
+    const imported = await refreshMetaMuseToken(CANARY, undefined, {
+      access: CANARY,
+      refresh: CANARY,
+      expires: Number.MAX_SAFE_INTEGER,
+      source: "local-cli",
+    });
+    expect(imported.source).toBe("local-cli");
+    expect((await refreshMetaMuseToken(CANARY)).source).toBe("local-cli");
   });
 });

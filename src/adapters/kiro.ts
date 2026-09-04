@@ -5,6 +5,7 @@ import { resolveKiroApiRegion, resolveKiroRequestProfile } from "../oauth/kiro";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { modelRecordValue } from "../reasoning-effort";
 import { parseKiroEvent } from "./kiro-events";
+import { calibrateKiroEstimate, recordKiroCalibration, rekeyKiroCalibration } from "./kiro-calibration";
 import {
   classifyKiroEventError,
   classifyKiroHttpError,
@@ -186,6 +187,34 @@ function estimateKiroTokens(text: string, modelId?: string): number {
   return estimateTokens(text, modelId ? `kiro/${modelId}` : "kiro");
 }
 
+/**
+ * Structural cost of one conversation entry, in tokens.
+ *
+ * The walker below concatenates message TEXT, but the wire carries JSON: per-entry keys
+ * (`userInputMessage`, `content`, `modelId`, `origin`) and role framing. That is charged
+ * upstream and is invisible to a text-only count, so without it a long conversation drifts
+ * further below the real charge with every turn added — an error proportional to entry COUNT,
+ * which no per-character ratio can recover.
+ *
+ * Measured against recorded request bodies, framing costs a low-double-digit token amount per
+ * entry. 12 is the conservative end of that range: it corrects a systematic floor without
+ * fabricating context that was never sent.
+ */
+const KIRO_ENTRY_FRAMING_TOKENS = 12;
+
+/**
+ * Multiplier for JSON string escaping inside message content.
+ *
+ * Every newline, quote, tab and backslash in a message occupies two characters on the wire
+ * (`\\n`, `\\"`) but one in the walked string. Agent traffic is dense in exactly those
+ * characters: multi-line file contents, diffs, JSON tool arguments and quoted shell commands.
+ * Measured across recorded payloads, serialized bodies run ~1.12x the walked character count,
+ * and that expansion is charged.
+ *
+ * Applied to the text estimate only — image and framing costs are already counted in wire terms.
+ */
+const KIRO_JSON_ESCAPE_EXPANSION = 1.12;
+
 function estimateKiroPayloadInputTokens(payload: Record<string, unknown>, modelId: string): number {
   const conversationState = (payload as {
     conversationState?: {
@@ -216,7 +245,9 @@ function estimateKiroPayloadInputTokens(payload: Record<string, unknown>, modelI
       if (assistant.toolUses?.length) parts.push(serializeForUsage(assistant.toolUses));
     }
   }
-  return estimateKiroTokens(parts.join("\n"), modelId) + imageTokens;
+  return Math.ceil(estimateKiroTokens(parts.join("\n"), modelId) * KIRO_JSON_ESCAPE_EXPANSION)
+    + imageTokens
+    + entries.length * KIRO_ENTRY_FRAMING_TOKENS;
 }
 
 function shouldCountStablePromptOverhead(parsed: OcxParsedRequest): boolean {
@@ -990,6 +1021,11 @@ async function* parseKiroAttempt(
   // the attempt boundary. Anything the inner parser leaves behind is flushed before the terminal.
   const deferred: AdapterEvent[] = [];
   const retention = createKiroAttemptRetention(budget);
+  // Shared box: the inner parser stages its calibration observation here on the completion path,
+  // and this wrapper decides whether the attempt was terminal enough to commit it. A box rather
+  // than a return field because the completion path has a dozen terminal returns and threading a
+  // field through every one of them is exactly the kind of edit that misses one.
+  const attemptCalibration: { value?: { conversationId: string; estimated: number; charged: number } } = {};
   const attempt = parseKiroAttemptEvents(
     response,
     budget,
@@ -1001,12 +1037,22 @@ async function* parseKiroAttempt(
     conversationId,
     deferred,
     retention,
+    attemptCalibration,
     contextInputEstimate,
     priorEmittedOutput,
   );
   let handedOff = false;
   try {
     const result = yield* attempt;
+    // A staged observation only counts when this attempt is the LAST one for the user turn. An
+    // attempt that asks for the bounded fallback streams again against a rebuilt payload, so
+    // committing here would move the factor twice for one turn and score the second observation
+    // against a payload the first had already inflated.
+    const staged = attemptCalibration.value;
+    attemptCalibration.value = undefined;
+    if (staged && !result.needsFallback) {
+      recordKiroCalibration(staged.conversationId, staged.estimated, staged.charged);
+    }
     for (const event of deferred.splice(0)) {
       try { yield event; } finally { retention.releaseEvent(event); }
     }
@@ -1028,10 +1074,13 @@ async function* parseKiroAttemptEvents(
   conversationId: string | undefined,
   deferred: AdapterEvent[],
   retention: KiroAttemptRetention,
+  attemptCalibration: { value?: { conversationId: string; estimated: number; charged: number } },
   contextInputEstimate?: number,
   priorEmittedOutput = false,
 ): AsyncGenerator<AdapterEvent, KiroAttemptParseResult> {
   const emptyResult = (): KiroAttemptParseResult => ({ assistantText: "", sawReasoning: false });
+  // Every early return below is a failure path that stages nothing; only the completion path
+  // writes `attemptCalibration`, and the wrapper decides whether to commit it.
   if (!response.body) {
     return {
       ...emptyResult(),
@@ -1346,7 +1395,13 @@ async function* parseKiroAttemptEvents(
           if (ev.stopReason !== undefined) stopReason = ev.stopReason;
           break;
         case "message_metadata":
-          if (isValidKiroConversationId(ev.conversationId)) returnedConversationId = ev.conversationId;
+          if (isValidKiroConversationId(ev.conversationId)) {
+            // Kiro can answer under a different conversation id than the request was built with.
+            // Carry the calibration entry across so the record below finds its own raw estimate
+            // instead of silently falling back to the already-corrected value.
+            rekeyKiroCalibration(returnedConversationId, ev.conversationId);
+            returnedConversationId = ev.conversationId;
+          }
           break;
         case "content":
           if (ev.modelId) {
@@ -1474,6 +1529,29 @@ async function* parseKiroAttemptEvents(
         contextUsagePercentage,
         ...(contextWindowState.value ? { upstreamContextWindow: contextWindowState.value } : {}),
       });
+    }
+    // Upstream just told us what this payload cost. The ratio between that and our pre-request
+    // estimate is this conversation's own measured error, and it is the only feedback the
+    // estimator ever receives.
+    //
+    // Staged, not recorded. An attempt that sets `needsFallback` is not over: the adapter rebuilds
+    // the payload and streams a second time for the SAME user turn. Learning here would apply the
+    // fresh factor to that rebuild and then learn again from it, so one turn would move the factor
+    // twice and the second observation would score a payload the first had already inflated. Only
+    // the outer parser knows whether an attempt is terminal, so it commits.
+    //
+    // Subtract the output first. `contextUsageTotalFloor` is the absolute context size AFTER the
+    // response (`OcxUsage.contextTotalTokens`, types/request.ts), while `contextInputEstimate`
+    // covers the request payload alone. Dividing one by the other would charge generated tokens to
+    // prompt-tokenization error, so a short prompt answered at length would learn a large factor
+    // and inflate every later request in that conversation — the premature compaction this work
+    // exists to prevent.
+    const chargedTotal = contextUsageTotalFloor();
+    if (chargedTotal !== undefined && contextInputEstimate !== undefined) {
+      const chargedInput = chargedTotal - finalUsage.outputTokens;
+      if (chargedInput > 0 && returnedConversationId) {
+        attemptCalibration.value = { conversationId: returnedConversationId, estimated: contextInputEstimate, charged: chargedInput };
+      }
     }
     // Native stop metadata proves that this inference ended, but it does not prove that ordinary
     // text is a final answer. Kiro has emitted END_TURN for progress prose, so tool-enabled turns
@@ -1934,7 +2012,10 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
     if (profileArn) headers["x-amzn-kiro-profile-arn"] = profileArn;
     const built = buildKiroPayload(parsed, profileArn, forcedCompletionMode, wireClient);
     await normalizeKiroImages(built.payload);
-    const contextInputEstimate = estimateKiroPayloadInputTokens(built.payload, parsed.modelId);
+    // Apply what earlier turns of THIS conversation measured. An unseen conversation is
+    // unchanged, so a first turn behaves exactly as it would without calibration.
+    const rawContextInputEstimate = estimateKiroPayloadInputTokens(built.payload, parsed.modelId);
+    const contextInputEstimate = calibrateKiroEstimate(built.conversationId, rawContextInputEstimate);
     const body = JSON.stringify(built.payload);
     debugProviderDiagnostic("kiro", "request", {
       region,

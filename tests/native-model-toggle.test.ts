@@ -25,7 +25,7 @@ import {
 } from "../src/codex/catalog";
 import { handleManagementAPI } from "../src/server/management-api";
 import { applyMultiAgentMode, applyNativeOpenAiContextOverride } from "../src/codex/catalog/parsing";
-import { NATIVE_GPT56_CONTEXT_WINDOW, NATIVE_GPT56_OPT_IN_CONTEXT_WINDOW, nativeOpenAiContextWindow } from "../src/codex/catalog";
+import { NATIVE_GPT56_CONTEXT_WINDOW, NATIVE_GPT56_OPT_IN_CONTEXT_WINDOW, nativeOpenAiContextTier, nativeOpenAiContextWindow } from "../src/codex/catalog";
 import type { OcxConfig } from "../src/types";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../src/codex/catalog/native-models";
 import {
@@ -115,6 +115,47 @@ describe("native GPT model toggles (bare slugs in disabledModels)", () => {
     expect(visibleNativeSlugs({ disabledModels: [] })).toContain("gpt-6-astra");
     // The user visibility lever still owns hiding it; only entitlement gating was removed.
     expect(visibleNativeSlugs({ disabledModels: ["gpt-6-astra"] })).not.toContain("gpt-6-astra");
+  });
+
+  test("the flagship natives list without any roster; only Daybreak still waits for one", () => {
+    // Owner decision (2026-09-04): gpt-5.6-sol/terra/luna join gpt-6-astra in listing on every
+    // install. Asking upstream under an adequate client version (#3442) guarantees the QUESTION
+    // is fair; it cannot guarantee an ANSWER. An unconfirmed account, a timed-out fetch or a
+    // shard that has not caught up all produce the same silent disappearance, which reads as
+    // "opencodex lost my model" rather than "upstream did not confirm it".
+    resetCodexModelEntitlementCacheForTests();
+    const flagship = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"];
+    const slugs = nativeModelRows({ disabledModels: [] }).map(row => row.slug);
+    for (const slug of flagship) {
+      expect(ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug)).toBe(false);
+      expect(slugs).toContain(slug);
+      expect(visibleNativeSlugs({ disabledModels: [] })).toContain(slug);
+    }
+    // Scoped, not global: Daybreak is a genuinely entitlement-restricted surface with no shipped
+    // catalog row, so it still waits for a confirming roster. If this flips, the ungating leaked.
+    expect(ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has("gpt-daybreak-blue-latest")).toBe(true);
+    expect(slugs).not.toContain("gpt-daybreak-blue-latest");
+    // The user's visibility lever is untouched by any of this.
+    expect(visibleNativeSlugs({ disabledModels: flagship })).not.toContain("gpt-5.6-sol");
+  });
+
+  test("the 1M opt-in raises gpt-6-astra to its own 872k ceiling, not the family's 922k", () => {
+    // The dashboard's native 1M toggle writes providerContextCaps.openai = 922_000 for the whole
+    // group. Raising a window only happens for slugs that HAVE an opt-in ceiling, which used to
+    // mean "member of NATIVE_GPT56_FAMILY". Astra ships its own 272k/872k pair and is not in that
+    // family, so the toggle moved every other native and left this one pinned at 272k.
+    const optIn = { cap: NATIVE_GPT56_OPT_IN_CONTEXT_WINDOW } as const;
+
+    expect(nativeOpenAiContextWindow("gpt-6-astra")).toBe(272_000);
+    // Raised to the model's OWN ceiling: the 922k lever must not advertise 922k on a 872k model.
+    expect(nativeOpenAiContextWindow("gpt-6-astra", optIn)).toBe(872_000);
+    // The family keeps its measured ceiling, so the shared lever is not degraded for anyone else.
+    expect(nativeOpenAiContextWindow("gpt-5.6-sol", optIn)).toBe(922_000);
+
+    // The tier pair is availability metadata and stays put either way — it is what told us the
+    // window SHOULD have moved while the window itself did not.
+    expect(nativeOpenAiContextTier("gpt-6-astra", optIn))
+      .toEqual({ defaultWindow: 272_000, longWindow: 872_000 });
   });
 
   test("Direct bare rows use only main entitlement while Pool may use any eligible account", () => {

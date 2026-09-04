@@ -1523,3 +1523,131 @@ test("a no-eligible policy compact request persists the evaluation trace", async
   expect(logCtx.routeDecision!.selected.reason).toBe("no-eligible-candidate");
   expect(logCtx.routeDecision!.candidates).toHaveLength(1);
 });
+
+/**
+ * Issue #3259: a tool result is PAIRED by call_id. inputItemSchema's permissive catch-all
+ * (schema.ts:106) accepts a tool item whose strict alternative failed only for a missing
+ * call_id, and parser.ts:738 then assigns it unchecked, so a translating adapter consumes
+ * `toolCallId: string` holding undefined. Anthropic is the worst case: it does not throw,
+ * it sends "[tool_result without adjacent tool_use: undefined]" upstream.
+ *
+ * The guard cannot live in the schema. parseRequest runs before the passthrough branch, and
+ * passthrough / routed compaction build from _rawBody, never reading context.messages — they
+ * already degrade an unpaired output to "[tool output for unknown call]" on their own.
+ */
+describe("unpaired tool result boundary (#3259)", () => {
+  function unpairedBody(item: Record<string, unknown>): Record<string, unknown> {
+    return {
+      model: "gw/some-model",
+      stream: false,
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "do the task" }] },
+        item,
+      ],
+    };
+  }
+
+  const anthropicConfig = () => ({
+    defaultProvider: "gw",
+    providers: {
+      gw: {
+        adapter: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        authMode: "key",
+        apiKey: "test-key",
+      },
+    },
+  } as unknown as OcxConfig);
+
+  test("a translating adapter rejects a call_id-less tool result with 400 and sends nothing upstream", async () => {
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      throw new Error("the guard must reject before any upstream request");
+    }) as typeof fetch;
+
+    const res = await handleResponses(
+      compactionRequest(unpairedBody({ type: "function_call_output", output: "bootstrap result" })),
+      anthropicConfig(),
+      { model: "", provider: "" },
+    );
+
+    expect(res.status).toBe(400);
+    const json = await res.json() as { error?: { message?: string; type?: string; code?: string } };
+    expect(json.error?.message).toBe("tool result requires a non-empty string call_id");
+    expect(json.error?.type).toBe("invalid_request_error");
+    expect(json.error?.code).toBe("invalid_request_error");
+    // The tool output itself must never be interpolated into a client-visible message.
+    expect(JSON.stringify(json)).not.toContain("bootstrap result");
+    expect(fetches).toBe(0);
+  });
+
+  test("an empty-string call_id is rejected identically (it can never pair)", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("the guard must reject before any upstream request");
+    }) as typeof fetch;
+
+    const res = await handleResponses(
+      compactionRequest(unpairedBody({ type: "custom_tool_call_output", call_id: "", output: "x" })),
+      anthropicConfig(),
+      { model: "", provider: "" },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("a paired tool result on the same translating route still reaches the upstream", async () => {
+    const bodies: string[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      return jsonResponse({
+        id: "msg_1",
+        type: "message",
+        role: "assistant",
+        model: "claude",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    }) as typeof fetch;
+
+    const res = await handleResponses(
+      compactionRequest({
+        model: "gw/some-model",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "do the task" }] },
+          { type: "function_call", call_id: "call_1", name: "shell", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_1", output: "paired result" },
+        ],
+      }),
+      anthropicConfig(),
+      { model: "", provider: "" },
+    );
+
+    expect(res.status).toBe(200);
+    expect(bodies.length).toBe(1);
+    expect(bodies[0]).toContain("paired result");
+    expect(bodies[0]).not.toContain("undefined");
+  });
+
+  test("the same unpaired body on a passthrough route stays 200 and self-degrades", async () => {
+    // This contrast is the core claim of the design: passthrough builds from _rawBody, is
+    // unaffected by the defect, and must not be killed by the guard.
+    const bodies: string[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      return jsonResponse(completedPayload("ok"));
+    }) as typeof fetch;
+
+    const res = await handleResponses(
+      compactionRequest(unpairedBody({ type: "function_call_output", output: "bootstrap result" })),
+      keyProviderConfig(),
+      { model: "", provider: "" },
+    );
+
+    expect(res.status).toBe(200);
+    expect(bodies.length).toBe(1);
+    expect(bodies[0]).toContain("[tool output for unknown call]");
+    expect(bodies[0]).not.toContain("undefined");
+  });
+});

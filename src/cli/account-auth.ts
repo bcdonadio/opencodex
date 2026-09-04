@@ -1,5 +1,6 @@
 import { writeSync } from "node:fs";
 import { warnIfCodexCatalogRefreshPending } from "./account-catalog-refresh";
+import { isCodexResetCreditOperationId } from "../codex/reset-credit-recovery";
 import {
   CliUsageError,
   printData,
@@ -34,7 +35,7 @@ const USAGE = `Usage:
   ocx account login <provider> [--id <account-id>] [--reauth] [--device] [--code -] [--no-wait] [--json]
   ocx account code <provider> [--flow <flow-id>] [--json]   (reads the code from stdin)
   ocx account cancel <provider> [--flow <flow-id>] [--json]
-  ocx account reset-credits <account-id|main> [--consume --yes] [--json]
+  ocx account reset-credits <account-id|main> [--consume --yes [--operation-id <uuid>]] [--json]
 
 --device runs the OpenAI device-code login instead of the browser callback: use
 it when the proxy has no browser or nothing can reach localhost:1455, such as a
@@ -252,12 +253,25 @@ async function resetCredits(argv: string[], deps: RuntimeApiDeps): Promise<void>
   const wantsJson = takeFlag(args, "--json");
   const consume = takeFlag(args, "--consume");
   const yes = takeFlag(args, "--yes");
+  // Before rejectArgs: takeOption splices its two tokens out of `args`.
+  const operationId = takeOption(args, "--operation-id");
   if (!rawId) throw new CliUsageError("account id is required", USAGE);
   if (consume && !yes) throw new CliUsageError("consuming a reset credit requires --yes", USAGE);
+  if (operationId !== undefined && !consume) {
+    throw new CliUsageError("--operation-id requires --consume", USAGE);
+  }
+  if (operationId !== undefined && !isCodexResetCreditOperationId(operationId)) {
+    throw new CliUsageError("--operation-id must be a UUIDv4", USAGE);
+  }
   rejectArgs(args, USAGE);
   const accountId = rawId === "main" ? "__main__" : rawId;
   const result = consume
-    ? await runtimeRequest("/api/codex-auth/reset-credits/consume", { method: "POST", body: JSON.stringify({ accountId }) }, deps)
+    ? await runtimeRequest("/api/codex-auth/reset-credits/consume", {
+      method: "POST",
+      // Spread, not `operationId: undefined`: the server distinguishes an absent
+      // key (legacy random id) from a caller who asked for a stable identity.
+      body: JSON.stringify({ accountId, ...(operationId === undefined ? {} : { operationId }) }),
+    }, deps)
     : await runtimeRequest(`/api/codex-auth/reset-credits?accountId=${encodeURIComponent(accountId)}`, {}, deps);
   printData(result, wantsJson);
 }

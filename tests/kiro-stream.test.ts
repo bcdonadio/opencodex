@@ -14,6 +14,7 @@ import {
 } from "../src/adapters/kiro-constants";
 import { parseKiroEvent } from "../src/adapters/kiro-events";
 import { resetKiroThrottleStateForTests } from "../src/adapters/kiro-retry";
+import { resetKiroCalibration } from "../src/adapters/kiro-calibration";
 import { buildResponseJSON } from "../src/bridge";
 import { encodeMessage } from "../src/lib/eventstream-decoder";
 import { estimateTokens } from "../src/lib/token-estimate";
@@ -452,11 +453,11 @@ describe("kiro adapter — parseStream", () => {
     const done = events.at(-1);
     expect(done?.type).toBe("done");
     const usage = done?.type === "done" ? done.usage : undefined;
-    expect(usage?.outputTokens).toBe(estimateTokens(firstText, "claude-sonnet-4.5") + estimateTokens(finalText, "claude-sonnet-4.5"));
+    expect(usage?.outputTokens).toBe(estimateTokens(firstText, "kiro/claude-sonnet-4.5") + estimateTokens(finalText, "kiro/claude-sonnet-4.5"));
     expect(usage?.contextTotalTokens).toBeGreaterThan(
       initialContextEstimate + Math.max(
-        estimateTokens(firstText, "claude-sonnet-4.5"),
-        estimateTokens(finalText, "claude-sonnet-4.5"),
+        estimateTokens(firstText, "kiro/claude-sonnet-4.5"),
+        estimateTokens(finalText, "kiro/claude-sonnet-4.5"),
       ),
     );
   });
@@ -489,13 +490,13 @@ describe("kiro adapter — parseStream", () => {
     expect(largeProgress).toBeGreaterThan(smallProgress);
     // And the extra pressure must be on the order of the extra progress, not a rounding artefact.
     expect(largeProgress - smallProgress).toBeGreaterThan(
-      estimateTokens("p".repeat(20000), "claude-sonnet-4.5"),
+      estimateTokens("p".repeat(20000), "kiro/claude-sonnet-4.5"),
     );
   });
 
   test("bounded fallback preserves definite growth after an upstream context checkpoint", async () => {
     const finalText = "f".repeat(3500);
-    const finalOutputTokens = estimateTokens(finalText, "claude-sonnet-4.5");
+    const finalOutputTokens = estimateTokens(finalText, "kiro/claude-sonnet-4.5");
     globalThis.fetch = (async () => new Response(streamOf(eventFrame({ content: finalText })))) as typeof fetch;
     const adapter = createKiroAdapter(provider);
     await adapter.buildRequest(parsedWith([{ role: "user", content: "do it" }], [bashTool]));
@@ -1457,8 +1458,9 @@ describe("kiro adapter — parseStream", () => {
     const adapter = createKiroAdapter(provider);
     await adapter.buildRequest(parsedWith([{ role: "user", content: "x".repeat(700) }]));
     const done = await doneUsage(adapter, eventFrame({ content: "y".repeat(350) }));
-    expect(done.inputTokens).toBe(200);
-    expect(done.outputTokens).toBe(100);
+    // 700 chars at the 2.8 kiro Latin ratio (the turn adds a trailing newline separator).
+    expect(done.inputTokens).toBe(251);
+    expect(done.outputTokens).toBe(126);
     expect(done.estimated).toBe(true);
   });
 
@@ -1501,7 +1503,7 @@ describe("kiro adapter — parseStream", () => {
     );
     expect(done).toEqual({
       inputTokens: 15,
-      contextTotalTokens: 204,
+      contextTotalTokens: 298,
       cachedInputTokens: 3,
       cacheReadInputTokens: 3,
       cacheCreationInputTokens: 2,
@@ -1577,8 +1579,8 @@ describe("kiro adapter — parseStream", () => {
       eventFrame({ contextUsagePercentage: 25 }),
     );
 
-    expect(done.inputTokens).toBe(200);
-    expect(done.outputTokens).toBe(100);
+    expect(done.inputTokens).toBe(251);
+    expect(done.outputTokens).toBe(126);
     expect(done.totalTokens).toBeUndefined();
     expect(done.estimated).toBe(true);
     expect(done.contextTotalTokens).toBe(50_000);
@@ -1601,10 +1603,10 @@ describe("kiro adapter — parseStream", () => {
       eventFrame({ contextUsagePercentage: 25 }),
     );
 
-    expect(done.inputTokens).toBe(200);
-    expect(done.outputTokens).toBe(100);
+    expect(done.inputTokens).toBe(251);
+    expect(done.outputTokens).toBe(126);
     expect(done.totalTokens).toBeUndefined();
-    expect(done.contextTotalTokens).toBe(300);
+    expect(done.contextTotalTokens).toBe(420);
   });
 
   test("Kiro auto uses the concrete response model to decode context percentage", async () => {
@@ -1619,14 +1621,131 @@ describe("kiro adapter — parseStream", () => {
     expect(done.contextTotalTokens).toBe(50_000);
   });
 
+  // End-to-end proof that calibration survives the adapter boundary: one full stream reports a
+  // context percentage, and the NEXT request for the same conversation is estimated higher for
+  // identical input. Unit tests cover the arithmetic; this covers the wiring.
+  //
+  // The payload is sized so the reported percentage lands within a believable multiple of our
+  // estimate. A wildly larger ratio is rejected as implausible by design — a 30x reading is a
+  // compaction or a window mismatch, not a mis-tokenized prompt — so a naive fixture proves
+  // nothing about the wiring.
+  test("a reported context percentage calibrates the next request in the same conversation", async () => {
+    resetKiroCalibration();
+    // 28k chars estimates ~11.2k tokens once framing is counted; 10% of the model window is 20k,
+    // a believable 1.8x under-read rather than a compaction-sized outlier that the plausibility
+    // guard would rightly discard.
+    const messages = [{ role: "user", content: "x".repeat(28_000) }];
+    // A conversation is only the SAME conversation when the continuation id is carried: a fresh
+    // request mints a random one (stableConversationId), which is precisely why calibration is
+    // keyed on it rather than on the adapter instance.
+    const conversationId = "11111111-2222-3333-4444-555555555555";
+    const sameConversation = () => ({
+      ...parsedWith(messages),
+      _providerContinuation: { kiro: { conversationId } },
+    });
+
+    const first = createKiroAdapter(provider);
+    await first.buildRequest(sameConversation());
+    const done = await doneUsage(first, eventFrame({ content: "ok" }), eventFrame({ contextUsagePercentage: 10 }));
+    expect(done.contextTotalTokens ?? 0).toBeGreaterThan(0);
+
+    const second = createKiroAdapter(provider);
+    await second.buildRequest(sameConversation());
+    const after = await doneUsage(second, eventFrame({ content: "ok" }));
+
+    resetKiroCalibration();
+    const uncalibrated = createKiroAdapter(provider);
+    await uncalibrated.buildRequest(sameConversation());
+    const baseline = await doneUsage(uncalibrated, eventFrame({ content: "ok" }));
+
+    expect(after.contextTotalTokens ?? 0).toBeGreaterThan(baseline.contextTotalTokens ?? 0);
+  });
+
+  // The negative half of the same contract: a turn that does not complete must teach nothing. A
+  // stream that fails mid-flight proves nothing about how densely its payload tokenized, and a
+  // turn that asks for the bounded completion retry is not over — it streams again against a
+  // rebuilt payload, so learning from the first attempt would move the factor twice for one turn.
+  test("an unfinished turn records no calibration", async () => {
+    const messages = [{ role: "user", content: "x".repeat(28_000) }];
+    const conversationId = "99999999-8888-7777-6666-555555555555";
+    const sameConversation = () => ({
+      ...parsedWith(messages),
+      _providerContinuation: { kiro: { conversationId } },
+    });
+
+    resetKiroCalibration();
+    const failing = createKiroAdapter(provider);
+    await failing.buildRequest(sameConversation());
+    // Report a context percentage, then end the stream with an upstream error rather than a
+    // completion. The percentage is real; the turn is not finished.
+    const events = await collectAdapterEvents(failing.parseStream(new Response(streamOf(
+      eventFrame({ contextUsagePercentage: 10 }),
+      eventFrame({ message: "boom" }, "invalidStateEvent"),
+    ))));
+    // Whatever the exact terminal shape, the turn did NOT deliver a completed answer.
+    expect(events.some(event => event.type === "done")).toBe(false);
+
+    // Compare the ESTIMATE the next request carries, not a second completed turn — completing one
+    // would itself record and mask what we are asserting.
+    const after = createKiroAdapter(provider);
+    await after.buildRequest(sameConversation());
+    const afterEstimate = (await doneUsage(after, eventFrame({ content: "ok" }))).contextTotalTokens;
+
+    resetKiroCalibration();
+    const baselineAdapter = createKiroAdapter(provider);
+    await baselineAdapter.buildRequest(sameConversation());
+    const baseline = (await doneUsage(baselineAdapter, eventFrame({ content: "ok" }))).contextTotalTokens;
+
+    expect(afterEstimate).toBe(baseline);
+  });
+
+  // The bounded completion retry is the case the terminal-only rule exists for: attempt 1 reports
+  // a real percentage but asks for a fallback, so the SAME user turn streams again against a
+  // rebuilt payload. Learning from attempt 1 would move the factor twice for one turn.
+  test("an attempt that falls back to the completion retry does not calibrate", async () => {
+    const messages = [{ role: "user", content: "x".repeat(28_000) }];
+    const conversationId = "abcdabcd-1234-5678-9abc-def012345678";
+    const sameConversation = (tools?: unknown[]) => ({
+      ...parsedWith(messages, tools),
+      _providerContinuation: { kiro: { conversationId } },
+    });
+
+    resetKiroCalibration();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(streamOf(eventFrame({ content: "Final from fallback." })))) as typeof fetch;
+    try {
+      const falling = createKiroAdapter(provider);
+      await falling.buildRequest(sameConversation([bashTool]));
+      // Text plus a context percentage, but no private completion call: this attempt needs the
+      // bounded fallback, so its observation must be discarded rather than learned.
+      await collectAdapterEvents(falling.parseStream(new Response(streamOf(
+        eventFrame({ content: "I am checking." }),
+        eventFrame({ contextUsagePercentage: 10 }),
+      ))));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const after = createKiroAdapter(provider);
+    await after.buildRequest(sameConversation());
+    const afterEstimate = (await doneUsage(after, eventFrame({ content: "ok" }))).contextTotalTokens;
+
+    resetKiroCalibration();
+    const baselineAdapter = createKiroAdapter(provider);
+    await baselineAdapter.buildRequest(sameConversation());
+    const baseline = (await doneUsage(baselineAdapter, eventFrame({ content: "ok" }))).contextTotalTokens;
+
+    expect(afterEstimate).toBe(baseline);
+  });
+
   test("Kiro GPT routes use the Kiro token ratio without context percentage", async () => {
     const adapter = createKiroAdapter(provider);
     await adapter.buildRequest(parsedWith([{ role: "user", content: "x".repeat(3500) }], undefined, "gpt-5.6-sol"));
     const done = await doneUsage(adapter, eventFrame({ content: "y".repeat(3500) }));
 
-    expect(done.inputTokens).toBe(1000);
-    expect(done.outputTokens).toBe(1000);
-    expect(done.contextTotalTokens).toBe(2000);
+    expect(done.inputTokens).toBe(1250);
+    expect(done.outputTokens).toBe(1250);
+    expect(done.contextTotalTokens).toBe(2663);
   });
 
   test("fresh payload includes history while usage counts only the current turn", async () => {
@@ -1651,7 +1770,9 @@ describe("kiro adapter — parseStream", () => {
     const longUsage = await doneUsage(longAdapter, eventFrame({ content: "ok" }));
     expect(longBody.length).toBeGreaterThan(shortBody.length + 10_000);
     expect(longUsage.inputTokens).toBe(shortUsage.inputTokens);
-    expect(longUsage.inputTokens).toBe(estimateTokens(latest, "claude-sonnet-4.5"));
+    // The adapter estimates through the kiro-prefixed id, which carries the Kiro-measured ratio;
+    // the bare id is a different provider's route and keeps the shared agent ratio.
+    expect(longUsage.inputTokens).toBe(estimateTokens(latest, "kiro/claude-sonnet-4.5"));
     expect(longUsage.contextTotalTokens).toBeGreaterThan(shortUsage.contextTotalTokens ?? 0);
   });
 
@@ -1696,10 +1817,16 @@ describe("kiro adapter — parseStream", () => {
     const request = await adapter.buildRequest(parsedWith(messages));
     const usage = await doneUsage(adapter, eventFrame({ content: "ok" }));
 
-    expect(usage.inputTokens).toBe(estimateTokens(latest, "claude-sonnet-4.5"));
+    expect(usage.inputTokens).toBe(estimateTokens(latest, "kiro/claude-sonnet-4.5"));
     expect(request.usageLog?.estimated).toBe(true);
     expect(request.usageLog?.inputTokens).toBeGreaterThan(usage.inputTokens + 4000);
-    expect(usage.contextTotalTokens).toBe((request.usageLog?.inputTokens ?? 0) + usage.outputTokens);
+    // Both estimates cover the whole conversation, but they are built for different consumers and
+    // are no longer expected to be equal. The context checkpoint is derived from the SERIALIZED
+    // payload, so it also carries JSON-escaping expansion and per-entry framing — real charged
+    // cost that a flat text join cannot see. The log estimate stays a plain text measure.
+    expect(usage.contextTotalTokens).toBeGreaterThanOrEqual(
+      (request.usageLog?.inputTokens ?? 0) + usage.outputTokens,
+    );
   });
 
   test("resumed payload preserves the complete locally expanded history", async () => {
@@ -1721,7 +1848,7 @@ describe("kiro adapter — parseStream", () => {
     expect(resumedBody.length).toBe(freshBody.length);
     expect(cs.history).toHaveLength(4);
     expect(cs.currentMessage.userInputMessage.content).toBe(latest);
-    expect(resumedUsage.inputTokens).toBe(estimateTokens(latest, "claude-sonnet-4.5"));
+    expect(resumedUsage.inputTokens).toBe(estimateTokens(latest, "kiro/claude-sonnet-4.5"));
   });
 
   test("tool-result follow-up counts new tool output without re-counting prior assistant tool args", async () => {

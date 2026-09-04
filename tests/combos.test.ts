@@ -500,6 +500,14 @@ describe("combo failure policy and advancement", () => {
     // An UPSTREAM context verdict still stops: retrying that elsewhere is guesswork, and a
     // generic 413 with no structured code keeps its existing conservative handling.
     expect(comboFailureDecision(400, "context_length_exceeded")).toBe("stop");
+    const providerHardCap = JSON.stringify({ error: {
+      message: "Prompt 346030 > 262144 maximum context length",
+      type: "invalid_request_prompt_too_long",
+      code: "5059",
+      raw_status_code: 400,
+    }});
+    expect(comboFailureDecision(400, providerHardCap, { code: "5059" })).toBe("hop");
+    expect(comboFailureDecision(400, "ordinary invalid request", { code: "5059" })).toBe("stop");
     expect(comboFailureDecision(413, "request too large")).toBe("stop");
   });
 

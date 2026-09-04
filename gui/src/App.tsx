@@ -12,7 +12,7 @@ import Integrations from "./pages/Integrations";
 import Startup from "./pages/Startup";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { SidebarGithubRow } from "./components/sidebar-github-row";
-import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconHardDrive, IconKey, IconMenu, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower, IconX, IconRefresh} from "./icons";
+import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconHardDrive, IconCodex, IconMenu, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower, IconX, IconRefresh} from "./icons";
 import { useI18n, useT, LOCALES, localeDisplayName, type Locale, type TKey } from "./i18n/shared";
 import { Select } from "./ui";
 import { configureApiTargets, hasApiSession, installApiAuthFetch, installApiSessionFromHtml, logoutApiSession } from "./api";
@@ -61,7 +61,7 @@ type NavEntry = {
 
 const NAV: NavEntry[] = [
   { id: "dashboard", tkey: "nav.dashboard", Icon: IconGrid },
-  { id: "codex-set", tkey: "nav.codexSet", Icon: IconKey },
+  { id: "codex-set", tkey: "nav.codexSet", Icon: IconCodex },
   { id: "providers", tkey: "nav.providers", Icon: IconServer },
   { id: "models", tkey: "nav.models", Icon: IconBoxes },
   { id: "subagents", tkey: "nav.subagents", Icon: IconBot },
@@ -243,12 +243,30 @@ export default function App() {
     else alert(t("connection.sessionLogoutFailed"));
   };
 
+  /*
+   * The brand is the control users reach for first when they want out of a deep page,
+   * and it used to be an inert <div>: clicking the logo did nothing, so a user on
+   * #providers had no obvious way back to the first screen. It is a button now.
+   *
+   * One node, two mount points (mobile topbar and drawer head), so both become
+   * interactive from this single definition. `navigateToPage` is the deliberate-
+   * navigation helper the nav rows use — it pushes a history entry, so Back still
+   * returns to where the user came from — and closing the drawer is required because
+   * the second mount lives inside it.
+   */
   const brand = (
-    <div className="brand">
+    <button
+      type="button"
+      className="brand brand-home"
+      onClick={() => { navigateToPage("dashboard"); setNavOpen(false); }}
+      aria-label={t("nav.goHome")}
+      title={t("nav.goHome")}
+      {...(page === "dashboard" ? { "aria-current": "page" as const } : {})}
+    >
       <span className="brand-logo" role="img" aria-label={t("app.logoAria")} />
       <span className="name">opencodex</span>
       <span className="ver">v{displayedVersion}</span>
-    </div>
+    </button>
   );
 
   return (
@@ -320,40 +338,25 @@ export default function App() {
           })}
         </nav>
         <div className="sidebar-foot">
-          {/*
-            Two rows of orbs, no text. Language, theme, GitHub and update are preferences
-            and links; stop and restart are the runtime controls. They used to be five
-            labelled rows that together outweighed the nine navigation entries above them.
-            Every orb keeps aria-label + title, so nothing is lost to assistive tech.
-          */}
-          <div className="sidebar-foot-row" role="group" aria-label={t("sidebar.preferences")}>
-            <div className="lang-toggle lang-toggle--icon">
-              <IconGlobe aria-hidden />
-              <Select
-                value={locale}
-                options={LOCALES.map(l => ({ value: l.code, label: localeDisplayName(l.code) }))}
-                onChange={v => setLocale(v as Locale)}
-                label={t("lang.label")}
-                placement="right"
-                portal={false}
-              />
-            </div>
-            <button type="button" className="sidebar-orb" onClick={cycleTheme}
-              aria-label={`${t("theme.label")}: ${t(THEME_TKEY[theme])}`} title={`${t("theme.label")}: ${t(THEME_TKEY[theme])}`}>
-              <ThemeIcon />
-            </button>
-            <SidebarGithubRow
-              apiBase={sharedBase}
-              onOpenUpdate={() => {
-                // The update dialog lives on the dashboard maintenance panel. Deep-link to
-                // `#dashboard/update` and let the dashboard own the check/run flow — no
-                // cross-component event bus, and the link survives a refresh.
-                setNavOpen(false);
-                navigateToPage("dashboard", "update");
-              }}
+          <div className="lang-toggle">
+            <IconGlobe aria-hidden />
+            <Select
+              value={locale}
+              options={LOCALES.map(l => ({ value: l.code, label: localeDisplayName(l.code) }))}
+              onChange={v => setLocale(v as Locale)}
+              label={t("lang.label")}
+              placement="right"
+              portal={false}
+              style={{ flex: 1, minWidth: 0, width: "100%" }}
             />
           </div>
-          <div className="sidebar-foot-row" role="group" aria-label={t("dash.actions")}>
+          <button type="button" className="theme-toggle" onClick={cycleTheme}
+            aria-label={`${t("theme.label")}: ${t(THEME_TKEY[theme])}`} title={`${t("theme.label")}: ${t(THEME_TKEY[theme])}`}>
+            <ThemeIcon /> <span className="mode">{t(THEME_TKEY[theme])}</span>
+          </button>
+          <div className="sidebar-action-row">
+            <span className="sidebar-action-label">{t("dash.actions")}</span>
+            <div className="sidebar-action-orbs">
               {targets.connected && sharedSessionReady && (
                 <button type="button" className="sidebar-orb" onClick={() => { void handleSessionLogout(); }} disabled={sessionLoggingOut}
                   aria-label={t(sessionLoggingOut ? "connection.sessionLoggingOut" : "connection.sessionLogout")}
@@ -373,7 +376,18 @@ export default function App() {
                 title={codexRestarting ? t("dash.codexRestarting") : t("dash.codexRestart")}>
                 <IconRefresh />
               </button>
+            </div>
           </div>
+          <SidebarGithubRow
+            apiBase={sharedBase}
+            onOpenUpdate={() => {
+              // The update dialog lives on the dashboard maintenance panel. Deep-link to
+              // `#dashboard/update` and let the dashboard own the check/run flow — no
+              // cross-component event bus, and the link survives a refresh.
+              setNavOpen(false);
+              navigateToPage("dashboard", "update");
+            }}
+          />
         </div>
       </aside>
 

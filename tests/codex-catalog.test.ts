@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexAccountGatedCanonicalWireModel } from "../src/server/responses/core";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../src/codex/catalog/native-models";
+import { isGpt56NativeSlug } from "../src/codex/catalog/effort";
+import { nativeOpenAiContextTier, nativeOpenAiMaxInputTokens } from "../src/codex/catalog";
+import { shouldUpgradeToUpstreamEntry } from "../src/codex/catalog/metadata";
 import { applyNativeVisibility, augmentRoutedModelsWithMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, CODEX_ACCOUNT_BOUND_CATALOG_KIND, CODEX_NATIVE_ALIAS_CATALOG_KIND, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_DAYBREAK_BLUE_MODEL, NATIVE_GPT6_ASTRA_MODEL, NATIVE_OPENAI_MODELS, nativeDefaultReasoningEffort, nativeInputModalities, nativeOpenAiCapabilitySourceSlug, nativeOpenAiContextWindow, nativeReasoningEfforts, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, resolveComboCatalogMember, shouldExposeRoutedModel, upstreamNativeEntry } from "../src/codex/catalog";
 import { applyProviderConfigHints, mergeConfiguredModelsIntoLiveCatalog } from "../src/codex/catalog/provider-fetch";
 import {
@@ -1551,6 +1554,90 @@ describe("combo catalog capability intersection", () => {
       new Map(),
       new Map(),
     )).toBeUndefined();
+  });
+
+  test("resolveComboCatalogMember restores vendor image and effort capabilities for thin Claude rows", () => {
+    const providers = new Map([["anthropic", {
+      adapter: "anthropic" as const,
+      baseUrl: "https://api.anthropic.com",
+    }]]);
+    // A discovery row that only carries id + window (the live Anthropic /models shape).
+    expect(resolveComboCatalogMember(
+      { provider: "anthropic", model: "claude-opus-5" },
+      new Map([["anthropic/claude-opus-5", { provider: "anthropic", id: "claude-opus-5", contextWindow: 1_000_000 }]]),
+      providers,
+    )).toMatchObject({
+      contextWindow: 1_000_000,
+      inputModalities: ["text", "image"],
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    });
+    // Point-release ids fall back to their family row in the vendor table.
+    expect(resolveComboCatalogMember(
+      { provider: "anthropic", model: "claude-fable-5-1" },
+      new Map([["anthropic/claude-fable-5-1", { provider: "anthropic", id: "claude-fable-5-1", contextWindow: 1_000_000 }]]),
+      providers,
+    )).toMatchObject({
+      inputModalities: ["text", "image"],
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    });
+    // An explicit caller fallback still wins over the vendor table.
+    expect(resolveComboCatalogMember(
+      { provider: "anthropic", model: "claude-opus-5" },
+      new Map([["anthropic/claude-opus-5", { provider: "anthropic", id: "claude-opus-5", contextWindow: 1_000_000 }]]),
+      providers,
+      undefined,
+      { inputModalities: ["text"], reasoningEfforts: [] },
+    )).toMatchObject({ inputModalities: ["text"], reasoningEfforts: [] });
+    // Unknown ids keep their unknown ladder rather than inventing one.
+    expect(resolveComboCatalogMember(
+      { provider: "a", model: "ghost" },
+      new Map(),
+      new Map([["a", { adapter: "openai-chat" as const, baseUrl: "https://a.example/v1" }]]),
+    )).not.toHaveProperty("reasoningEfforts");
+  });
+
+  // Sniper for the OUTPUT-vs-INPUT mapping defect carried over from PR #3332. The test
+  // above uses toMatchObject, which only inspects the keys it names, so without this a
+  // regression that puts the OUTPUT ceiling into the INPUT slot passes green.
+  test("vendor metadata fills the OUTPUT ceiling and never shrinks the combo input window", () => {
+    const providers = new Map([["anthropic", {
+      adapter: "anthropic" as const,
+      baseUrl: "https://api.anthropic.com",
+    }]]);
+    const member = resolveComboCatalogMember(
+      { provider: "anthropic", model: "claude-opus-5" },
+      new Map([["anthropic/claude-opus-5", { provider: "anthropic", id: "claude-opus-5", contextWindow: 1_000_000 }]]),
+      providers,
+    );
+    // claude-opus-5 vendor row is { contextWindow: 1e6, maxTokens: 128_000 }.
+    // maxTokens is the OUTPUT ceiling: it must land on maxOutputTokens, never maxInputTokens.
+    expect(member?.maxOutputTokens).toBe(128_000);
+    expect(member?.maxInputTokens ?? 1_000_000).toBe(1_000_000);
+
+    // The intersection in deriveComboCatalogModel takes Math.min over member input
+    // ceilings, so a misplaced 128k would collapse a 1M combo window (and its
+    // autoCompact budget) for every other target in the group.
+    const peer = {
+      provider: "xai",
+      id: "grok-4.6",
+      contextWindow: 1_000_000,
+      maxInputTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+      inputModalities: ["text", "image"],
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+    };
+    const derived = deriveComboCatalogModel("claude-grok", normalizedCombo({
+      targets: [
+        { provider: "anthropic", model: "claude-opus-5", weight: 1 },
+        { provider: "xai", model: "grok-4.6", weight: 1 },
+      ],
+    }), [member!, peer]);
+    expect(derived).toMatchObject({
+      contextWindow: 1_000_000,
+      maxInputTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+      autoCompactTokenLimit: 900_000,
+    });
   });
 
   test("still omits combos when synthesis cannot recover hard failures", async () => {
@@ -3355,19 +3442,31 @@ describe("Codex catalog routed normalization", () => {
     expect(projected.some(entry => entry.slug === "daybreak-blue-latest")).toBe(false);
   });
 
-  test("gpt-6-astra is registered ungated with Sol capabilities and no wire normalization", () => {
-    // Leak-based preemptive registration (2026-09-03), ungated 2026-09-04: the slug carries
-    // Sol's capability shape, is NOT entitlement-gated (no roster reports it yet, and gating
-    // therefore hid it everywhere), and goes to the wire AS gpt-6-astra (it is NOT a
-    // Daybreak-style serving alias), so a selection surfaces the real upstream status.
+  test("gpt-6-astra projects its own shipped upstream row, not a borrowed one", () => {
+    // SHIPPED 2026-09-03 (openai/codex ed391d4dd #42607). The slug is SELF-DESCRIBED: its
+    // metadata comes from its own pinned upstream row, not from Sol's. It stays ungated
+    // (rolling out; an unentitled account gets a real upstream refusal rather than a hidden
+    // row) and goes to the wire AS gpt-6-astra — it is NOT a Daybreak-style serving alias.
     expect(NATIVE_GPT6_ASTRA_MODEL).toBe("gpt-6-astra");
     expect(ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(NATIVE_GPT6_ASTRA_MODEL)).toBe(false);
-    expect(nativeOpenAiCapabilitySourceSlug(NATIVE_GPT6_ASTRA_MODEL)).toBe("gpt-5.6-sol");
+    // Self-described: it resolves to itself rather than borrowing a capability source.
+    expect(nativeOpenAiCapabilitySourceSlug(NATIVE_GPT6_ASTRA_MODEL)).toBe(NATIVE_GPT6_ASTRA_MODEL);
     expect(nativeOpenAiContextWindow(NATIVE_GPT6_ASTRA_MODEL)).toBe(272_000);
+    // The shipped ceiling is 872k. Before the pin landed this read 922k, inherited from the
+    // measured GPT-5.6 clamp, which over-advertised the ceiling by 50k.
+    expect(nativeOpenAiContextTier(NATIVE_GPT6_ASTRA_MODEL))
+      .toEqual({ defaultWindow: 272_000, longWindow: 872_000 });
+    // The input ceiling stays clamped to the resolved window: advertising 872k input under a
+    // 272k window is the over-advertising that clamp exists to prevent.
+    expect(nativeOpenAiMaxInputTokens(NATIVE_GPT6_ASTRA_MODEL)).toBe(272_000);
     expect(nativeReasoningEfforts(NATIVE_GPT6_ASTRA_MODEL))
       .toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
     expect(nativeDefaultReasoningEffort(NATIVE_GPT6_ASTRA_MODEL)).toBe("low");
     expect(NATIVE_OPENAI_MODELS).toContain(NATIVE_GPT6_ASTRA_MODEL);
+
+    // The full 5.6-era ladder is what the sync path keys on. Without this, catalog sync takes
+    // the else-branch and truncates the shipped ladder at xhigh, dropping max and ultra.
+    expect(isGpt56NativeSlug(NATIVE_GPT6_ASTRA_MODEL)).toBe(true);
 
     const projected = buildCatalogEntries(
       nativeTemplate(),
@@ -3387,11 +3486,42 @@ describe("Codex catalog routed normalization", () => {
     expect(projected.filter(entry => entry.slug === NATIVE_GPT6_ASTRA_MODEL)).toHaveLength(1);
     expect(projected.filter(entry => entry.slug === `main/${NATIVE_GPT6_ASTRA_MODEL}`)).toHaveLength(1);
 
-    // Its own product identity, not the Daybreak label (review: alias presentation is per-alias).
+    // Its own shipped identity. Cross-checked against the upstream checkout below when present;
+    // these literals are the values that checkout carries at ed391d4dd.
     expect(upstreamNativeEntry(NATIVE_GPT6_ASTRA_MODEL)).toMatchObject({
-      display_name: "GPT-6 Astra",
+      display_name: "GPT-6-Astra",
+      description: "Our most capable model for complex, demanding work.",
+      context_window: 272_000,
+      max_context_window: 872_000,
     });
-    expect(upstreamNativeEntry(NATIVE_GPT6_ASTRA_MODEL)?.description).toContain("leaked API identifier");
+
+    // Widening the pinned-entry lookup must not admit the other pinned slugs: UPSTREAM_NATIVE_ENTRIES
+    // also authorizes replacing persisted rows during sync, which stays reserved for the 5.6 family
+    // plus the two self-described/aliased natives.
+    for (const leaked of ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "codex-auto-review"]) {
+      expect(upstreamNativeEntry(leaked)).toBeNull();
+    }
+
+    // A row this project authored from a guess must be replaceable on sync. The 2026-09-03
+    // speculative release wrote "GPT-6 Astra" with a provisional description onto every install;
+    // those rows look genuine (a real display_name, not the bare slug), so the ordinary
+    // fallback-only upgrade rule would have preserved them forever and permanently shadowed the
+    // shipped metadata.
+    expect(shouldUpgradeToUpstreamEntry({
+      slug: NATIVE_GPT6_ASTRA_MODEL,
+      display_name: "GPT-6 Astra",
+    } as never)).toBe(true);
+    // Once it matches the shipped label there is nothing left to replace.
+    expect(shouldUpgradeToUpstreamEntry({
+      slug: NATIVE_GPT6_ASTRA_MODEL,
+      display_name: "GPT-6-Astra",
+    } as never)).toBe(false);
+    // The escape hatch stays scoped to slugs this project fabricated: a genuine upstream row for
+    // another native is still preserved untouched.
+    expect(shouldUpgradeToUpstreamEntry({
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6-Sol",
+    } as never)).toBe(false);
 
     // Never rewritten to another model on the wire: the leaked slug IS the API id.
     expect(codexAccountGatedCanonicalWireModel(NATIVE_GPT6_ASTRA_MODEL)).toBeUndefined();
@@ -3486,16 +3616,18 @@ describe("Codex catalog routed normalization", () => {
 
     const models = await gatherRoutedModels(forwardConfig);
     const model = models.find(row => row.provider === "openai" && row.id === NATIVE_GPT6_ASTRA_MODEL);
-    // Per-alias presentation (review follow-up): the custom row must not borrow Daybreak's label.
+    // Per-model presentation: the custom row must not borrow Daybreak's label. Astra is
+    // self-described since it shipped, so its label comes from its own pinned upstream row
+    // rather than a hand-written alias entry — the capability inheritance is identical either way.
     expect(model).toMatchObject({
-      displayName: "GPT-6 Astra",
+      displayName: "GPT-6-Astra",
       codexForwardNativeCapabilityAlias: true,
       reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
     });
 
     const entries = buildCatalogEntries(nativeTemplate(), [], models);
     const astra = entries.find(entry => entry.slug === `openai/${NATIVE_GPT6_ASTRA_MODEL}`);
-    expect(astra).toMatchObject({ display_name: "GPT-6 Astra" });
+    expect(astra).toMatchObject({ display_name: "GPT-6-Astra" });
     expect(astra?.base_instructions).toContain("powered by the gpt-6-astra");
     expect(astra?.base_instructions).not.toContain("daybreak");
   });

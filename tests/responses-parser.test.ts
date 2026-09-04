@@ -187,15 +187,16 @@ describe("Responses parser", () => {
     let maps = buildToolBridgeMaps(parsed);
     expect([...maps.toolNsMap]).toEqual([
       ["mcp__tools__safe", { namespace: "mcp__tools", name: "safe" }],
+      ["mcp__tools.safe", { namespace: "mcp__tools", name: "safe" }],
     ]);
-    expect([...maps.declaredToolNames]).toEqual(["mcp__tools__safe", "apply_patch"]);
+    expect([...maps.declaredToolNames]).toEqual(["mcp__tools__safe", "mcp__tools.safe", "apply_patch"]);
     expect([...maps.freeformToolNames]).toEqual(["apply_patch"]);
     expect([...maps.toolSearchToolNames]).toEqual([]);
 
     parsed.options.toolChoice = { allowedTools: ["mcp__tools__safe"], mode: "required" };
     maps = buildToolBridgeMaps(parsed);
-    expect([...maps.toolNsMap.keys()]).toEqual(["mcp__tools__safe"]);
-    expect([...maps.declaredToolNames]).toEqual(["mcp__tools__safe"]);
+    expect([...maps.toolNsMap.keys()]).toEqual(["mcp__tools__safe", "mcp__tools.safe"]);
+    expect([...maps.declaredToolNames]).toEqual(["mcp__tools__safe", "mcp__tools.safe"]);
     expect([...maps.freeformToolNames]).toEqual([]);
 
     parsed.options.toolChoice = { name: "tool_search" };
@@ -232,9 +233,10 @@ describe("Responses parser", () => {
     let maps = buildToolBridgeMaps(parsed);
     expect([...maps.toolNsMap]).toEqual([
       ["mcp__functions__exec", { namespace: "mcp__functions", name: "exec", freeform: true }],
+      ["mcp__functions.exec", { namespace: "mcp__functions", name: "exec", freeform: true }],
       ["exec", { namespace: "mcp__functions", name: "exec", freeform: true }],
     ]);
-    expect([...maps.declaredToolNames]).toEqual(["mcp__functions__exec", "exec"]);
+    expect([...maps.declaredToolNames]).toEqual(["mcp__functions__exec", "mcp__functions.exec", "exec"]);
     expect([...maps.freeformToolNames]).toEqual(["exec"]);
 
     const bridged = buildResponseJSON([
@@ -254,7 +256,7 @@ describe("Responses parser", () => {
 
     parsed.options.toolChoice = { name: "exec" };
     maps = buildToolBridgeMaps(parsed);
-    expect([...maps.toolNsMap.keys()]).toEqual(["mcp__functions__exec", "exec"]);
+    expect([...maps.toolNsMap.keys()]).toEqual(["mcp__functions__exec", "mcp__functions.exec", "exec"]);
 
     expect(() => parseRequest({
       model: "claude-opus-5",
@@ -791,5 +793,61 @@ describe("codex-rs compat surface (260707)", () => {
       ?.find(part => part.type === "toolCall");
     expect(call?.name).toBe("apply_patch");
     expect(call?.namespace).toBeUndefined();
+  });
+});
+
+describe("unpaired tool result boundary (#3259)", () => {
+  // The real delegation-history shape that produced the defect: a subagent bootstrap turn
+  // whose FIRST tool result has no originating call in the same request.
+  const delegationHistory = (toolItem: Record<string, unknown>) => ({
+    model: "test-model",
+    input: [
+      { type: "message", role: "developer", content: [{ type: "input_text", text: "You are a subagent." }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "do the task" }] },
+      toolItem,
+    ],
+  });
+
+  const toolResultOf = (item: Record<string, unknown>) =>
+    parseRequest(delegationHistory(item)).context.messages.find(m => m.role === "toolResult") as
+      | { toolCallId?: unknown; content?: unknown }
+      | undefined;
+
+  test("a function_call_output with no call_id still parses, and yields an unusable toolCallId", () => {
+    // This is the state src/server/responses/core.ts guards on. `toolCallId` is declared
+    // `string` (src/types/request.ts:168) but is undefined here — the schema catch-all
+    // (schema.ts:106) accepted the item and parser.ts:738 assigned it unchecked.
+    const result = toolResultOf({ type: "function_call_output", output: "bootstrap result" });
+    expect(result).toBeDefined();
+    expect(typeof result?.toolCallId).not.toBe("string");
+  });
+
+  test("an empty-string call_id is equally unusable", () => {
+    // findToolById (parser.ts:328) matches by identity, so "" can never pair. The guard
+    // must treat it exactly like undefined.
+    const result = toolResultOf({ type: "function_call_output", call_id: "", output: "x" });
+    expect(result?.toolCallId).toBe("");
+  });
+
+  test("a well-formed tool result on the same history pairs normally", () => {
+    const result = toolResultOf({ type: "function_call_output", call_id: "call_1", output: "ok" });
+    expect(result).toMatchObject({ toolCallId: "call_1", content: "ok" });
+  });
+
+  test("custom_tool_call_output has the identical hole (parser.ts:752)", () => {
+    const result = toolResultOf({ type: "custom_tool_call_output", output: "x" });
+    expect(result).toBeDefined();
+    expect(typeof result?.toolCallId).not.toBe("string");
+  });
+
+  test("tolerances unrelated to call_id stay intact", () => {
+    // parser.ts:611-621 deliberately tolerates non-JSON arguments; nothing here may 400 it.
+    expect(() => parseRequest(delegationHistory({
+      type: "function_call", call_id: "c1", name: "shell", arguments: "not json",
+    }))).not.toThrow();
+    // Unknown future item types must keep flowing through the catch-all untouched.
+    expect(() => parseRequest(delegationHistory({
+      type: "brand_new_item_2027", foo: 1,
+    }))).not.toThrow();
   });
 });

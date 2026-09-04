@@ -305,6 +305,15 @@ does not set `modelResponsesUpstreamStreaming`: client `stream: true` remains re
 streaming until a current-runtime reproduction justifies a separate bounded-JSON compatibility
 policy.
 
+The canonical OpenCode Go transport also derives `x-opencode-session` from the existing hashed
+session lane before per-model wire selection. One conversation keeps one opaque affinity value
+across Responses, Chat, retries, and key rotation, while sibling subagents remain distinct. An
+operator-supplied header wins case-insensitively. Renamed providers are covered only when their
+fixed key-auth destination still matches the registry; custom and lookalike URLs receive nothing.
+Muse Spark's Responses sanitizer also drops the provider-rejected `search_content_types` and
+`indexed_web_access` fields from plain `web_search` tools while preserving preview tools and
+unrelated models.
+
 [Decision Log]
 - 목적과 의도: Match OpenCode Go's model-specific Luna endpoint without changing sibling model behavior.
 - 기존 구현 및 제약 조건: The preset had one Chat default even though the upstream publishes a mixed Chat, Responses, and Anthropic matrix; operators must retain explicit override precedence.
@@ -312,6 +321,14 @@ policy.
 - 선택한 방식: Use one exact Luna wire default and leave upstream streaming unchanged.
 - 다른 대안 대신 이 방식을 선택한 이유: The endpoint mismatch is reproducible from current code and upstream documentation, whereas a current-dev live canary has not established the separate terminal-delivery policy.
 - 장점, 단점 및 영향: Luna reaches its documented endpoint across inbound surfaces and explicit opt-out still works; any future stream workaround remains a separately reviewed compatibility decision.
+
+[Decision Log]
+- 목적과 의도: Give OpenCode Go the stable per-conversation header it requires for prompt-cache routing without exposing raw Codex identifiers.
+- 기존 구현 및 제약 조건: Codex already supplies task and subagent identity, but Go requests reached every adapter without `x-opencode-session`; one static provider header would collapse unrelated conversations.
+- 검토한 주요 대안: Forward a raw thread header; reuse `prompt_cache_key`; configure one global value; inject separately in Chat and Responses adapters; enrich the canonical provider before wire selection.
+- 선택한 방식: Hash the existing parent-qualified session lane with a provider-specific domain, attach it as runtime-only provider metadata before wire selection, and preserve an explicit operator override.
+- 다른 대안 대신 이 방식을 선택한 이유: The lane already separates sibling subagents, while cache keys may represent shared cohorts and adapter-local changes would drift across Go's mixed wire matrix.
+- 장점, 단점 및 영향: Go requests gain stable opaque affinity across normal retries and key rotation without persisted config changes; requests with no stable lane remain headerless rather than receiving a per-request value that defeats affinity.
 
 ### Passthrough SSE stream shapes (#314)
 

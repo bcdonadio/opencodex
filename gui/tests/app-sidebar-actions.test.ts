@@ -14,10 +14,7 @@ const src = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 const css = await Bun.file(new URL("../src/styles.css", import.meta.url)).text();
 
 test("the sidebar foot pairs stop with restart-Codex", () => {
-  // The runtime-action row is the second .sidebar-foot-row (the first holds preferences).
-  const first = src.indexOf('className="sidebar-foot-row"');
-  const start = src.indexOf('className="sidebar-foot-row"', first + 1);
-  const row = src.slice(start, src.indexOf("</div>", src.indexOf("IconRefresh", start)));
+  const row = src.slice(src.indexOf('className="sidebar-action-row"'), src.indexOf("</div>", src.indexOf('className="sidebar-action-orbs"')));
   expect(row).toContain("handleStop");
   expect(row).toContain("handleCodexRestart");
   expect(row).toContain("IconPower");

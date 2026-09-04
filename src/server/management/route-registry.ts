@@ -169,6 +169,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   // server/management/integration-routes
   { method: "GET", path: "/api/client-integrations", module: "server/management/integration-routes", mutates: false },
   { method: "GET", path: "/api/client-integrations/journal", module: "server/management/integration-routes", mutates: false },
+  { method: "DELETE", path: "/api/client-integrations/journal", module: "server/management/integration-routes", mutates: true, exempt: { reason: "deferred-verb", why: "Retiring one rollback row is a dashboard-local cleanup; the CLI verb that would drive it is owed by a later work-phase and is not implemented here.", owner: "260904_priority65_closeout WP7", ownerDoc: "devlog/_plan/260904_priority65_closeout/060_wp7_rollback_journal_crud.md" } },
   { method: "POST", path: "/api/client-integrations/restore", module: "server/management/integration-routes", mutates: true },
   // server/management/lab-automation-routes
   { method: "GET", path: "/api/lab/automation", module: "server/management/lab-automation-routes", mutates: false, exempt: { reason: "local-transport", why: "ocx lab reads the same rows from the local SQLite projection; src/cli/lab.ts imports ../lab/query directly and never fetches /api/lab." } },

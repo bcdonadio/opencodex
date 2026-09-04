@@ -209,7 +209,6 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       {status && <Notice tone={ok ? "ok" : "err"}>{status}</Notice>}
       {state.showError && <Notice tone="err">{t("sub.loadFail")}</Notice>}
       <SubagentsWorkspace
-        apiBase={apiBase}
         available={available}
         chosen={chosen}
         busy={busy}

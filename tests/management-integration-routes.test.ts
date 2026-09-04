@@ -188,6 +188,7 @@ interface JournalRow {
   configPath: string;
   snapshot: "none" | "stored" | "expired";
   undoable: boolean;
+  deletable: boolean;
 }
 
 async function journal(query = ""): Promise<JournalRow[]> {
@@ -872,7 +873,7 @@ describe("GET /api/client-integrations/journal", () => {
     const text = await (await api("/api/client-integrations/journal")).text();
     for (const row of JSON.parse(text).operations as Record<string, unknown>[]) {
       expect(Object.keys(row).sort()).toEqual([
-        "at", "clientId", "configPath", "kind", "opId", "snapshot", "undoable",
+        "at", "clientId", "configPath", "deletable", "kind", "opId", "snapshot", "undoable",
       ]);
     }
     // The snapshots on disk really do hold the serializable secret, so "no key

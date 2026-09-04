@@ -2600,6 +2600,115 @@ describe("codex-auth API", () => {
     }
   });
 
+  test("the main account DTO keeps its resetCredits when a later WHAM usage omits the summary", async () => {
+    // /wham/usage carries rate_limit_reset_credits only intermittently. Pool DTOs survive
+    // that because they re-read the merged store; the main DTO used to serialize the raw
+    // parse result, so the ticket badge disappeared on every response that omitted it.
+    writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+      tokens: { access_token: "main-dto-credits", account_id: "acct-main-dto-credits" },
+    }));
+    reconcileMainCodexAccountRuntimeState();
+    const originalFetch = globalThis.fetch;
+    let includeCredits = true;
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/backend-api/wham/usage")) {
+          return Response.json({
+            email: "main@example.test",
+            plan_type: "pro",
+            rate_limit: { primary_window: { used_percent: 28, reset_at: 1788749167 } },
+            ...(includeCredits ? { rate_limit_reset_credits: { available_count: 1 } } : {}),
+          });
+        }
+        return originalFetch(input);
+      }) as typeof fetch;
+
+      const first = await listCodexAuthAccounts(makeConfig(), true);
+      expect(first.find(a => a.id === MAIN_CODEX_ACCOUNT_ID)!.quota?.resetCredits).toBe(1);
+
+      includeCredits = false;
+      const second = await listCodexAuthAccounts(makeConfig(), true);
+      const main = second.find(a => a.id === MAIN_CODEX_ACCOUNT_ID)!;
+      expect(main.quota?.resetCredits).toBe(1);
+      expect(main.quota?.weeklyPercent).toBe(28);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("the main account DTO never carries resetCredits across a main identity change", async () => {
+    // `__main__` is an alias: ~/.codex/auth.json can be swapped for another physical
+    // ChatGPT account, so a carried ticket count must be bound to the identity it was read
+    // from or one account's credits show up on another's card.
+    writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+      tokens: { access_token: "main-ident-a", account_id: "acct-main-ident-a" },
+    }));
+    reconcileMainCodexAccountRuntimeState();
+    const originalFetch = globalThis.fetch;
+    let includeCredits = true;
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/backend-api/wham/usage")) {
+          return Response.json({
+            email: "main@example.test",
+            plan_type: "pro",
+            rate_limit: { primary_window: { used_percent: 40, reset_at: 1788749167 } },
+            ...(includeCredits ? { rate_limit_reset_credits: { available_count: 5 } } : {}),
+          });
+        }
+        return originalFetch(input);
+      }) as typeof fetch;
+
+      const first = await listCodexAuthAccounts(makeConfig(), true);
+      expect(first.find(a => a.id === MAIN_CODEX_ACCOUNT_ID)!.quota?.resetCredits).toBe(5);
+
+      // The operator signs in as a different physical account and the next usage response
+      // happens not to carry the summary.
+      writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+        tokens: { access_token: "main-ident-b", account_id: "acct-main-ident-b" },
+      }));
+      includeCredits = false;
+      const second = await listCodexAuthAccounts(makeConfig(), true);
+      const main = second.find(a => a.id === MAIN_CODEX_ACCOUNT_ID)!;
+      expect(main.quota?.resetCredits).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("a freshly parsed main resetCredits of zero overrides the stored value", async () => {
+    // Zero is a real reading, not an absence: the DTO fill must never resurrect a stale
+    // non-zero ticket count over it.
+    writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
+      tokens: { access_token: "main-dto-zero", account_id: "acct-main-dto-zero" },
+    }));
+    reconcileMainCodexAccountRuntimeState();
+    updateAccountQuota(MAIN_CODEX_ACCOUNT_ID, undefined, undefined, undefined, undefined, 3);
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/backend-api/wham/usage")) {
+          return Response.json({
+            email: "main@example.test",
+            plan_type: "pro",
+            rate_limit: { primary_window: { used_percent: 10, reset_at: 1788749167 } },
+            rate_limit_reset_credits: { available_count: 0 },
+          });
+        }
+        return originalFetch(input);
+      }) as typeof fetch;
+
+      const accounts = await listCodexAuthAccounts(makeConfig(), true);
+      const main = accounts.find(account => account.id === MAIN_CODEX_ACCOUNT_ID)!;
+      expect(main.quota?.resetCredits).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("reset-credit consume omits remaining when main WHAM refresh is non-2xx", async () => {
     writeFileSync(join(TEST_CODEX_HOME, "auth.json"), JSON.stringify({
       tokens: { access_token: "main-reset-fail", account_id: "acct-main-reset-fail" },
@@ -2707,6 +2816,291 @@ describe("codex-auth API", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  // #3375 axis D: an optional caller-owned `operationId` gives one logical manual
+  // redemption a stable identity, so a retried request cannot spend a second
+  // irreversible credit. Absent the field, the legacy random-id path must be byte
+  // identical -- that is what keeps the existing consume tests above meaningful.
+  describe("reset-credit consume operation identity", () => {
+    const OP_ID = "11111111-1111-4111-8111-111111111111";
+    const OTHER_OP_ID = "22222222-2222-4222-9222-222222222222";
+
+    function consumeRequest(body: Record<string, unknown>): Request {
+      return new Request("http://localhost/api/codex-auth/reset-credits/consume", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    /** Records every upstream consume dispatch so double-spend is directly countable. */
+    function stubUpstream(consume: (redeemRequestId: string, call: number) => Response): {
+      redeemRequestIds: string[];
+      calls: () => number;
+    } {
+      const redeemRequestIds: string[] = [];
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/backend-api/wham/rate-limit-reset-credits/consume")) {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as { redeem_request_id?: string };
+          redeemRequestIds.push(String(parsed.redeem_request_id));
+          return consume(String(parsed.redeem_request_id), redeemRequestIds.length);
+        }
+        if (url.includes("/backend-api/wham/usage")) {
+          return Response.json({
+            rate_limit: { primary_window: { used_percent: 10, reset_at: 1782000000 } },
+            rate_limit_reset_credits: { available_count: 2 },
+          });
+        }
+        return originalFetch(input, init);
+      }) as typeof fetch;
+      return { redeemRequestIds, calls: () => redeemRequestIds.length };
+    }
+
+    test("R1/R2: replaying one operationId spends a single upstream credit", async () => {
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-idem", email: "idem@example.test" });
+      const upstream = stubUpstream(() => Response.json({ code: "reset" }));
+      try {
+        const first = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-idem", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(first!.status).toBe(200);
+        expect(await first!.json()).toEqual({ code: "reset", remaining: 2 });
+
+        const second = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-idem", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(second!.status).toBe(200);
+        // Replayed from the durable ledger: no fresh available_count, so no remaining.
+        expect(await second!.json()).toEqual({ code: "reset", replayed: true });
+
+        // The whole point of this unit. A second dispatch is a second lost credit.
+        expect(upstream.calls()).toBe(1);
+        expect(upstream.redeemRequestIds[0]).toBe(OP_ID);
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    });
+
+    test("R3: without operationId the legacy random-id path is unchanged", async () => {
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-legacy", email: "legacy@example.test" });
+      const upstream = stubUpstream(() => Response.json({ code: "reset" }));
+      try {
+        for (let i = 0; i < 2; i += 1) {
+          const resp = await handleCodexAuthAPI(
+            consumeRequest({ accountId: "pool-legacy" }),
+            new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+            config,
+          );
+          expect(resp!.status).toBe(200);
+          expect(await resp!.json()).toEqual({ code: "reset", remaining: 2 });
+        }
+        expect(upstream.calls()).toBe(2);
+        expect(upstream.redeemRequestIds[0]).not.toBe(upstream.redeemRequestIds[1]);
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    });
+
+    test("R4: a malformed operationId is refused before the ledger or upstream is touched", async () => {
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-badid", email: "badid@example.test" });
+      const upstream = stubUpstream(() => Response.json({ code: "reset" }));
+      try {
+        // The ledger throws TypeError on a malformed id, so validating late would
+        // surface a 500 with a stack trace instead of a contract error.
+        for (const operationId of ["not-a-uuid", "", 42, null, {}]) {
+          const resp = await handleCodexAuthAPI(
+            consumeRequest({ accountId: "pool-badid", operationId }),
+            new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+            config,
+          );
+          expect(resp!.status).toBe(400);
+          expect(await resp!.json()).toMatchObject({ error: "Invalid operationId format" });
+        }
+        expect(upstream.calls()).toBe(0);
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    });
+
+    test("R5: an operationId owned by another account is refused with 409", async () => {
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-owner", email: "owner@example.test", chatgptAccountId: "acct-owner" });
+      seedPoolAccount(config, { id: "pool-other", email: "other@example.test", chatgptAccountId: "acct-other" });
+      const upstream = stubUpstream(() => Response.json({ code: "reset" }));
+      try {
+        const first = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-owner", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(first!.status).toBe(200);
+
+        const stolen = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-other", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(stolen!.status).toBe(409);
+        expect(await stolen!.json()).toEqual({
+          error: "operation_id_owned_by_another_account",
+          code: "identity_mismatch",
+        });
+        expect(upstream.calls()).toBe(1);
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    });
+
+    test("R6: retrying after an upstream failure reuses the same redeem_request_id", async () => {
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-retry", email: "retry@example.test" });
+      const upstream = stubUpstream((_id, call) => call === 1
+        ? new Response("upstream down", { status: 500 })
+        : Response.json({ code: "reset" }));
+      try {
+        const failed = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-retry", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(failed!.status).toBe(500);
+
+        const retried = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-retry", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(retried!.status).toBe(200);
+
+        expect(upstream.calls()).toBe(2);
+        // Ambiguous first dispatch: the retry must present the SAME id so upstream
+        // can recognize it, rather than opening a fresh double-spend window.
+        expect(upstream.redeemRequestIds[0]).toBe(OP_ID);
+        expect(upstream.redeemRequestIds[1]).toBe(OP_ID);
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    });
+
+    test("a distinct id retried while the first is pending keeps the original durable id", async () => {
+      // Alias join: the ledger keeps the canonical id for the upstream call and
+      // records the new caller id in history. Sending the new id instead would
+      // present upstream with an unseen key and spend a second credit.
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-alias", email: "alias@example.test" });
+      const upstream = stubUpstream((_id, call) => call === 1
+        ? new Response("upstream down", { status: 500 })
+        : Response.json({ code: "reset" }));
+      try {
+        await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-alias", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        const retried = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-alias", operationId: OTHER_OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(retried!.status).toBe(200);
+        expect(upstream.redeemRequestIds).toEqual([OP_ID, OP_ID]);
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    });
+
+    test("an unknown upstream code stays ambiguous instead of settling the ledger", async () => {
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-weird", email: "weird@example.test" });
+      const upstream = stubUpstream(() => Response.json({ code: "weird" }));
+      try {
+        const first = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-weird", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(first!.status).toBe(200);
+        expect(await first!.json()).toEqual({ code: "weird" });
+
+        // Not terminal, so the same id resumes rather than replaying a stored code.
+        const second = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-weird", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+        expect(second!.status).toBe(200);
+        expect(upstream.redeemRequestIds).toEqual([OP_ID, OP_ID]);
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    });
+
+    test("A6: an unusable ledger fails closed rather than falling back to a random id", async () => {
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-nodb", email: "nodb@example.test" });
+      const upstream = stubUpstream(() => Response.json({ code: "reset" }));
+      // A directory where the ledger expects its SQLite file: the open fails the
+      // way a corrupt file or lost permission would, without mocking the module.
+      // Seeding the account already created the real database, so replace it.
+      rmSync(join(TEST_DIR, "config-mutation.sqlite"), { recursive: true, force: true });
+      mkdirSync(join(TEST_DIR, "config-mutation.sqlite"), { recursive: true });
+      try {
+        const resp = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-nodb", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+
+        expect(resp!.status).toBe(503);
+        expect(resp!.headers.get("Retry-After")).toBe("1");
+        expect(await resp!.json()).toEqual({
+          error: "reset_credit_ledger_unavailable",
+          code: "unavailable",
+        });
+        // The point of failing closed: a caller who asked for idempotency must
+        // never have the request silently downgraded to an unprotected spend.
+        expect(upstream.calls()).toBe(0);
+      } finally {
+        globalThis.fetch = previousFetch;
+        rmSync(join(TEST_DIR, "config-mutation.sqlite"), { recursive: true, force: true });
+      }
+    });
+
+    test("A7: a settlement failure does not downgrade a spend that already happened", async () => {
+      const config = makeConfig();
+      seedPoolAccount(config, { id: "pool-settlefail", email: "settlefail@example.test" });
+      // Break the ledger between open and settle: the credit is gone upstream, so
+      // reporting failure here would invite the retry this unit exists to remove.
+      const upstream = stubUpstream(() => {
+        rmSync(join(TEST_DIR, "config-mutation.sqlite"), { force: true });
+        mkdirSync(join(TEST_DIR, "config-mutation.sqlite"), { recursive: true });
+        return Response.json({ code: "reset" });
+      });
+      try {
+        const resp = await handleCodexAuthAPI(
+          consumeRequest({ accountId: "pool-settlefail", operationId: OP_ID }),
+          new URL("http://localhost/api/codex-auth/reset-credits/consume"),
+          config,
+        );
+
+        expect(resp!.status).toBe(200);
+        expect(await resp!.json()).toMatchObject({ code: "reset" });
+        expect(upstream.calls()).toBe(1);
+      } finally {
+        globalThis.fetch = previousFetch;
+        rmSync(join(TEST_DIR, "config-mutation.sqlite"), { recursive: true, force: true });
+      }
+    });
   });
 
   test("unmatched route returns null", async () => {

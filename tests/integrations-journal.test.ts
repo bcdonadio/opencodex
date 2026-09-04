@@ -390,3 +390,117 @@ describe("the operation-kind union agrees across the three trees that redeclare 
     }
   });
 });
+
+/**
+ * Deletion as an APPEND (devlog/_plan/260904_priority65_closeout/060 §2.2).
+ *
+ * The naive implementation rewrites journal.jsonl without the row, which breaks
+ * the three things this file's header promises. These tests pin the tombstone
+ * shape instead: the physical line survives, a later record retires it, and the
+ * public reader never leaks the retirement record into `JournalEntry[]`.
+ */
+describe("tombstones retire a row without rewriting the log", () => {
+  test("a retired row disappears from list and find, and the file only grew", () => {
+    store.appendJournal(entry({ opId: "keep-me" }));
+    store.appendJournal(entry({ opId: "retire-me" }));
+    const before = readFileSync(join(root, "journal.jsonl"), "utf8");
+
+    store.retireOperation({ tombstone: "retire-me", at: new Date().toISOString(), by: "gui-session" });
+
+    expect(store.listOperations().map(row => row.opId)).toEqual(["keep-me"]);
+    expect(store.findOperation("retire-me")).toBeNull();
+    expect(store.findOperation("keep-me")).not.toBeNull();
+
+    // The log is append-only: every prior byte is still there, in order.
+    const after = readFileSync(join(root, "journal.jsonl"), "utf8");
+    expect(after.startsWith(before)).toBe(true);
+    expect(after.length).toBeGreaterThan(before.length);
+    // And the retired row's own line was never touched.
+    expect(after).toContain('"opId":"retire-me"');
+  });
+
+  test("the tombstone never leaks into the JournalEntry stream", () => {
+    /*
+     * The retirement record has no clientId and no kind. If it reached a
+     * consumer it would render as an unknown row with a raw i18n key and no
+     * type error anywhere -- exactly the failure the three-tree union test
+     * upstream exists to prevent for kinds.
+     */
+    store.appendJournal(entry({ opId: "a" }));
+    store.retireOperation({ tombstone: "a", at: new Date().toISOString(), by: "admin-token" });
+
+    for (const row of store.listOperations(undefined, Number.MAX_SAFE_INTEGER)) {
+      expect(row).not.toHaveProperty("tombstone");
+      expect(typeof row.clientId).toBe("string");
+    }
+    expect(store.listOperations()).toEqual([]);
+  });
+
+  test("a tombstone hides the row on the per-client read too", () => {
+    /*
+     * The tombstone carries an opId, not a clientId, so a pass that filtered by
+     * client BEFORE collecting tombstones would drop it and resurrect the row on
+     * the filtered route while the global route hid it. The two routes read the
+     * same log and must agree.
+     */
+    store.appendJournal(entry({ opId: "pi-a", clientId: "pi" }));
+    store.appendJournal(entry({ opId: "pi-b", clientId: "pi" }));
+    store.appendJournal(entry({ opId: "kimi-a", clientId: "kimi" }));
+    store.retireOperation({ tombstone: "pi-a", at: new Date().toISOString(), by: "gui-session" });
+
+    expect(store.listOperations("pi").map(row => row.opId)).toEqual(["pi-b"]);
+    expect(store.listOperations().map(row => row.opId)).toEqual(["kimi-a", "pi-b"]);
+    // Another client's rows are untouched.
+    expect(store.listOperations("kimi").map(row => row.opId)).toEqual(["kimi-a"]);
+  });
+
+  test("order and newest-first survive a retirement in the middle", () => {
+    for (const opId of ["one", "two", "three", "four"]) store.appendJournal(entry({ opId }));
+    store.retireOperation({ tombstone: "three", at: new Date().toISOString(), by: "gui-session" });
+    expect(store.listOperations().map(row => row.opId)).toEqual(["four", "two", "one"]);
+  });
+
+  test("a log with no tombstones reads exactly as before", () => {
+    // The fast path. Adding a filter that ran unconditionally would be the
+    // cheapest possible way to change every existing read.
+    store.appendJournal(entry({ opId: "x" }));
+    store.appendJournal(entry({ opId: "y" }));
+    expect(store.listOperations().map(row => row.opId)).toEqual(["y", "x"]);
+  });
+
+  test("a retired row stops occupying a retention slot", () => {
+    /*
+     * Documented fallout, not an accident (060 §3.1 consumer 3). `pruneSnapshots`
+     * builds its keep set from `listOperations`, so retiring one row slides the
+     * slice(0, N) window down by one and an older backup that was next in line
+     * for collection is kept instead. The direction is safe -- snapshots survive
+     * LONGER, never disappear early -- but "ten backups per client" now means ten
+     * LIVE rows, not ten operations.
+     */
+    const opIds: string[] = [];
+    for (let index = 0; index < SNAPSHOT_RETENTION; index += 1) {
+      const opId = `op-${String(index).padStart(3, "0")}`;
+      opIds.push(opId);
+      const snapshot = store.captureSnapshot("pi", opId, `bytes ${index}\n`);
+      store.appendJournal(entry({ opId, snapshot }));
+    }
+    // Exactly at the bound: every backup is still on disk, none collected yet.
+    expect(store.countSnapshots("pi")).toBe(SNAPSHOT_RETENTION);
+    const oldest = opIds[0]!;
+
+    // Retire a row in the middle, then perform one more operation. Without the
+    // retirement this eleventh backup evicts `oldest`; with it, the live count
+    // is still ten, so `oldest` keeps its slot and the retired row's bytes are
+    // what get collected instead.
+    store.retireOperation({ tombstone: opIds[5]!, at: new Date().toISOString(), by: "gui-session" });
+    const snapshot = store.captureSnapshot("pi", "op-new", "bytes new\n");
+    store.appendJournal(entry({ opId: "op-new", snapshot }));
+
+    expect(store.listOperations("pi", Number.MAX_SAFE_INTEGER)).toHaveLength(SNAPSHOT_RETENTION);
+    expect(store.countSnapshots("pi")).toBe(SNAPSHOT_RETENTION);
+    // The retired row's backup went; the oldest survivor kept the freed slot.
+    expect(existsSync(join(root, "snapshots", "pi", opIds[5]!))).toBe(false);
+    expect(existsSync(join(root, "snapshots", "pi", oldest))).toBe(true);
+    expect(existsSync(join(root, "snapshots", "pi", "op-new"))).toBe(true);
+  });
+});

@@ -10,6 +10,7 @@ import {
   rotateKeyOn429,
   rotateProviderTransportOn429,
 } from "../src/providers/key-failover";
+import { resolveOpenCodeGoTransport } from "../src/providers/opencode-go-transport";
 import { deriveXaiConvId } from "../src/providers/xai-transport";
 import { routeModel } from "../src/router";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../src/types";
@@ -133,6 +134,36 @@ describe("rotateKeyOn429", () => {
 });
 
 describe("rotateProviderTransportOn429", () => {
+  test("preserves OpenCode Go session affinity across key rotation", () => {
+    const config = makeConfig({
+      authMode: "key",
+      apiKey: "key-alpha-000111222333",
+      apiKeyPool: pool3(),
+    });
+    config.defaultProvider = "opencode-go";
+    config.providers["opencode-go"] = {
+      ...config.providers.p,
+      baseUrl: "https://opencode.ai/zen/go/v1",
+    };
+    delete config.providers.p;
+
+    const initial = resolveOpenCodeGoTransport(
+      config.providers["opencode-go"],
+      "hashed-parent\0hashed-child",
+    );
+    const initialSession = initial.headers?.["x-opencode-session"];
+    expect(initialSession).toMatch(/^ocx_[0-9a-f]{32}$/);
+
+    const rotated = rotateProviderTransportOn429(config, "opencode-go", initial, {
+      now: 1_000_000,
+      attemptedKey: "key-alpha-000111222333",
+    });
+
+    expect(rotated?.apiKey).toBe("key-beta-444555666777");
+    expect(rotated?.headers?.["x-opencode-session"]).toBe(initialSession);
+    expect(config.providers["opencode-go"].headers?.["x-opencode-session"]).toBeUndefined();
+  });
+
   test("keeps Kimi prompt-cache forwarding after rotating a stale pre-upgrade config", () => {
     const promptCacheKey = "stable-kimi-conversation-429";
     const config = makeConfig({

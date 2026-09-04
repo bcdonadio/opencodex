@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useDataSurface, type DataSurfaceResource } from "../../data-surface";
+import { useDataSurface } from "../../data-surface";
 import { DataSurfaceSkeleton } from "../../components/data-surface";
 import { navigateHash } from "../../hash-routing";
 import { useT } from "../../i18n/shared";
@@ -28,6 +28,7 @@ import {
   loadIntegrationJournal,
   loadIntegrationStates,
   toggleIntegration,
+  deleteJournalEntry,
   type IntegrationJournalRow,
   type IntegrationStatus,
 } from "./integration-api";
@@ -169,21 +170,16 @@ function OverviewCard({
 export default function IntegrationsOverview({
   apiBase,
   active = true,
-  statesResource,
 }: {
   apiBase: string;
   active?: boolean;
-  /**
-   * The file-client state list, owned by the Integrations page (it also drives which
-   * tabs are primary). Lifted rather than subscribed twice so there is exactly one
-   * owner of the fetch regardless of tab timing.
-   */
-  statesResource: DataSurfaceResource<IntegrationStatus[]>;
 }) {
   const t = useT();
   const [bulkPending, setBulkPending] = useState(false);
   const [bulkResult, setBulkResult] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const [restoring, setRestoring] = useState<IntegrationJournalRow | null>(null);
+  /* The row awaiting delete confirmation. */
+  const [deleting, setDeleting] = useState<IntegrationJournalRow | null>(null);
   const [cardResults, setCardResults] = useState<Partial<Record<OverviewRow["id"], { tone: "ok" | "err"; text: string }>>>({});
   const [pendingToggle, setPendingToggle] = useState<OverviewRow | null>(null);
   /* The conflicted row awaiting overwrite confirmation. */
@@ -198,6 +194,10 @@ export default function IntegrationsOverview({
     if (trigger.isConnected) trigger.focus();
   }, [pendingToggle]);
 
+  const fetchStates = useCallback(
+    async (signal: AbortSignal) => (await loadIntegrationStates(apiBase, signal)).clients,
+    [apiBase],
+  );
   const fetchHistory = useCallback(
     async (signal: AbortSignal) => (await loadIntegrationJournal(apiBase, undefined, signal)).operations,
     [apiBase],
@@ -238,6 +238,12 @@ export default function IntegrationsOverview({
     [apiBase],
   );
 
+  const statesResource = useDataSurface<IntegrationStatus[]>(
+    `integration-states:${apiBase}`,
+    [apiBase],
+    fetchStates,
+    { isEmpty: rows => rows.length === 0, enabled: active, sessionCacheKey: `ocx.integrations.states.v1:${apiBase}` },
+  );
   const historyResource = useDataSurface<IntegrationJournalRow[]>(
     `integration-journal-all:${apiBase}`,
     [apiBase],
@@ -331,23 +337,6 @@ export default function IntegrationsOverview({
     nativeSettled,
   });
   const counts = countOverviewRows(rows);
-  // Installed (or applied, or not a file client at all) rows are the grid; the rest fold.
-  const presentRows = rows.filter(row => row.installed || row.applied || row.status === null);
-  const presentIds = new Set(presentRows.map(row => row.id));
-  const absentRows = rows.filter(row => !presentIds.has(row.id));
-  const renderCard = (row: (typeof rows)[number]) => (
-    <OverviewCard
-      key={row.id}
-      row={row}
-      pending={cardPending !== null}
-      result={cardResults[row.id] ?? null}
-      onOpen={() => navigateHash(row.hash)}
-      onToggle={row.toggle ? () => requestToggle(row, !(row.toggleOn ?? row.applied)) : null}
-      onOverwrite={row.status !== null && row.status.state === "conflict" && row.installed
-        ? () => setPendingOverwrite(row)
-        : null}
-    />
-  );
 
   /*
    * `refresh()` on the resource layer is deliberately fire-and-forget: it
@@ -430,6 +419,7 @@ export default function IntegrationsOverview({
       : { tone: "err", text: t("integrations.bulk.partial", { clients: failed.join("; ") }) });
   };
 
+  const lastChange = history[0]?.at;
 
   /*
    * The card carries its own switch. Sending the user to a sub-page to flip
@@ -551,6 +541,10 @@ export default function IntegrationsOverview({
             <strong>{counts.unknown}</strong>
           </div>
         )}
+        <div className="integration-summary-cell">
+          <span className="integration-summary-label">{t("integrations.summary.lastChange")}</span>
+          <strong>{lastChange ? new Date(lastChange).toLocaleString() : t("integrations.status.unknown")}</strong>
+        </div>
         <button
           type="button"
           className="btn btn-ghost"
@@ -602,23 +596,21 @@ export default function IntegrationsOverview({
           <p className="page-sub">{t("common.loading")}</p>
         )
       ) : (
-        <>
-          <ul className="integration-cards">
-            {presentRows.map(row => renderCard(row))}
-          </ul>
-          {/*
-            Clients that are not on this machine are inventory, not decisions. They stay
-            discoverable behind one disclosure instead of doubling the grid.
-          */}
-          {absentRows.length > 0 && (
-            <details className="integration-cards-more">
-              <summary className="muted text-label">{t("integrations.notInstalled", { count: absentRows.length })}</summary>
-              <ul className="integration-cards">
-                {absentRows.map(row => renderCard(row))}
-              </ul>
-            </details>
-          )}
-        </>
+        <ul className="integration-cards">
+          {rows.map(row => (
+            <OverviewCard
+              key={row.id}
+              row={row}
+              pending={cardPending !== null}
+              result={cardResults[row.id] ?? null}
+              onOpen={() => navigateHash(row.hash)}
+              onToggle={row.toggle ? () => requestToggle(row, !(row.toggleOn ?? row.applied)) : null}
+              onOverwrite={row.status !== null && row.status.state === "conflict" && row.installed
+                ? () => setPendingOverwrite(row)
+                : null}
+            />
+          ))}
+        </ul>
       )}
       {clientsSettled && installedFileClients.length === 0 && (
         <div className="integration-empty">
@@ -654,7 +646,7 @@ export default function IntegrationsOverview({
           <p className="page-sub">{t("integrations.rollback.emptyBody")}</p>
         </div>
       ) : (
-        <RollbackHistory rows={history} showClient onRestore={setRestoring} />
+        <RollbackHistory rows={history} showClient onRestore={setRestoring} onDelete={setDeleting} />
       )}
 
       {restoring && (
@@ -663,6 +655,35 @@ export default function IntegrationsOverview({
           row={restoring}
           onClose={() => setRestoring(null)}
           onRestored={refresh}
+        />
+      )}
+      {deleting && (
+        <ConsequenceDialog
+          copy={{
+            titleKey: "integrations.dialog.deleteEntry.title",
+            changesKey: "integrations.dialog.deleteEntry.changes",
+            breakageKey: "integrations.dialog.deleteEntry.breakage",
+            undoKey: "integrations.dialog.deleteEntry.undo",
+            confirmKey: "integrations.dialog.deleteEntry.confirm",
+            vars: { path: deleting.configPath },
+          }}
+          onClose={() => setDeleting(null)}
+          onConfirm={async () => {
+            try {
+              await deleteJournalEntry(apiBase, deleting.opId);
+            } catch (error) {
+              /*
+               * Rethrown as a localized message because ConsequenceDialog renders
+               * `error.message` verbatim. The 409 and 404 here carry a `code` and
+               * no `reason`, so without this the server English reaches every
+               * locale. The dialog stays open and re-enables its confirm button,
+               * which makes the same press the retry.
+               */
+              throw new Error(describeRefusal(t, error), { cause: error });
+            }
+            setDeleting(null);
+            await historyResource.refresh();
+          }}
         />
       )}
       {pendingToggle && (
