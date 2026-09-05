@@ -72,6 +72,44 @@ requests keep their captured credential. An all-paused pool fails closed.
 The dashboard's bulk pause action refreshes all account quotas and mutates only accounts whose
 plan-relevant window is freshly confirmed at exactly 100%; unknown and failed refreshes are skipped.
 
+`codexQuotaAutoRefresh` is a separate default-off spending intent. For each explicitly enabled
+account/window, the one-minute state sweep compares the cached upstream reset timestamp, sends the
+existing minimal non-stored warmup through that exact account once the timestamp is due, then
+field-patches the completed timestamp; the next normal quota poll reports the activated window.
+Paused or reauthentication-required
+accounts are skipped, simultaneous 5-hour/weekly resets share one warmup, transient failures retry
+after five minutes, and account deletion removes its setting and completion markers.
+Main-account hard-lock also gates these billable warmups. A policy/identity skip changes neither
+completion markers nor retry delay; quota reads remain available. Main refresh completes before
+shared credential ownership, then prepared credentials and restrictions are rechecked. Lifecycle
+cleanup uses the dependency-free quota-auto-refresh state leaf, avoiding a reconciliation cycle.
+
+`codexMainAccountHardLock` is a separate opt-in local admission policy, off by default.
+It blocks newly admitted identity-matched main-account requests at 99% of the 5h/short window
+when present, otherwise the weekly window (monthly for monthly-only accounts). It does not take
+the maximum across those windows. Pool alternatives remain eligible; explicit main selection and stored Direct
+substitution do not override it. It neither pauses the account nor clears upstream cooldown/reauth
+state, and management quota refresh remains available. Only a fresh valid reading below 99%, including
+0%, releases a measured block; passing a reset timestamp alone does not. While blocked, the existing
+once-per-minute background sweep refreshes owned main usage, with bounded/coalesced reads and no
+inference or reset-credit consumption. Failed, missing, non-finite or out-of-range readings do not
+release the block. Policy validation precedes legacy clamping. Supplementary monthly data cannot
+become the fallback governing window without a monthly-only plan or explicit primary-monthly evidence.
+Previously unobserved usage is unknown, not fabricated headroom.
+
+The policy reads a separately retained identity-tagged quota snapshot, so the legacy rotation
+cache's six-hour expiry does not silently release a known block. A confirmed account transition
+invalidates old evidence. Request-owned bearers are matched only against a credential and effective
+workspace already observed under native ownership; an unrelated or unmatched keyring credential
+is not attributed to stored main and introduces no physical-main read. Credential equality tags
+remain process-local and never enter disk, logs, or management DTOs.
+
+This is not a reservation of the last 1%: already-admitted, parallel, unmatched-keyring, or direct
+upstream traffic can still reach exhaustion. While blocked, main cannot use Luna reserve either.
+Keeping ordinary usage below exhaustion may prevent Reserve activation; the policy never changes
+OpenAI's Reserve grants or `ordinary_usage_allowed` response. Settings and the main-account DTO
+report enabled state separately from current `off`, `unknown`, `ready`, or `blocked` status.
+
 `codexAccountPriorities` is a persisted Pool *ordering* boundary and never an eligibility one. It maps
 an account id to an integer from -100 to 100, higher used earlier, with absence meaning 0. Selection
 narrows the already-eligible list to the highest tier that still holds an account with quota headroom

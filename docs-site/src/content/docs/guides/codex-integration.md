@@ -8,6 +8,14 @@ opencodex makes Codex route through the proxy by editing its config
 through the protocol at `GET /v1/models`; it does not pin Codex to the generated local catalog file.
 Every config edit is idempotent and reversible.
 
+The **Integrations** overview has a Codex switch for this native integration. Its switch shows
+the desired state from OpenCodex's configuration, while the badge reports whether Codex is
+currently observed using the proxy; during cleanup those can briefly differ while the badge
+continues to report the observed state. Disabling names the effective Codex config
+file, removes OpenCodex's generated routing artifacts, and leaves the proxy running for other
+clients. Re-enabling rebuilds the catalog from the models available at that time, so it does not
+restore the Codex files byte for byte.
+
 The proxy exposes one bare `openai` Codex-login route with Pool(default) and Direct account modes,
 plus `openai-apikey/<model>` for the configured API key. Pool includes main plus added accounts;
 Direct uses only the caller/main bearer. The routes do not fall back to one another. Shipped v1

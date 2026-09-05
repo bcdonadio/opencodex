@@ -12,7 +12,6 @@ import {
 } from "./ws-bridge";
 import type { Server, ServerWebSocket } from "bun";
 import {
-  DEFAULT_SUBAGENT_MODELS,
   applyProxyEnv,
   armClaudeCodeBaseline,
   loadConfig,
@@ -22,6 +21,7 @@ import {
 } from "../config";
 import { grokDefaultReasoningEffort } from "../grok/effort";
 import { flushConfigDirHardening } from "../config/paths";
+import { migrateStartupSubagentModels } from "./subagent-models-startup";
 import { reconcileOAuthProviders } from "../oauth";
 import { withCatalogWriteSerialization } from "../codex/catalog-write-serialization";
 import { invalidateCodexModelsCacheWithPermit } from "../codex/catalog/sync";
@@ -33,8 +33,12 @@ import {
   type NativeCodexOwnership,
   type OwnershipInspection,
 } from "../integrations/native/ownership-preflight";
-import { createResetCreditWhamClient, registerCodexCooldownRecoveryProbeWorker } from "../codex/auth-api";
+import {
+  createResetCreditWhamClient,
+  registerCodexCooldownRecoveryProbeWorker,
+} from "../codex/auth-api";
 import { activateResetCreditAutoRedeem } from "../codex/reset-credit-auto-redeem";
+import { registerCodexQuotaAutoRefreshWorker } from "../codex/quota-auto-refresh";
 import {
   reconcileLiveStateStores,
   setLiveStateStoreConfig,
@@ -512,7 +516,7 @@ function attachLiveSidebandUpstream(
 
 // Adapter resolution + wire-protocol override extracted to ./server/adapter-resolve.
 
-// Source invariant for tests/passthrough-abort.test.ts after the pure module split:
+// Source invariant for tests/responses/passthrough-abort.test.ts after the pure module split:
 // if (isEventStream && upstreamResponse.body) {
 // const repairConfig = route.provider.responsesItemIdRepair;
 // const needsClientRewrite = imageGenCallAliases.size > 0
@@ -586,6 +590,8 @@ export interface StartServerDeps {
   readinessGate?: ReadinessGate;
   /** Test-only package-tree observation; production captures package.json identity at boot. */
   packageTreeIntegrity?: PackageTreeIntegrityGuard;
+  /** Test-only seam for observing quota-worker registration ownership. */
+  registerCodexQuotaAutoRefreshWorker?: typeof registerCodexQuotaAutoRefreshWorker;
 }
 
 function inspectStartupOwnership(
@@ -648,7 +654,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   // Captured before loadConfig() starts the optional ACL flight so stop() drains the same dir
   // even if OPENCODEX_HOME changes underneath a long-lived process.
   const startupConfigDir = getConfigDir();
-  const config = runModelRenameStartupMigration(runAlibabaRegionStartupMigration(runOpenAiTierStartupMigration(loadConfig())));
+  const config = migrateStartupSubagentModels(
+    runModelRenameStartupMigration(runAlibabaRegionStartupMigration(runOpenAiTierStartupMigration(loadConfig()))),
+  );
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
@@ -662,12 +670,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   // adding/dropping models reaches existing configs on start — not just fresh installs.
   reconcileOAuthProviders(config);
   reconcileLiveStateStores();
-  // Seed default featured subagent models on first run only (UNSET → defaults). A user-set list,
-  // even [], is left alone so GUI removals persist.
-  if (config.subagentModels === undefined) {
-    config.subagentModels = [...DEFAULT_SUBAGENT_MODELS];
-    saveConfig(config);
-  }
   // authMode migration (devlog 260726_claude_auth_auto/015): before "auto" existed,
   // choosing Subscription DELETED the key, so a pre-upgrade block with no authMode is
   // indistinguishable from "never chose". Pin those to subscription once so an upgrade
@@ -1027,8 +1029,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     return "public";
   }
   let backgroundLifecycle: ReturnType<typeof acquireServerBackgroundLifecycle> | null = null;
+  let unregisterQuotaAutoRefresh: (() => void) | null = null;
   try {
     backgroundLifecycle = acquireServerBackgroundLifecycle(applyPolicy);
+    unregisterQuotaAutoRefresh = (deps.registerCodexQuotaAutoRefreshWorker
+      ?? registerCodexQuotaAutoRefreshWorker)(config);
     // External `ocx config set` / direct config.json edits run in other
     // processes; poll the file so Logs/Usage display prices follow them live.
     // Started inside the guarded startup transaction so the catch below can
@@ -1280,7 +1285,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           // Built directly rather than through formatErrorResponse: that helper derives
           // `code` from the status and message via classifyError, and these two need stable,
           // specific codes. `catalog_not_found` in particular is what lets a caller — and
-          // tests/api-key-attribution.test.ts — tell "this route exists and has no catalog"
+          // tests/server/api-key-attribution.test.ts — tell "this route exists and has no catalog"
           // apart from "this route is gone", which is the difference between admission proof
           // and a vacuous pass.
           return withCors(
@@ -2141,6 +2146,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         undefined,
         guiSessionCandidate ?? undefined,
         config.runtimeRole ?? "standalone",
+        isApiAuthRequired(config),
       );
       if (guiFile) return guiFile;
       if (url.pathname === "/" && req.method === "GET") {
@@ -2407,6 +2413,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
     }
   } catch (error) {
+    unregisterQuotaAutoRefresh?.();
     userCostOverlayReconciler?.stop();
     backgroundLifecycle?.releaseAfterFailedStart();
     void nativeMainLifecycle.release();
@@ -2432,7 +2439,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             ? [() => managementIngressRef.stop(closeActiveConnections)]
             : []),
           async () => {
-            userCostOverlayReconciler?.stop();
+            try {
+              userCostOverlayReconciler?.stop();
+            } finally {
+              unregisterQuotaAutoRefresh?.();
+            }
           },
         ],
         async () => {

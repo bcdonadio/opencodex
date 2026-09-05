@@ -69,6 +69,7 @@ import {
   isCompleteCodexQuotaRecoverySnapshot,
   isCodexQuotaExhausted,
   listAccountQuotas,
+  parseMainPolicyUsageQuota,
   parseUsageQuota,
   setAccountQuotaFromParsed,
   updateAccountQuota,
@@ -84,7 +85,10 @@ export {
   updateAccountQuota,
 } from "./quota";
 import { extractAccountId } from "../oauth/chatgpt";
-import { getMainAccountPlan, isMainAccountTokenVerifiablyLive, MAIN_CODEX_ACCOUNT_ID, setMainAccountPlan } from "./main-account";
+import {
+  getMainAccountPlan, getValidMainAccountToken, isMainAccountTokenVerifiablyLive,
+  MainAccountTokenRefreshError, MAIN_CODEX_ACCOUNT_ID, setMainAccountPlan,
+} from "./main-account";
 import { captureConfigGeneration, registerStateSweepAfterTick } from "../lib/state-store-sweeper";
 import { reconcileLiveStateStores } from "../lib/state-store-registrations";
 import {
@@ -93,11 +97,13 @@ import {
   getMainAccountCredentialPresence,
   getMainAccountInfoCache,
   isMainAccountIdentityGenerationLive,
+  observeMainQuotaCredential,
   setMainAccountCredentialPresence,
   setMainAccountInfoCache,
   type MainAccountInfo,
 } from "./main-account-cache";
 export { clearMainAccountInfoCache } from "./main-account-cache";
+import { getMainAccountHardLockStatus, type MainAccountHardLockStatus } from "./main-account-hard-lock";
 import { maskEmail } from "../lib/privacy";
 import { codexWarmupFailureReason, warmCodexAccount } from "./warmup";
 export { maskEmail } from "../lib/privacy";
@@ -818,6 +824,7 @@ async function fetchMainAccountInfoAttempt(
   retriesRemaining: number,
   existingNativeMainLease?: AdmissionLease,
   nativeMainSharedClaimHeld = false,
+  explicitRefresh: boolean = forceRefresh,
 ): Promise<MainAccountInfoFetchResult> {
   const nativeMainLease = existingNativeMainLease ?? tryAcquireNativeMainProfileClaim();
   if (!nativeMainLease) {
@@ -830,7 +837,7 @@ async function fetchMainAccountInfoAttempt(
   }
   try {
     const operation = async () => ({
-      ...await fetchMainAccountInfoWhileOwned(forceRefresh, retriesRemaining, nativeMainLease),
+      ...await fetchMainAccountInfoWhileOwned(forceRefresh, retriesRemaining, nativeMainLease, explicitRefresh),
       identityGeneration: captureMainAccountIdentityGeneration(),
     });
     if (nativeMainSharedClaimHeld) return await operation();
@@ -884,6 +891,11 @@ async function fetchMainAccountInfoWhileOwned(
   if (!forceRefresh && cached && Date.now() - cached.ts < MAIN_CACHE_TTL) {
     return { info: cached, credentialChecked: true, hasCredential: true };
   }
+  // Bind quota to the owned credential and the account actually selected by WHAM's header.
+  // A conflicting legacy token/account tuple is not evidence for the new policy.
+  const mainQuotaWriter = requestAccountId === tokens.account_id
+    ? observeMainQuotaCredential(tokens.access_token, tokens.account_id)
+    : undefined;
   try {
     const resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
       headers: { Authorization: `Bearer ${tokens.access_token}`, "ChatGPT-Account-Id": tokens.account_id },
@@ -903,7 +915,9 @@ async function fetchMainAccountInfoWhileOwned(
     const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining, nativeMainLease, explicitRefresh);
     if (retried) return retried;
     const plan = nonEmptyPlan(data.plan_type) ?? nonEmptyPlan(cached?.plan) ?? nonEmptyPlan(getMainAccountPlan());
-    const quota = parseUsageQuota({ ...data, ...(plan ? { plan_type: plan } : {}) });
+    const usage = { ...data, ...(plan ? { plan_type: plan } : {}) };
+    const quota = parseUsageQuota(usage);
+    const policyQuota = parseMainPolicyUsageQuota(usage);
     const freshResetCredits = quota?.resetCredits;
     // Tag the count with the identity it was read from, so a later response that omits the
     // summary can restore the badge without ever crossing an account boundary.
@@ -929,7 +943,7 @@ async function fetchMainAccountInfoWhileOwned(
     // score and auto-switch the main account exactly like a pool account (Option A).
     setMainAccountPlan(result.plan);
     if (result.quota) {
-      setAccountQuotaFromParsed(MAIN_CODEX_ACCOUNT_ID, result.quota, writerGeneration);
+      setAccountQuotaFromParsed(MAIN_CODEX_ACCOUNT_ID, result.quota, writerGeneration, mainQuotaWriter, policyQuota);
     }
     return {
       info: result,
@@ -1037,6 +1051,7 @@ export interface CodexAuthAccountDto {
   healthSummary: string;
   healthAction?: string;
   quotaProbeSkipped?: true;
+  mainAccountHardLock?: MainAccountHardLockStatus;
 }
 
 interface FreshPoolPlanUpdate {
@@ -1443,10 +1458,50 @@ export async function runCodexCooldownRecoveryProbes(config: OcxConfig, now = Da
   return cooldownRecoveryInFlight;
 }
 
+let mainHardLockRecoveryInFlight: Promise<void> | null = null;
+
+/** Metadata-only recovery on the existing sweep; failures retain the observed policy block. */
+export async function runMainAccountHardLockRecovery(config: OcxConfig): Promise<void> {
+  if (mainHardLockRecoveryInFlight) return mainHardLockRecoveryInFlight;
+  if (getMainAccountHardLockStatus(config).state !== "blocked"
+    || isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)) return;
+  const lease = tryAcquireNativeMainProfileClaim();
+  if (!lease) return;
+  mainHardLockRecoveryInFlight = (async () => {
+    reconcileMainCodexAccountRuntimeState();
+    if (getMainAccountHardLockStatus(config).state !== "blocked"
+      || isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)) return;
+    const identityGeneration = captureMainAccountIdentityGeneration();
+    const writerGeneration = captureConfigGeneration();
+    try {
+      // Refresh can require an exclusive credential claim: never hold WHAM's shared
+      // claim while obtaining a valid token. The runtime lease spans both operations.
+      if (!await getValidMainAccountToken({ preserveReauth: true })) return;
+    } catch (error) {
+      if (error instanceof MainAccountTokenRefreshError && error.reason === "reauth"
+        && isMainAccountIdentityGenerationLive(identityGeneration)) {
+        markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID, writerGeneration);
+      }
+      return;
+    }
+    if (isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)) return;
+    await fetchMainAccountInfoAttempt(true, 1, lease, false, false);
+  })().catch(() => {
+    // Best-effort background metadata read; no cooldown/pause or policy clearing on failure.
+  }).finally(() => {
+    lease.release();
+    mainHardLockRecoveryInFlight = null;
+  });
+  return mainHardLockRecoveryInFlight;
+}
+
 export function registerCodexCooldownRecoveryProbeWorker(config: OcxConfig): void {
   registerStateSweepAfterTick({
     name: "codex-cooldown-recovery",
-    afterTick: () => { void runCodexCooldownRecoveryProbes(config); },
+    afterTick: () => {
+      void runCodexCooldownRecoveryProbes(config);
+      void runMainAccountHardLockRecovery(config);
+    },
   });
 }
 
@@ -1708,6 +1763,7 @@ export async function listCodexAuthAccountsSnapshot(
     logLabel: "main",
     isMain: true,
     paused: isCodexAccountPaused(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+    mainAccountHardLock: getMainAccountHardLockStatus(runtimeConfig),
     priority: getCodexAccountPriority(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
     hasCredential: hasMainCredential,
     needsReauth: mainNeedsReauth,

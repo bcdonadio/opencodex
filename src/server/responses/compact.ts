@@ -225,6 +225,7 @@ export function compactResponseTooLargeError(): Response {
 
 async function refreshNativeMainCompactContext(args: {
   req: Request;
+  config: OcxConfig;
   authCtx: CodexAuthContext;
   provider: OcxProviderConfig;
   codexAccountMode?: CodexAccountMode;
@@ -234,7 +235,7 @@ async function refreshNativeMainCompactContext(args: {
   | { ok: true; authCtx: CodexAuthContext; provider: OcxProviderConfig; headers: Headers }
   | { ok: false; response: Response }
 > {
-  const { req, authCtx, provider, codexAccountMode, substituteMainCredential, options } = args;
+  const { req, config, authCtx, provider, codexAccountMode, substituteMainCredential, options } = args;
   if (authCtx.kind !== "main-pool" || isCallerBackedMainPoolContext(authCtx)) {
     return { ok: false, response: formatErrorResponse(401, "authentication_error", "No native main credential to refresh") };
   }
@@ -258,6 +259,7 @@ async function refreshNativeMainCompactContext(args: {
     );
     const headers = new Headers({ "content-type": "application/json" });
     const selected = await materializeCodexUpstreamAuthAsync(req.headers, refreshedAuthCtx, {
+      config,
       substituteMainCredential,
       signal: req.signal,
       nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
@@ -276,7 +278,9 @@ async function refreshNativeMainCompactContext(args: {
     if (req.signal.aborted) {
       return { ok: false, response: formatErrorResponse(499, "client_cancelled", "Client cancelled compact request") };
     }
-    return { ok: false, response: nativeMainRefreshFailureResponse(error) };
+    return { ok: false, response: mapCodexAuthContextErrorToResponse(error, {
+      now: Date.now(),
+    }) ?? nativeMainRefreshFailureResponse(error) };
   }
 }
 
@@ -292,6 +296,7 @@ function isTerminalCompactPoolRefreshFailure(error: unknown): boolean {
  */
 async function refreshPoolCompactContext(args: {
   req: Request;
+  config: OcxConfig;
   authCtx: CodexAuthContext & { kind: "pool" };
   provider: OcxProviderConfig;
   codexAccountMode?: CodexAccountMode;
@@ -301,7 +306,7 @@ async function refreshPoolCompactContext(args: {
   | { ok: true; authCtx: CodexAuthContext; provider: OcxProviderConfig; headers: Headers }
   | { ok: false; response: Response; quarantine: boolean; quarantineGeneration?: number }
 > {
-  const { req, authCtx, provider, codexAccountMode, substituteMainCredential, options } = args;
+  const { req, config, authCtx, provider, codexAccountMode, substituteMainCredential, options } = args;
   const reauthResponse = () => formatErrorResponse(
     401,
     "authentication_error",
@@ -334,6 +339,7 @@ async function refreshPoolCompactContext(args: {
     );
     const headers = new Headers({ "content-type": "application/json" });
     const selected = await materializeCodexUpstreamAuthAsync(req.headers, refreshedAuthCtx, {
+      config,
       substituteMainCredential,
       signal: req.signal,
       nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
@@ -397,7 +403,7 @@ async function resolveAlternateCompactContext(args: {
     if (authCtx.accountId === excludeAccountId) return null;
     const provider = applyCodexAuthContextToProvider(route.provider, authCtx, route.codexAccountMode);
     const headers = new Headers({ "content-type": "application/json" });
-    const selected = headersForCodexAuthContext(req.headers, authCtx);
+    const selected = headersForCodexAuthContext(req.headers, authCtx, config);
     for (const name of FORWARD_HEADERS) {
       const value = selected.get(name);
       if (value) headers.set(name, value);
@@ -663,6 +669,7 @@ export async function handleResponsesCompact(
         });
         logCtx.accountLogLabel = codexAuthContextLogLabel(authCtx, config);
         const selected = await materializeCodexUpstreamAuthAsync(req.headers, authCtx, {
+          config,
           substituteMainCredential,
           signal: req.signal,
           nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
@@ -871,6 +878,7 @@ export async function handleResponsesCompact(
       const poolReplay = poolAuthCtx
         ? await refreshPoolCompactContext({
           req,
+          config,
           authCtx: poolAuthCtx,
           provider: compactProvider,
           codexAccountMode: route.codexAccountMode,
@@ -881,6 +889,7 @@ export async function handleResponsesCompact(
       const replay = poolReplay
         ?? await refreshNativeMainCompactContext({
           req,
+          config,
           authCtx,
           provider: compactProvider,
           codexAccountMode: route.codexAccountMode,
@@ -970,6 +979,7 @@ export async function handleResponsesCompact(
             authCtx.accountId,
             upstream.headers,
             authCtx.writerGeneration,
+            authCtx.kind === "main-pool" ? authCtx.mainQuotaWriter : undefined,
           );
         }
         recordCompactPoolOutcome(authCtx, upstream.status, {

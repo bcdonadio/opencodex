@@ -83,6 +83,7 @@ export function listOpenAiForwardSidecarCandidates(config: OcxConfig): OpenAiFor
 
 function directSidecarHeaders(
   incomingHeaders: Headers,
+  config: OcxConfig,
 ): Headers | undefined {
   const bearer = incomingHeaders.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
   if (!bearer) return undefined;
@@ -94,7 +95,7 @@ function directSidecarHeaders(
   // intentional ChatGPT-auth operation instead of silently reclassifying any JWT-shaped
   // provider credential as a Codex bearer.
   if (!requestedAccountId || requestedAccountId !== derivedAccountId) return undefined;
-  const selected = headersForCodexAuthContext(incomingHeaders, { kind: "main", accountId: null });
+  const selected = headersForCodexAuthContext(incomingHeaders, { kind: "main", accountId: null }, config);
   return selected;
 }
 
@@ -126,6 +127,7 @@ export async function resolveFirstUsableOpenAiSidecar(
         modelId: exactAccount.modelId,
         beginCodexAccountSelection: options.beginCodexAccountSelection,
       });
+      const selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, config);
       if ((authContext.kind !== "pool" && authContext.kind !== "main-pool")
         || !isCodexAuthContextUsable(authContext, config)) {
         // Exact selection is fail-closed. A generation/runtime-state race must not fall through
@@ -135,7 +137,7 @@ export async function resolveFirstUsableOpenAiSidecar(
       return {
         ...candidate,
         authContext,
-        headers: headersForCodexAuthContext(incomingHeaders, authContext),
+        headers: selectedHeaders,
         recordOutcome: (outcome: CodexUpstreamOutcome) => recordCodexUpstreamOutcome(
           config,
           authContext.accountId,
@@ -155,7 +157,7 @@ export async function resolveFirstUsableOpenAiSidecar(
     }
     if (candidate.accountMode === "direct") {
       if (!callerBearerMayBeForwarded || !hasCallerCodexBearer(incomingHeaders)) continue;
-      const headers = directSidecarHeaders(incomingHeaders);
+      const headers = directSidecarHeaders(incomingHeaders, config);
       if (!headers) continue;
       const authContext = await resolveCodexAuthContext(incomingHeaders, config, "direct", {
         modelId: options.modelId,
@@ -172,11 +174,12 @@ export async function resolveFirstUsableOpenAiSidecar(
         && hasForwardableCodexBearer(incomingHeaders, config),
       beginCodexAccountSelection: options.beginCodexAccountSelection,
     });
+    const selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, config);
     if (!isCodexAuthContextUsable(authContext, config)) continue;
     return {
       ...candidate,
       authContext,
-      headers: headersForCodexAuthContext(incomingHeaders, authContext),
+      headers: selectedHeaders,
       ...((authContext.kind === "pool" || authContext.kind === "main-pool")
         && !isCallerBackedMainPoolContext(authContext)
         ? {

@@ -1304,7 +1304,17 @@ select.input { appearance: none; }
 .empty svg { width: 30px; height: 30px; color: var(--faint); margin-bottom: 12px; }
 .empty .title { color: var(--text); font-weight: var(--weight-semibold); margin-bottom: 6px; }
 
-.notice { font-size: var(--text-control); line-height: var(--leading-body); padding: 9px 12px; border-radius: var(--radius-sm); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; max-width: var(--prose-measure); }
+/*
+ `:not([hidden])`, not a bare `display: flex` — same cascade trap the combos panels hit.
+
+ The admin-token dialog mounts its error notice up front and hides it with the `hidden`
+ attribute until a token is actually rejected. `[hidden] { display: none }` is a
+ USER-AGENT rule, so an author `display: flex` here beat it and painted an empty red
+ bordered box the moment the dialog opened (#3483). Specificity never got a vote; origin
+ decided it. Scoping the display to `:not([hidden])` lets the UA rule win again.
+*/
+.notice:not([hidden]) { display: flex; }
+.notice { font-size: var(--text-control); line-height: var(--leading-body); padding: 9px 12px; border-radius: var(--radius-sm); margin-bottom: 14px; align-items: center; gap: 8px; max-width: var(--prose-measure); }
 .notice svg { width: 15px; height: 15px; flex-shrink: 0; }
 
 /* Portaled status toast — out of document flow so Providers (etc.) do not reflow. */
@@ -1827,6 +1837,18 @@ dialog.modal-overlay::backdrop {
   gap: 8px;
   margin-bottom: 10px;
 }
+
+.codex-quota-auto-refresh {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  padding: 8px 16px 12px;
+  color: var(--muted);
+  font-size: var(--text-label);
+}
+.codex-quota-auto-refresh__label { margin-right: auto; }
+.codex-quota-auto-refresh__window { display: inline-flex; align-items: center; gap: 7px; }
 /* Account actions (pause / copy doctor / pause-exhausted): clearer hover than plain
    btn-ghost on card surface — same raised-hover + faint border as icon/list cues. */
 .codex-auth-action-btn:hover:not(:disabled) {
@@ -1950,12 +1972,13 @@ dialog.modal-overlay::backdrop {
   background: light-dark(#fffbeb, color-mix(in oklab, var(--amber) 20%, var(--surface)));
   color: light-dark(#92400e, #fef3c7);
   border: 1px solid color-mix(in srgb, var(--amber) 32%, transparent);
-  display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 12px;
   max-width: var(--prose-measure);
 }
+/* Same UA-vs-author `[hidden]` rule as `.notice` above: `.notice-warn` is used on its own. */
+.notice-warn:not([hidden]) { display: flex; }
 .notice-warn svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--amber); }
 
 .startup-runtime-notice__text,
@@ -1998,8 +2021,10 @@ dialog.modal-overlay::backdrop {
   box-sizing: border-box;
 }
 /* Message above, command+copy below. */
-.notice.notice-warn.startup-runtime-notice {
+.notice.notice-warn.startup-runtime-notice:not([hidden]) {
   display: flex;
+}
+.notice.notice-warn.startup-runtime-notice {
   flex-direction: column;
   align-items: stretch;
   gap: 8px;

@@ -54,6 +54,15 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { captureConfigGeneration } from "../lib/state-store-sweeper";
 import { retainedUtf8Bytes } from "../lib/admission";
 import { extractAccountId } from "../oauth/chatgpt";
+import { getMainAccountHardLockStatus, isMainAccountHardLocked } from "./main-account-hard-lock";
+import {
+  captureMainAccountIdentityGeneration,
+  getObservedMainQuotaIdentityKey,
+  isMainQuotaWriterLive,
+  matchesMainQuotaCredential,
+  observeMainQuotaCredential,
+  type MainQuotaWriter,
+} from "./main-account-cache";
 
 const CODEX_AFFINITY_COMPONENT_MAX_BYTES = 512;
 const CODEX_APP_AFFINITY_KEY = randomBytes(32);
@@ -131,6 +140,10 @@ export type CodexAuthContext =
       kind: "main-pool";
       accountId: string;
       writerGeneration: number;
+      /** Captured before async credential work; never reconstructed after the upstream response. */
+      mainQuotaWriter?: MainQuotaWriter;
+      accessToken: string;
+      chatgptAccountId: string;
       /** Bypass Pool selection and suppress quota/transient failover for an exact selector. */
       fixedAccount?: boolean;
       /** See `pool.affinityKey`. */
@@ -306,6 +319,53 @@ export class CodexAccountCooldownError extends Error {
   }
 }
 
+export class CodexMainAccountHardLockError extends CodexAccountCooldownError {
+  readonly resetAt?: number;
+
+  constructor(resetAt?: number) {
+    super(MAIN_CODEX_ACCOUNT_ID, resetAt ?? 0);
+    this.name = "CodexMainAccountHardLockError";
+    this.resetAt = resetAt;
+    this.message = "Codex main account is blocked by the 99% main-account quota policy."
+      + " Choose another account, wait for quota to reset, or disable codexMainAccountHardLock in Settings.";
+  }
+}
+
+function assertMainAccountPolicy(config: Pick<OcxConfig, "codexMainAccountHardLock"> | undefined): void {
+  if (!config) return;
+  const status = getMainAccountHardLockStatus(config);
+  if (status.state === "blocked") throw new CodexMainAccountHardLockError(status.resetAt);
+}
+
+/** No auth-file I/O: an unsigned claim alone never identifies a caller as stored main. */
+function callerMatchesObservedMain(headers: Headers): boolean {
+  const bearer = headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  if (!bearer) return false;
+  const effectiveAccountId = headers.get("chatgpt-account-id")
+    ?? extractAccountId(undefined, bearer);
+  return matchesMainQuotaCredential(bearer, effectiveAccountId);
+}
+
+function captureObservedMainWriter(): MainQuotaWriter | undefined {
+  const identityKey = getObservedMainQuotaIdentityKey();
+  return identityKey === undefined ? undefined : {
+    identityKey,
+    identityGeneration: captureMainAccountIdentityGeneration(),
+  };
+}
+
+function observeSelectedMainCredential(
+  token: { accessToken: string; chatgptAccountId: string },
+  writer: MainQuotaWriter | undefined,
+): MainQuotaWriter | undefined {
+  if (!writer) return undefined;
+  // Carry an explicitly stale writer through to quota's rejection fence; turning it into an
+  // untagged write would instead invalidate the replacement account's trusted observation.
+  if (!isMainQuotaWriterLive(writer)) return writer;
+  const observed = observeMainQuotaCredential(token.accessToken, token.chatgptAccountId);
+  return observed?.identityKey === writer.identityKey ? writer : undefined;
+}
+
 /**
  * Human-readable account label for a client-visible error. NEVER the raw id: the proxy
  * supports non-loopback binds (auth-cors.ts `isApiAuthRequired` requires a token there
@@ -323,6 +383,7 @@ export function cooldownAccountLabel(accountId: string): string {
  * injected `openai_base_url` in config.toml.
  */
 export function cooldownErrorMessage(err: CodexAccountCooldownError, accountSelector?: string): string {
+  if (err instanceof CodexMainAccountHardLockError) return err.message;
   const until = new Date(err.cooldownUntil).toISOString();
   const scope = err.quotaScope === "spark"
     ? "Spark quota"
@@ -348,7 +409,9 @@ export function cooldownErrorResponse(
 ): Response {
   const res = formatErrorResponse(429, "rate_limit_error", cooldownErrorMessage(err, accountSelector));
   const headers = new Headers(res.headers);
-  headers.set("Retry-After", String(Math.max(1, Math.ceil((err.cooldownUntil - now) / 1000))));
+  if (!(err instanceof CodexMainAccountHardLockError) || err.resetAt !== undefined) {
+    headers.set("Retry-After", String(Math.max(1, Math.ceil((err.cooldownUntil - now) / 1000))));
+  }
   return new Response(res.body, { status: res.status, headers });
 }
 
@@ -363,7 +426,8 @@ export class CodexThreadAffinityExpiredError extends Error {
 }
 
 export function shouldMarkAccountNeedsReauthForCodexAuthFailure(cause: unknown): boolean {
-  return !(cause instanceof CodexCredentialGenerationConflictError)
+  return !(cause instanceof CodexMainAccountHardLockError)
+    && !(cause instanceof CodexCredentialGenerationConflictError)
     && !(cause instanceof CodexCredentialRefreshLockTimeoutError)
     && !(cause instanceof CodexCredentialRefreshBusyError)
     && !(cause instanceof CodexCredentialRefreshStaleError)
@@ -424,6 +488,7 @@ export async function resolveCodexAuthContext(
     && config.activeCodexAccountPinned === MAIN_CODEX_ACCOUNT_ID
     && isEffectiveCodexAccountPinned(config)
     && !isCodexAccountPaused(config, MAIN_CODEX_ACCOUNT_ID)
+    && !(callerMatchesObservedMain(headers) && isMainAccountHardLocked(config))
     && requestOwnedMainPinHasQuotaHeadroom(config);
   if (fixedAccountId !== undefined && options.excludeAccountId !== undefined) {
     throw new Error("Codex auth context cannot select and exclude an account simultaneously");
@@ -432,6 +497,7 @@ export async function resolveCodexAuthContext(
     if (!hasCallerCodexBearer(headers)) throw new CodexDirectAuthenticationError();
     const substituteStoredMain = options.substituteMainCredentialForDirect === true;
     if (!substituteStoredMain) {
+      if (callerMatchesObservedMain(headers)) assertMainAccountPolicy(config);
       if (options.modelId && ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)) {
         const entitled = await (
           options.isDirectCallerEntitledToCodexModel ?? isDirectCallerEntitledToCodexModel
@@ -440,6 +506,7 @@ export async function resolveCodexAuthContext(
           throw new CodexPoolAuthenticationError("The selected ChatGPT account does not support this model");
         }
       }
+      if (callerMatchesObservedMain(headers)) assertMainAccountPolicy(config);
       return { kind: "main", accountId: null };
     }
 
@@ -459,6 +526,8 @@ export async function resolveCodexAuthContext(
       ) {
         throw new CodexMainProfileDrainingError();
       }
+      if (config.codexMainAccountHardLock === true) reconcileMainCodexAccountRuntimeState();
+      assertMainAccountPolicy(config);
       if (options.modelId && ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)) {
         const entitled = entitledCodexAccountIdsForModel(
           await (options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements)(config, {
@@ -471,6 +540,7 @@ export async function resolveCodexAuthContext(
           throw new CodexPoolAuthenticationError("The selected ChatGPT account does not support this model");
         }
       }
+      assertMainAccountPolicy(config);
       return { kind: "main", accountId: null };
     } finally {
       // The short selector reservation ends here. A successful claim remains owned by
@@ -520,6 +590,21 @@ export async function resolveCodexAuthContext(
       ...(options.modelId ? { quotaScope: codexQuotaScopeForModel(options.modelId) } : {}),
     };
   };
+  // Pool discovery excludes request-owned main credentials by design: they must never be folded
+  // into stored-account entitlement, affinity, or persistence state. An effective manual main pin
+  // is the one exception where that exclusion is selection evidence in the opposite direction.
+  // Validate the caller's own gated-model roster before using it, and fall through to a Pool model
+  // detour when it lacks the grant. This branch performs no physical-main credential read.
+  if (preserveRequestOwnedMainPin) {
+    const callerEntitled = !options.modelId
+      || !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)
+      || await (
+        options.isDirectCallerEntitledToCodexModel ?? isDirectCallerEntitledToCodexModel
+      )(headers, options.modelId);
+    if (callerEntitled && !(callerMatchesObservedMain(headers) && isMainAccountHardLocked(config))) {
+      return { kind: "main", accountId: null };
+    }
+  }
   // An explicit namespace binding is stronger than the provider's default mode. It must use the
   // selected stored credential even while the canonical OpenAI provider is globally Direct.
   // A generic request-owned bearer stays `main`. An explicitly selected Pool-mode main uses the
@@ -656,6 +741,11 @@ export async function resolveCodexAuthContext(
       if (nativeMainReadsForbidden && !options.excludeAccountId) {
         throw new CodexMainProfileDrainingError();
       }
+      if (!nativeMainReadsForbidden && options.excludeAccountId !== MAIN_CODEX_ACCOUNT_ID
+        && !isCodexAccountPaused(config, MAIN_CODEX_ACCOUNT_ID)
+        && (!modelEligibleAccountIds || modelEligibleAccountIds.has(MAIN_CODEX_ACCOUNT_ID))) {
+        assertMainAccountPolicy(config);
+      }
       throw new CodexPoolAuthenticationError(
         modelEligibleAccountIds === undefined
           ? undefined
@@ -665,6 +755,7 @@ export async function resolveCodexAuthContext(
       );
     }
     accountId = selected;
+    if (accountId === MAIN_CODEX_ACCOUNT_ID) assertMainAccountPolicy(config);
     if (accountId === MAIN_CODEX_ACCOUNT_ID && nativeMainTrafficBlocked) {
       throw new CodexMainProfileDrainingError();
     }
@@ -741,14 +832,18 @@ export async function resolveCodexAuthContext(
   if (accountId === MAIN_CODEX_ACCOUNT_ID) {
     // Main account in rotation: refresh auth.json before upstream I/O and fail closed if it vanished.
     let token: { accessToken: string; chatgptAccountId: string } | null;
+    let mainQuotaWriter = captureObservedMainWriter();
     try {
       token = await (options.getValidMainAccountToken ?? getValidMainAccountToken)({
         signal: options.signal,
         ...(options.nativeMainRefreshDependencies ?? {}),
       });
+      if (token) mainQuotaWriter = observeSelectedMainCredential(token, mainQuotaWriter);
+      assertMainAccountPolicy(config);
     } catch (cause) {
       if (probeLeaseId && probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, probeQuotaScope, probeLeaseId);
       else if (probeLeaseId) releaseCodexQuotaProbeLease(accountId, probeLeaseId);
+      if (cause instanceof CodexMainAccountHardLockError) throw cause;
       if (!options.signal?.aborted && shouldMarkAccountNeedsReauthForCodexAuthFailure(cause)) {
         markAccountNeedsReauth(accountId, writerGeneration);
       }
@@ -766,6 +861,7 @@ export async function resolveCodexAuthContext(
       kind: "main-pool",
       accountId,
       writerGeneration,
+      mainQuotaWriter,
       accessToken: token.accessToken,
       chatgptAccountId: token.chatgptAccountId,
       ...(fixedAccountId !== undefined ? { fixedAccount: true } : {}),
@@ -853,7 +949,7 @@ export class CodexMainSubstitutionUnavailableError extends Error {
 export function materializeCodexUpstreamAuth(
   headers: Headers,
   ctx: CodexAuthContext,
-  options: { substituteMainCredential?: boolean } = {},
+  options: { substituteMainCredential?: boolean; config?: Pick<OcxConfig, "codexMainAccountHardLock"> } = {},
 ): Headers {
   if (isCallerBackedMainPoolContext(ctx) && options.substituteMainCredential === true) {
     throw new CodexMainSubstitutionUnavailableError();
@@ -866,6 +962,10 @@ export function materializeCodexUpstreamAuth(
   if (ctx.kind === "pool" || (ctx.kind === "main-pool" && !isCallerBackedMainPoolContext(ctx))) {
     selected.set("authorization", `Bearer ${ctx.accessToken}`);
     selected.set("chatgpt-account-id", ctx.chatgptAccountId);
+    if (ctx.kind === "main-pool") {
+      ctx.mainQuotaWriter = observeSelectedMainCredential(ctx, ctx.mainQuotaWriter);
+      assertMainAccountPolicy(options.config);
+    }
     return selected;
   }
   if ((ctx.kind === "main" || isCallerBackedMainPoolContext(ctx))
@@ -876,6 +976,8 @@ export function materializeCodexUpstreamAuth(
     if (accountId) selected.set("chatgpt-account-id", accountId);
   }
   if (ctx.kind === "main" && options.substituteMainCredential === true) {
+    if (options.config?.codexMainAccountHardLock === true) reconcileMainCodexAccountRuntimeState();
+    const writer = captureObservedMainWriter();
     const stored = getMainAccountToken();
     // Fail BEFORE any upstream I/O. Falling through here would send the admission secret.
     if (!stored?.accessToken || !isMainAccountTokenLive()) {
@@ -883,8 +985,11 @@ export function materializeCodexUpstreamAuth(
     }
     selected.set("authorization", `Bearer ${stored.accessToken}`);
     if (stored.chatgptAccountId) selected.set("chatgpt-account-id", stored.chatgptAccountId);
+    observeSelectedMainCredential(stored, writer);
+    assertMainAccountPolicy(options.config);
     return selected;
   }
+  if (callerMatchesObservedMain(selected)) assertMainAccountPolicy(options.config);
   return selected;
 }
 
@@ -893,6 +998,7 @@ export async function materializeCodexUpstreamAuthAsync(
   ctx: CodexAuthContext,
   options: {
     substituteMainCredential?: boolean;
+    config?: Pick<OcxConfig, "codexMainAccountHardLock">;
     signal?: AbortSignal;
     nativeMainRefreshDependencies?: NativeMainRefreshDependencies;
   } = {},
@@ -905,6 +1011,8 @@ export async function materializeCodexUpstreamAuthAsync(
     const value = headers.get(name);
     if (value) selected.set(name, value);
   }
+  if (options.config?.codexMainAccountHardLock === true) reconcileMainCodexAccountRuntimeState();
+  const writer = captureObservedMainWriter();
   const stored = await getValidMainAccountToken({
     signal: options.signal,
     ...(options.nativeMainRefreshDependencies ?? {}),
@@ -912,12 +1020,18 @@ export async function materializeCodexUpstreamAuthAsync(
   if (!stored?.accessToken) throw new CodexMainSubstitutionUnavailableError();
   selected.set("authorization", `Bearer ${stored.accessToken}`);
   if (stored.chatgptAccountId) selected.set("chatgpt-account-id", stored.chatgptAccountId);
+  observeSelectedMainCredential(stored, writer);
+  assertMainAccountPolicy(options.config);
   return selected;
 }
 
 /** @deprecated Prefer materializeCodexUpstreamAuth; kept for call sites without admission context. */
-export function headersForCodexAuthContext(headers: Headers, ctx: CodexAuthContext): Headers {
-  return materializeCodexUpstreamAuth(headers, ctx);
+export function headersForCodexAuthContext(
+  headers: Headers,
+  ctx: CodexAuthContext,
+  config?: Pick<OcxConfig, "codexMainAccountHardLock">,
+): Headers {
+  return materializeCodexUpstreamAuth(headers, ctx, { config });
 }
 
 export function isCodexAuthContextUsable(ctx: CodexAuthContext, config: OcxConfig): boolean {
