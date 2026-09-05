@@ -124,6 +124,7 @@ import {
   finishRequestAttempt,
   inspectResponseLogJson,
   noteAttemptSend,
+  observeRequestTransport,
   readConfiguredCodexServiceTier,
   requestLogSpeedLabel,
   sealRequestAttemptIdentity,
@@ -841,6 +842,7 @@ export async function handleResponsesCompact(
           modelId: route.modelId,
           beforeDispatch: isCanonicalOpenAiForwardProvider(sendProvider)
             ? createCodexReserveDispatchGuard(sendAuthCtx, config, selectedModelId, admission) : undefined,
+          onTransport: transport => observeRequestTransport(logCtx, transport),
         }),
         // Every credential-bearing forward send gets manual redirects, not only
         // pool sends: direct mode carries the caller's credential too (#914).

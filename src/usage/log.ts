@@ -20,6 +20,10 @@ export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated
  */
 export type UsageAccountLogLabel = "main" | `p${string}` | `o${string}`;
 export type CodexUsageAccountLogLabel = UsageAccountLogLabel;
+/** Actual wire used for a primary upstream dispatch. `mixed` means this one
+ * logical request sent over more than one wire (for example a WS send followed
+ * by a bounded HTTP recovery). */
+export type UsageTransport = "http" | "websocket" | "mixed";
 
 /**
  * Accepts EITHER label family. This is the predicate the persistence writers use, so widening
@@ -82,6 +86,7 @@ export interface PersistedUsageAttempt {
   locallyAnswered?: boolean;
   /** Stable non-PII identity for the Codex pool account that served this attempt. */
   accountLogLabel?: CodexUsageAccountLogLabel;
+  upstreamTransport?: UsageTransport;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -110,8 +115,11 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  /** Actual client-to-proxy transport. */
+  inboundTransport?: "http" | "websocket";
   /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
   accountLogLabel?: CodexUsageAccountLogLabel;
+  upstreamTransport?: UsageTransport;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   resolvedModel?: string;
@@ -181,6 +189,16 @@ const KNOWN_ADMISSION_KINDS = new Set<NonNullable<PersistedUsageEntry["admission
 const KNOWN_INBOUND_PROTOCOLS = new Set<NonNullable<PersistedUsageEntry["inboundProtocol"]>>([
   "responses", "chat", "messages",
 ]);
+const KNOWN_TRANSPORTS = new Set<UsageTransport>(["http", "websocket", "mixed"]);
+const KNOWN_INBOUND_TRANSPORTS = new Set<NonNullable<PersistedUsageEntry["inboundTransport"]>>(["http", "websocket"]);
+
+export function isKnownUsageTransport(value: unknown): value is UsageTransport {
+  return typeof value === "string" && KNOWN_TRANSPORTS.has(value as UsageTransport);
+}
+
+export function isKnownInboundTransport(value: unknown): value is NonNullable<PersistedUsageEntry["inboundTransport"]> {
+  return typeof value === "string" && KNOWN_INBOUND_TRANSPORTS.has(value as NonNullable<PersistedUsageEntry["inboundTransport"]>);
+}
 
 /** Same closed-set discipline as `isKnownUsageSurface`: an old or corrupted row
  *  carrying an unexpected value drops the field instead of poisoning the enum. */
@@ -415,6 +433,9 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
       : {}),
+    ...(isKnownUsageTransport(attempt.upstreamTransport)
+      ? { upstreamTransport: attempt.upstreamTransport }
+      : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
       ? { inputTokenEstimate: attempt.inputTokenEstimate }
       : {}),
@@ -499,8 +520,12 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+    ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
+      : {}),
+    ...(isKnownUsageTransport(entry.upstreamTransport)
+      ? { upstreamTransport: entry.upstreamTransport }
       : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()
       ? { conversationId: entry.conversationId.trim().slice(0, 128) }

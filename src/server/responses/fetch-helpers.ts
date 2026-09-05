@@ -61,6 +61,8 @@ export interface ProviderFetchOptions {
   onCodexWsQuota?: CodexWsQuotaObserver;
   /** Synchronous admission at actual credential dispatch, after pacing/backoff. */
   beforeDispatch?: (headers: Headers) => void;
+  /** Called only after a primary request is actually dispatched on the wire. */
+  onTransport?: (transport: "http" | "websocket") => void;
 }
 
 export function providerFetch(
@@ -74,8 +76,10 @@ export function providerFetch(
   };
   const httpFetch = Object.assign(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
-      options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
-      return base(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 });
+      const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
+      options.beforeDispatch?.(new Headers(dispatchInit.headers ?? (input instanceof Request ? input.headers : undefined)));
+      try { options.onTransport?.("http"); } catch { /* telemetry is observational */ }
+      return base(input, dispatchInit);
     },
     { preconnect },
   ) as typeof globalThis.fetch;
@@ -89,7 +93,15 @@ export function providerFetch(
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch);
+      return codexWsUpstreamFetch(
+        input,
+        init,
+        httpFetch,
+        runtime,
+        options.onCodexWsQuota,
+        options.beforeDispatch,
+        options.onTransport,
+      );
     }
     return httpFetch(input, init);
   };

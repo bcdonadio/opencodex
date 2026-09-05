@@ -22,6 +22,7 @@ import {
   recordFirstOutput,
   requestLogEntryFromPersistedUsage,
   sealRequestAttemptIdentity,
+  observeRequestTransport,
   type RequestLogContext,
 } from "../../src/server/request-log";
 import { handleResponses } from "../../src/server/responses";
@@ -56,6 +57,62 @@ function log(overrides: Partial<RequestLogEntry>): RequestLogEntry {
 }
 
 describe("request log metadata", () => {
+  test("records actual transport on the parent and physical attempt, and merges retries", () => {
+    const attempt = beginRequestAttempt(1, "openai", "gpt-test", "openai-responses");
+    const ctx: RequestLogContext = {
+      model: "gpt-test",
+      provider: "openai",
+      activeAttempt: attempt,
+    };
+
+    observeRequestTransport(ctx, "websocket");
+    expect(ctx.upstreamTransport).toBe("websocket");
+    expect(attempt.upstreamTransport).toBe("websocket");
+    observeRequestTransport(ctx, "websocket");
+    expect(ctx.upstreamTransport).toBe("websocket");
+    observeRequestTransport(ctx, "http");
+    expect(ctx.upstreamTransport).toBe("mixed");
+    expect(attempt.upstreamTransport).toBe("mixed");
+  });
+
+  test("persists transport metadata and preserves old undefined rows", () => {
+    const normalized = requestLogEntryFromPersistedUsage({
+      requestId: "transport-row",
+      timestamp: 1,
+      provider: "openai",
+      model: "gpt-test",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "unreported",
+      inboundTransport: "websocket",
+      upstreamTransport: "websocket",
+      attempts: [{
+        ordinal: 1,
+        provider: "openai",
+        model: "gpt-test",
+        adapter: "openai-responses",
+        status: 200,
+        durationMs: 1,
+        sendCount: 1,
+        recoveryKinds: [],
+        usageStatus: "unreported",
+        upstreamTransport: "websocket",
+      }],
+    });
+    expect(normalized.upstreamTransport).toBe("websocket");
+    expect(normalized.inboundTransport).toBe("websocket");
+    expect(normalized.attempts?.[0]?.upstreamTransport).toBe("websocket");
+    const old = requestLogEntryFromPersistedUsage({
+      requestId: "old-row",
+      timestamp: 1,
+      provider: "openai",
+      model: "gpt-test",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "unreported",
+    });
+    expect(old).not.toHaveProperty("upstreamTransport");
+  });
   test("creates one ordinary attempt after the final adapter is resolved", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => Response.json({
@@ -401,6 +458,13 @@ describe("request log metadata", () => {
         estimated: true,
       },
     });
+  });
+
+  test("clears an attempt account label when a later identity is unattributed", () => {
+    const attempt = beginRequestAttempt(1, "openai", "m", "openai-responses");
+    sealRequestAttemptIdentity(attempt, "openai-pabcdef", "openai-responses", "pabcdef");
+    sealRequestAttemptIdentity(attempt, "openai", "openai-responses");
+    expect(attempt.accountLogLabel).toBeUndefined();
   });
 
   test("folds partial and unsupported attempt measurement honestly", () => {

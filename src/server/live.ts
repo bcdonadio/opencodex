@@ -43,7 +43,7 @@ import { sidecarEnter } from "../lib/sidecar-tracker";
 import type { OcxConfig } from "../types";
 import { resolveFirstUsableOpenAiSidecar, selectOpenAiImagesProvider } from "../providers/openai-sidecar";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
-import type { RequestLogContext } from "./request-log";
+import { observeRequestTransport, type RequestLogContext } from "./request-log";
 import { codexLogAccountId } from "./responses";
 import type { AdmissionLease } from "../lib/admission";
 import { codexAccountSelectionForTurn } from "./lifecycle";
@@ -657,6 +657,7 @@ export async function handleLive(
   const linkedSignal = signalWithTimeout(LIVE_UPSTREAM_TIMEOUT_MS, req.signal);
   const sidecarExit = sidecarEnter("live");
   try {
+    observeRequestTransport(logCtx, "http");
     const upstreamResponse = await fetch(url, {
       method: "POST",
       headers,

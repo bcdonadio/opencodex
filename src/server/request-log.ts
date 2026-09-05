@@ -21,6 +21,8 @@ import {
   appendUsageEntry,
   isKnownAdmissionKind,
   isKnownInboundProtocol,
+  isKnownInboundTransport,
+  isKnownUsageTransport,
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
   isValidReasoningWireValue,
@@ -32,6 +34,7 @@ import {
   type PersistedUsageAttempt,
   type PersistedUsageEntry,
   type UsageStatus,
+  type UsageTransport,
 } from "../usage/log";
 import {
   appendUsageDebug,
@@ -65,6 +68,9 @@ export interface RequestLogContext {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  inboundTransport?: "http" | "websocket";
+  /** Actual primary upstream wire observed at dispatch time. */
+  upstreamTransport?: UsageTransport;
   /**
    * Set when an adapter answered the turn locally and no upstream request was made
    * (`ProviderAdapter.localTerminal`). A fixed identifier naming the code path, never
@@ -164,6 +170,8 @@ export interface RequestLogEntry {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  inboundTransport?: "http" | "websocket";
+  upstreamTransport?: UsageTransport;
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
@@ -278,9 +286,13 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     provider: entry.provider,
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
+    ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
+      : {}),
+    ...(isKnownUsageTransport(entry.upstreamTransport)
+      ? { upstreamTransport: entry.upstreamTransport }
       : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
     ...(entry.requestedAlias ? { requestedAlias: entry.requestedAlias } : {}),
@@ -398,8 +410,12 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+      ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
       ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
+        : {}),
+      ...(isKnownUsageTransport(entry.upstreamTransport)
+        ? { upstreamTransport: entry.upstreamTransport }
         : {}),
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
       ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
@@ -979,6 +995,10 @@ export function addFinalRequestLog(
   const loggedUsage = aggregate?.usage ?? existing.usage;
   const usageStatus = aggregate?.status ?? existing.status;
   const totalTokens = aggregate?.totalTokens ?? existing.totalTokens;
+  const upstreamTransport = mergeObservedTransports([
+    logCtx.upstreamTransport,
+    ...(attempts?.map(attempt => attempt.upstreamTransport) ?? []),
+  ]);
   // Sanitize at the logging layer, not only at the one call site that populates this today.
   // The value originates in an upstream-supplied model id, so an unsanitized newline would
   // let a single field forge a record boundary in any line-oriented log viewer. Doing it here
@@ -994,12 +1014,14 @@ export function addFinalRequestLog(
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
+    ...(isKnownInboundTransport(logCtx.inboundTransport) ? { inboundTransport: logCtx.inboundTransport } : {}),
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),
     ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel)
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
+    ...(isKnownUsageTransport(upstreamTransport) ? { upstreamTransport } : {}),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
     ...(logCtx.requestedModel ? { requestedModel: logCtx.requestedModel } : {}),
     ...(logCtx.requestedAlias ? { requestedAlias: logCtx.requestedAlias } : {}),
@@ -1204,6 +1226,29 @@ export function beginRequestAttempt(
   };
 }
 
+/** Fold actual dispatch observations without inventing a value for no-send rows. */
+export function mergeObservedTransports(values: readonly (UsageTransport | undefined)[]): UsageTransport | undefined {
+  let merged: UsageTransport | undefined;
+  for (const value of values) {
+    if (!isKnownUsageTransport(value)) continue;
+    if (merged === undefined) merged = value;
+    else if (merged !== value) merged = "mixed";
+  }
+  return merged;
+}
+
+/** Record a physical upstream dispatch on both the parent row and active attempt. */
+export function observeRequestTransport(logCtx: RequestLogContext, transport: Exclude<UsageTransport, "mixed">): void {
+  if (transport !== "http" && transport !== "websocket") return;
+  logCtx.upstreamTransport = mergeObservedTransports([logCtx.upstreamTransport, transport]);
+  if (logCtx.activeAttempt) {
+    logCtx.activeAttempt.upstreamTransport = mergeObservedTransports([
+      logCtx.activeAttempt.upstreamTransport,
+      transport,
+    ]);
+  }
+}
+
 export function sealRequestAttemptIdentity(
   attempt: PersistedUsageAttempt | undefined,
   provider: string,
@@ -1214,6 +1259,7 @@ export function sealRequestAttemptIdentity(
   attempt.provider = provider;
   attempt.adapter = adapter;
   if (isCodexUsageAccountLogLabel(accountLogLabel)) attempt.accountLogLabel = accountLogLabel;
+  else delete attempt.accountLogLabel;
 }
 
 export function noteAttemptSend(

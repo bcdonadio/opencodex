@@ -45,6 +45,7 @@ import {
   addFinalRequestLog,
   beginRequestAttempt,
   noteAttemptSend,
+  observeRequestTransport,
   recordFirstOutput,
   sealRequestAttemptIdentity,
   type RequestLogContext,
@@ -238,6 +239,7 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
             providerFetch(activeProvider, undefined, {
               providerName: route.providerName,
               modelId: route.modelId,
+              onTransport: transport => observeRequestTransport(logCtx, transport),
             }),
           );
         },

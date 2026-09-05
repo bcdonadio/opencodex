@@ -414,6 +414,9 @@ test("Logs: switching to the Debug tab stops scheduled log requests", async () =
 test("Logs: attempt details render exact reasoning wire values without legacy placeholders", async () => {
   const attemptsLog = {
     ...sampleLog,
+    inboundTransport: "websocket",
+    upstreamTransport: "mixed",
+    accountLogLabel: "main",
     requestedEffort: "max->high",
     effectiveEffort: "high",
     reasoningWireField: "reasoning_effort",
@@ -429,6 +432,8 @@ test("Logs: attempt details render exact reasoning wire values without legacy pl
         sendCount: 1,
         recoveryKinds: [],
         usageStatus: "unreported",
+        upstreamTransport: "http",
+        accountLogLabel: "pabc123",
         requestedEffort: "minimal",
         effectiveEffort: "low",
         reasoningWireField: "thinking_budget",
@@ -444,6 +449,8 @@ test("Logs: attempt details render exact reasoning wire values without legacy pl
         sendCount: 1,
         recoveryKinds: [],
         usageStatus: "unreported",
+        upstreamTransport: "websocket",
+        accountLogLabel: "pdeadbeef",
         requestedEffort: "high",
         effectiveEffort: "enabled",
         reasoningWireField: "thinking.type",
@@ -463,7 +470,11 @@ test("Logs: attempt details render exact reasoning wire values without legacy pl
     ],
   };
   globalThis.fetch = (async (input) => {
-    if (!String(input).includes("/api/logs")) return new Response(null, { status: 404 });
+    const url = String(input);
+    if (url.includes("/api/codex-auth/accounts")) {
+      return jsonResponse({ accounts: [{ isMain: false, logLabel: "pabc123", alias: "Work" }] });
+    }
+    if (!url.includes("/api/logs")) return new Response(null, { status: 404 });
     return jsonResponse([attemptsLog]);
   }) as typeof fetch;
 
@@ -482,10 +493,22 @@ test("Logs: attempt details render exact reasoning wire values without legacy pl
 
   const rows = [...container.querySelectorAll<HTMLTableRowElement>(".log-detail-attempts tbody tr")];
   expect(rows).toHaveLength(3);
+  const basic = container.querySelector<HTMLElement>(".log-detail-section")!;
+  expect(basic.textContent).toContain("Client transport");
+  expect(basic.textContent).toContain("WebSocket");
+  expect(basic.textContent).toContain("Upstream transport");
+  expect(basic.textContent).toContain("HTTP + WebSocket");
+  expect(basic.textContent).toContain("Account");
+  expect(basic.textContent).toContain("Main");
   expect(rows[0]?.textContent).toContain("minimal → low (thinking_budget=0)");
+  expect(rows[0]?.textContent).toContain("HTTP");
+  expect(rows[0]?.textContent).toContain("Work (pabc123)");
   expect(rows[1]?.textContent).toContain("high → enabled (thinking.type=enabled)");
+  expect(rows[1]?.textContent).toContain("WebSocket");
+  expect(rows[1]?.textContent).toContain("pdeadbeef");
   expect(rows[2]?.textContent).toContain("legacy-model");
-  expect(rows[2]?.querySelectorAll("br")).toHaveLength(1);
+  expect(rows[2]?.textContent).toContain("Not recorded");
+  expect(rows[2]?.querySelectorAll("br")).toHaveLength(2);
   expect(rows[2]?.textContent).not.toContain("undefined");
 
   await act(async () => { root.unmount(); });

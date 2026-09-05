@@ -1743,6 +1743,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          inboundTransport: "http",
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
@@ -1776,6 +1777,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           model: "image_gen",
           provider: "unknown",
           ...admissionFields(admission),
+          inboundTransport: "http",
         };
         const endpoint = url.pathname.endsWith("/edits") ? "edits" as const : "generations" as const;
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
@@ -1831,6 +1833,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           model: "web_search",
           provider: "unknown",
           ...admissionFields(admission),
+          inboundTransport: "http",
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           const response = await handleSearch(req, config, logCtx, turnAdmissionLease, admission);
@@ -1856,6 +1859,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          inboundTransport: "http",
         };
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;
@@ -1930,6 +1934,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "messages",
+          inboundTransport: "http",
         };
         // Logging is finalized inside handleClaudeMessages (Responses-vocab tap on the
         // pre-translation stream + native passthrough callbacks) — do not re-wrap the
@@ -1960,6 +1965,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "chat",
+          inboundTransport: "http",
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => withCors(
           await handleChatCompletions(req, config, logCtx, { requestId, start, turnAdmissionLease, admission }),
@@ -1990,6 +1996,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           model: "gpt-live",
           provider: "unknown",
           ...admissionFields(admission),
+          inboundTransport: "http",
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           const response = await handleLive(req, config, logCtx, turnAdmissionLease);
@@ -2027,6 +2034,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           model: "gpt-live",
           provider: "unknown",
           ...admissionFields(admission),
+          inboundTransport: "websocket",
         };
         const turnAdmissionLease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
         if (!turnAdmissionLease) return serverBusyResponse(req, "active turns", policy);
@@ -2271,6 +2279,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             provider: "unknown",
             ...(wsAdmission ? admissionFields(wsAdmission) : {}),
             inboundProtocol: "responses",
+            inboundTransport: "websocket",
           };
           let logged = false;
           const finalizeLog = (

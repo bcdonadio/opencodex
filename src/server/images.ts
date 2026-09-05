@@ -31,7 +31,7 @@ import { resolveFirstUsableOpenAiSidecar, selectImagesProvider } from "../provid
 import { getProviderRegistryEntry } from "../providers/registry";
 import { readJsonRequestBody } from "./request-decompress";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
-import type { RequestLogContext } from "./request-log";
+import { observeRequestTransport, type RequestLogContext } from "./request-log";
 import { codexLogAccountId, decodeRequestErrorResponse } from "./responses";
 import { getValidAccessToken, getOAuthCredentialProjectId } from "../oauth/index";
 import { safeAntigravityHttpErrorMessage } from "../adapters/google-errors";
@@ -286,6 +286,7 @@ async function tryCcaImageGeneration(
   let upstream: Response;
   try {
     try {
+      observeRequestTransport(logCtx, "http");
       upstream = await fetch(`${baseUrl}/v1internal:generateContent`, {
         method: "POST",
         headers: {
@@ -722,6 +723,7 @@ export async function handleImages(
   try {
     // Images POSTs create paid, non-idempotent work. One fetch only: no reset retry without a
     // source-proven idempotency contract.
+    observeRequestTransport(logCtx, "http");
     upstreamResponse = await fetch(url, {
       method: "POST",
       headers,

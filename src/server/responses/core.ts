@@ -294,6 +294,7 @@ import {
   recordAdapterTier,
   recordAdapterTierMetadata,
   recordAttemptRequestedEffort,
+  observeRequestTransport,
   requestLogSpeedLabel,
   sealRequestAttemptIdentity,
   usageFromResponsesPayload,
@@ -1361,6 +1362,7 @@ async function retryCodexPoolOnAlternateAccount(
             onCodexWsQuota: codexWsQuotaObserver(retryAuthCtx, route.provider),
             beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
               ? createCodexReserveDispatchGuard(retryAuthCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
+            onTransport: transport => observeRequestTransport(logCtx, transport),
           }),
           // Credential-bearing forward send: never follow a redirect into a
           // dead-host rejection after the credential was seen (#914).
@@ -1593,7 +1595,7 @@ export interface HandleResponsesOptions {
    */
   inboundWire?: InboundWire;
   /** Internal transport identity for route-scoped upstream compatibility policy. */
-  inboundTransport?: "websocket";
+  inboundTransport?: "http" | "websocket";
   /**
    * Claude replay may add native-main auth so OpenAI sidecars remain available.
    * Strip only that internal credential when the final route is a noncanonical
@@ -2199,7 +2201,7 @@ async function applyFinalRouteRequestNormalization(args: {
   req: Request;
   logCtx: RequestLogContext;
   inboundWire: InboundWire;
-  inboundTransport?: "websocket";
+  inboundTransport?: "http" | "websocket";
 }): Promise<void> {
   const { parsed, route, config, req, logCtx, inboundWire, inboundTransport } = args;
 
@@ -4698,6 +4700,7 @@ async function handleResponsesInner(
               onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
               beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                 ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
+              onTransport: transport => observeRequestTransport(logCtx, transport),
             }),
             route.provider.authMode === "forward")
             // Every real attempt response — including an intermediate 5xx the
@@ -4774,6 +4777,7 @@ async function handleResponsesInner(
                 onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
                 beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                   ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
+                onTransport: transport => observeRequestTransport(logCtx, transport),
               }),
               route.provider.authMode === "forward")
               .then(response => {
@@ -4878,6 +4882,7 @@ async function handleResponsesInner(
               onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
               beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                 ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
+              onTransport: transport => observeRequestTransport(logCtx, transport),
             }),
             codex401ReplayKind === "stored" ? options.onStoredPool401ReplayDispatched : undefined,
           ),
@@ -4987,6 +4992,7 @@ async function handleResponsesInner(
                 onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
                 beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                   ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
+                onTransport: transport => observeRequestTransport(logCtx, transport),
               }),
               route.provider.authMode === "forward")
               .then(res => {
@@ -5089,6 +5095,7 @@ async function handleResponsesInner(
                 onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
                 beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
                   ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
+                onTransport: transport => observeRequestTransport(logCtx, transport),
               }),
               route.provider.authMode === "forward")
               .then(res => {
@@ -5947,7 +5954,11 @@ async function handleResponsesInner(
     const imageProviderFetch = providerFetch(
       route.provider,
       options.codexWsRuntimeIdentity,
-      { providerName: route.providerName, modelId: route.modelId },
+      {
+        providerName: route.providerName,
+        modelId: route.modelId,
+        onTransport: transport => observeRequestTransport(logCtx, transport),
+      },
     );
     const imgResponse = await runWithImageBridge({
       parsed, adapter,
@@ -6024,6 +6035,7 @@ async function handleResponsesInner(
       providerFetch(route.provider, options.codexWsRuntimeIdentity, {
         providerName: route.providerName,
         modelId: route.modelId,
+        onTransport: transport => observeRequestTransport(logCtx, transport),
       })(input, init)) as typeof globalThis.fetch;
     const wsResponse = await runWithWebSearch({
       parsed, adapter,
@@ -6136,6 +6148,7 @@ async function handleResponsesInner(
             // Cursor HTTP/1.1 consumes it for RunSSE; every BidiAppend and redial then waits on
             // the same provider queue through this stateful wrapper.
             pacingSlotAcquired: true,
+            onTransport: transport => observeRequestTransport(logCtx, transport),
           },
         );
         await runTurnAdapter.runTurn?.(
@@ -6533,6 +6546,7 @@ async function handleResponsesInner(
         executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
           providerName: route.providerName,
           modelId: route.modelId,
+          onTransport: transport => observeRequestTransport(logCtx, transport),
         }),
       });
     } else {
@@ -6558,6 +6572,7 @@ async function handleResponsesInner(
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
               providerName: route.providerName,
               modelId: route.modelId,
+              onTransport: transport => observeRequestTransport(logCtx, transport),
             }));
         },
         {
@@ -6652,6 +6667,7 @@ async function handleResponsesInner(
               executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
                 providerName: route.providerName,
                 modelId: route.modelId,
+                onTransport: transport => observeRequestTransport(logCtx, transport),
               }),
             });
           }
@@ -6673,6 +6689,7 @@ async function handleResponsesInner(
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
                 providerName: route.providerName,
                 modelId: route.modelId,
+                onTransport: transport => observeRequestTransport(logCtx, transport),
               })),
             {
               abortSignal: upstream.signal,
@@ -7123,6 +7140,7 @@ async function handleResponsesInner(
             executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
               providerName: route.providerName,
               modelId: nextParsed.modelId,
+              onTransport: transport => observeRequestTransport(logCtx, transport),
             }),
           });
         }
@@ -7148,6 +7166,7 @@ async function handleResponsesInner(
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
                 providerName: route.providerName,
                 modelId: nextParsed.modelId,
+                onTransport: transport => observeRequestTransport(logCtx, transport),
               }),
             );
           },

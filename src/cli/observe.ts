@@ -12,6 +12,7 @@ import {
 } from "./runtime-api";
 import { formatUsageReport } from "./usage-report";
 import { USAGE_RANGES, USAGE_SURFACES } from "../usage/summary";
+import { ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 
 const USAGE = `Usage:
   ocx observe logs [--provider <name>] [--model <id>] [--status <code>]
@@ -55,7 +56,13 @@ function formatLog(row: LogEntry): string {
   const conversation = typeof row.conversationId === "string" && row.conversationId.length > 0
     ? `conv=${row.conversationId}`
     : "";
-  return [time, String(status), route, duration, conversation].filter(Boolean).join("  ");
+  const client = row.inboundTransport === "http" || row.inboundTransport === "websocket"
+    ? `client=${row.inboundTransport}` : "";
+  const upstream = row.upstreamTransport === "http" || row.upstreamTransport === "websocket" || row.upstreamTransport === "mixed"
+    ? `upstream=${row.upstreamTransport}` : "";
+  const account = typeof row.accountLogLabel === "string" && ACCOUNT_LOG_LABEL_RE.test(row.accountLogLabel)
+    ? `account=${row.accountLogLabel}` : "";
+  return [time, String(status), route, duration, conversation, client, upstream, account].filter(Boolean).join("  ");
 }
 
 async function logs(argv: string[], deps: RuntimeApiDeps): Promise<void> {

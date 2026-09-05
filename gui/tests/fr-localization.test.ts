@@ -77,6 +77,12 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "logs.badge.claude",
   "logs.badge.grok",
   "logs.col.estimatedCost",
+  "logs.transport.http",
+  "logs.transport.websocket",
+  "logs.transport.mixed",
+  "logs.transport.row",
+  // Alias and stable log label are placeholders only; punctuation is language-neutral.
+  "logs.account.withAlias",
   "logs.detail.ttft",
   "storage.card.home",
   "storage.cleanup.preset",

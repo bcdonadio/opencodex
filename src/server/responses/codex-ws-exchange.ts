@@ -14,11 +14,12 @@ interface ExchangeOptions {
   sseFallback: typeof globalThis.fetch;
   onQuota?: CodexWsQuotaObserver;
   beforeDispatch?: (headers: Headers) => void;
+  onTransport?: (transport: "http" | "websocket") => void;
 }
 
 /** The sole SSE exchange state machine for both one-shot and retained sockets. */
 export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
-  const { session, url, init, prepared, sseFallback, onQuota, beforeDispatch } = options;
+  const { session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport } = options;
   const { frameText, headers } = prepared;
   const signal = init.signal ?? undefined;
   return new Promise<Response>((resolve, reject) => {
@@ -126,8 +127,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       }
       if (terminal || settledPreOpen || signal?.aborted) return;
       sent = true;
+      let sentSuccessfully = false;
       try {
         ws.send(frameText);
+        sentSuccessfully = true;
       } catch {
         if (received || responseCommitted) {
           if (terminal) session.dispose();
@@ -144,6 +147,13 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         session.dispose();
         resolve(sseFallback(url, init));
         return;
+      }
+      // A successful send is the first point at which this logical request has
+      // crossed the upstream WebSocket boundary. Keep this observer outside
+      // the send catch: a telemetry failure must never trigger an HTTP resend
+      // after a frame was accepted by the socket.
+      if (sentSuccessfully) {
+        try { onTransport?.("websocket"); } catch { /* telemetry is observational */ }
       }
       if (!metadata) commitResponse();
       else if (!responseCommitted && !terminal) {

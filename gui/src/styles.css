@@ -2217,6 +2217,7 @@ table.logs-table {
   align-items: flex-start;
   gap: var(--space-0-5);
 }
+.logs-row-meta { line-height: var(--leading-tight); white-space: normal; }
 
 .logs-model-cell {
   display: inline-flex;

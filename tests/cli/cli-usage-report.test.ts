@@ -223,6 +223,39 @@ describe("ocx logs --conversation", () => {
   });
 });
 
+describe("ocx logs transport and account metadata", () => {
+  test("shows the actual client and upstream transports and selected account", async () => {
+    const { out } = await run(["logs"], [{
+      timestamp: "t0", status: 200, provider: "openai", model: "gpt-6-astra",
+      inboundTransport: "websocket", upstreamTransport: "http", accountLogLabel: "pabc123",
+    }]);
+    expect(out).toContain("client=websocket");
+    expect(out).toContain("upstream=http");
+    expect(out).toContain("account=pabc123");
+  });
+
+  test("shows mixed upstream retries and main account without inventing missing fields", async () => {
+    const { out } = await run(["logs"], [{
+      timestamp: "t0", status: 200, provider: "openai", model: "gpt-6-astra",
+      upstreamTransport: "mixed", accountLogLabel: "main",
+    }]);
+    expect(out).toContain("upstream=mixed");
+    expect(out).toContain("account=main");
+    expect(out).not.toContain("client=");
+  });
+
+  test("does not render malformed transport metadata or raw account identifiers", async () => {
+    const { out } = await run(["logs"], [{
+      timestamp: "t0", status: 200, provider: "openai", model: "gpt-6-astra",
+      inboundTransport: "guessed", upstreamTransport: "sse", accountLogLabel: "not-a-log-label",
+    }]);
+    expect(out).not.toContain("client=");
+    expect(out).not.toContain("upstream=");
+    expect(out).not.toContain("account=");
+    expect(out).not.toContain("not-a-log-label");
+  });
+});
+
 describe("ocx logs --follow output contract", () => {
   test("--follow --json names the conflict without implying that follow enables JSONL", async () => {
     const errors: string[] = [];

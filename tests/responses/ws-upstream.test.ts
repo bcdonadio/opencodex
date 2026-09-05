@@ -269,6 +269,45 @@ describe("providerFetch routing", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
+  test("reports the transport that actually dispatched, including pre-open HTTP fallback", async () => {
+    const observed: string[] = [];
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: {} }) });
+    });
+    const provider = {
+      fetch: (async () => new Response("http")) as typeof fetch,
+    } as unknown as OcxProviderConfig;
+    const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME, {
+      onTransport: transport => observed.push(transport),
+    });
+    await wrapped(CODEX_URL, streamingInit());
+    expect(observed).toEqual(["websocket"]);
+
+    observed.length = 0;
+    installFake(ws => ws.close());
+    await wrapped(CODEX_URL, streamingInit());
+    expect(observed).toEqual(["http"]);
+  });
+
+  test("transport observer failure cannot resend a successfully sent WS frame", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: {} }) });
+    });
+    let baseCalls = 0;
+    const provider = {
+      fetch: (async () => { baseCalls += 1; return new Response("http"); }) as typeof fetch,
+    } as unknown as OcxProviderConfig;
+    const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME, {
+      onTransport: () => { throw new Error("telemetry failed"); },
+    });
+    const response = await wrapped(CODEX_URL, streamingInit());
+    expect(response.status).toBe(200);
+    expect(baseCalls).toBe(0);
+    expect(FakeWebSocket.instances[0]?.sent).toHaveLength(1);
+  });
+
   test("routes an opt-in provider's Responses streams over its upstream WS", async () => {
     installFake(ws => {
       ws.emit("open", {});
