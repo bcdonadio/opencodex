@@ -25,6 +25,9 @@ import {
 
 const MAX_STORED_RESPONSES = 1_000;
 const RESPONSE_TTL_MS = 60 * 60 * 1_000;
+const EPHEMERAL_RESPONSE_TTL_MS = 15 * 60 * 1_000;
+const MAX_EPHEMERAL_RESPONSES = 128;
+const MAX_EPHEMERAL_RESPONSE_BYTES = 8 * 1024 * 1024;
 const SNAPSHOT_DEBOUNCE_MS = 2_000;
 /** Snapshot size below which the debounce stays at its base value. */
 const SNAPSHOT_DEBOUNCE_SCALE_FROM_BYTES = 1 * 1024 * 1024;
@@ -121,10 +124,15 @@ type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
 
 export type PreviousResponseReplayFailure = {
   code: "previous_response_not_found";
-  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large";
+  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "ephemeral_scope_mismatch";
 };
 
 const states = new Map<string, StoredResponseState>();
+type EphemeralResponseState = ResidentResponseState & { responseId: string; expiresAt: number };
+const ephemeralStates = new Map<string, EphemeralResponseState>();
+let ephemeralBodyExpiry = new WeakMap<object, number>();
+let ephemeralResponseBytes = 0;
+let ephemeralExpiryTimer: ReturnType<typeof setTimeout> | null = null;
 const replayScopeMismatches = new WeakSet<object>();
 let storedResponseBytes = 0;
 let residentResponseBytes = 0;
@@ -2069,16 +2077,40 @@ function withoutPreviousResponseId(request: Record<string, unknown>): Record<str
   return freshRequest;
 }
 
-export function expandPreviousResponseInput(body: unknown, clientThreadId?: string): unknown {
+function ephemeralResponseKey(scope: string, responseId: string): string {
+  return JSON.stringify([scope, responseId]);
+}
+
+export function expandPreviousResponseInput(
+  body: unknown,
+  clientThreadId?: string,
+  ephemeralScope?: string,
+): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
   const request = body as Record<string, unknown>;
   const previousId = typeof request.previous_response_id === "string" ? request.previous_response_id : undefined;
   if (!previousId) return body;
   ensureLoaded();
   pruneResponses();
-  const previous = states.get(previousId);
+  pruneEphemeralResponses();
+  const normalizedEphemeralScope = typeof ephemeralScope === "string" && ephemeralScope.trim().length > 0
+    ? ephemeralScope
+    : undefined;
+  const ephemeral = normalizedEphemeralScope
+    ? ephemeralStates.get(ephemeralResponseKey(normalizedEphemeralScope, previousId))
+    : undefined;
+  if (!ephemeral && [...ephemeralStates.values()].some(state => state.responseId === previousId)) {
+    replayFailures.set(request, {
+      code: "previous_response_not_found",
+      reason: "ephemeral_scope_mismatch",
+    });
+    return body;
+  }
+  const previous = ephemeral ?? states.get(previousId);
   if (!previous) return body;
-  const materialized = materializeEntry(previousId, previous);
+  const materialized = ephemeral
+    ? { ok: true as const, state: { ...ephemeral, items: structuredClone(ephemeral.items) } }
+    : materializeEntry(previousId, previous);
   if (!materialized.ok) {
     replayFailures.set(request, materialized.failure);
     return body;
@@ -2123,6 +2155,10 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
       // not re-acknowledge historical compaction markers (parser.ts) and stays visible to
       // guidance de-duplication (collaboration.ts).
       replayedInputPrefixLengths.set(unchanged, carried);
+      if (ephemeral) {
+        markBodyNonPersistable(unchanged);
+        ephemeralBodyExpiry.set(unchanged, ephemeral.expiresAt);
+      }
       return unchanged;
     }
   }
@@ -2130,6 +2166,10 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
     ...request,
     input: [...materialized.state.items, ...inputItems(request.input)],
   };
+  if (ephemeral) {
+    markBodyNonPersistable(expanded);
+    ephemeralBodyExpiry.set(expanded, ephemeral.expiresAt);
+  }
   replayedInputPrefixLengths.set(expanded, materialized.state.items.length);
   return expanded;
 }
@@ -2154,6 +2194,11 @@ export function copyPreviousResponseReplayProvenance(source: unknown, target: un
   const input = (target as { input?: unknown }).input;
   if (!Array.isArray(input) || prefixLength > input.length) return;
   replayedInputPrefixLengths.set(target, prefixLength);
+  const expiry = ephemeralBodyExpiry.get(source as object);
+  if (expiry !== undefined) {
+    markBodyNonPersistable(target);
+    ephemeralBodyExpiry.set(target as object, expiry);
+  }
 }
 
 /** True when a stale or foreign previous_response_id was removed from this exact request body. */
@@ -2272,15 +2317,85 @@ export function markBodyNonPersistable(body: unknown): void {
   if (body && typeof body === "object") nonPersistableBodies.add(body as object);
 }
 
+function pruneEphemeralResponses(at = now()): void {
+  for (const [id, state] of ephemeralStates) {
+    if (state.expiresAt > at) continue;
+    ephemeralStates.delete(id);
+    ephemeralResponseBytes -= state.sizeBytes;
+  }
+  while (ephemeralStates.size > MAX_EPHEMERAL_RESPONSES
+    || ephemeralResponseBytes > MAX_EPHEMERAL_RESPONSE_BYTES) {
+    const oldest = ephemeralStates.keys().next().value as string | undefined;
+    if (!oldest) break;
+    ephemeralResponseBytes -= ephemeralStates.get(oldest)!.sizeBytes;
+    ephemeralStates.delete(oldest);
+  }
+  if (ephemeralExpiryTimer) clearTimeout(ephemeralExpiryTimer);
+  const next = [...ephemeralStates.values()].reduce<number | null>(
+    (expiry, state) => expiry === null || state.expiresAt < expiry ? state.expiresAt : expiry,
+    null,
+  );
+  ephemeralExpiryTimer = next === null ? null : setTimeout(
+    () => pruneEphemeralResponses(),
+    Math.max(1, next - now()),
+  );
+  ephemeralExpiryTimer?.unref?.();
+}
+
+function rememberEphemeralResponseState(
+  request: Record<string, unknown>,
+  response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
+  clientThreadId?: string,
+  ephemeralScope?: string,
+): void {
+  if (!ephemeralScope || ephemeralScope.trim().length === 0) return;
+  if (typeof response.id !== "string" || !Array.isArray(response.output)) return;
+  if (response.status === "incomplete") {
+    const details = response.incomplete_details;
+    if (!details || typeof details !== "object" || Array.isArray(details)
+      || (details as { reason?: unknown }).reason !== "max_output_tokens") return;
+  } else if (response.status !== undefined && response.status !== "completed") return;
+  const createdAt = now();
+  const expiresAt = ephemeralBodyExpiry.get(request) ?? createdAt + EPHEMERAL_RESPONSE_TTL_MS;
+  if (expiresAt <= createdAt) return;
+  let requestItems: unknown[];
+  let output: unknown[];
+  try {
+    requestItems = structuredClone(inputItems(request.input));
+    output = structuredClone(response.output);
+  } catch {
+    return;
+  }
+  const candidate = measureResidentEntry(response.id, {
+    createdAt,
+    ...(normalizedClientThreadId(clientThreadId) ? { clientThreadId: normalizedClientThreadId(clientThreadId) } : {}),
+    items: [...requestItems, ...output],
+    providerOutputStart: requestItems.length,
+  });
+  if (!candidate || candidate.sizeBytes > MAX_EPHEMERAL_RESPONSE_BYTES) return;
+  const key = ephemeralResponseKey(ephemeralScope, response.id);
+  const previous = ephemeralStates.get(key);
+  if (previous) ephemeralResponseBytes -= previous.sizeBytes;
+  ephemeralStates.delete(key);
+  ephemeralStates.set(key, { ...candidate, responseId: response.id, expiresAt });
+  ephemeralResponseBytes += candidate.sizeBytes;
+  pruneEphemeralResponses(createdAt);
+}
+
 export function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
   providerState?: OcxProviderContinuationState | string,
-  opts?: { force?: boolean; clientThreadId?: string },
+  opts?: { force?: boolean; clientThreadId?: string; ephemeral?: boolean; ephemeralScope?: string },
 ): void {
   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
   const request = requestBody as Record<string, unknown>;
-  if (nonPersistableBodies.has(request)) return;
+  if (nonPersistableBodies.has(request)) {
+    if (opts?.ephemeral) {
+      rememberEphemeralResponseState(request, response, opts.clientThreadId, opts.ephemeralScope);
+    }
+    return;
+  }
   // `force` bypasses only the store:false skip: Codex sends `store:false` on every non-Azure
   // HTTP request (and WS inherits it), yet its WS turns still chain with previous_response_id.
   // The passthrough branch records with force so those chains can be expanded locally; the
@@ -2348,6 +2463,11 @@ export function clearResponseStateMemoryForTests(): void {
     persistTimer = null;
   }
   pendingPersistPath = null;
+  if (ephemeralExpiryTimer) clearTimeout(ephemeralExpiryTimer);
+  ephemeralExpiryTimer = null;
+  ephemeralStates.clear();
+  ephemeralBodyExpiry = new WeakMap<object, number>();
+  ephemeralResponseBytes = 0;
   for (const id of [...pendingResponseSpillById.keys()]) cancelPendingResponseSpill(id);
   pendingResponseSpillById.clear();
   states.clear();

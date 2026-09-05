@@ -322,6 +322,7 @@ import {
 } from "../relay";
 import {
   agentTaskRecoveryConfig,
+  agentTaskRecoveryReplayScope,
   createAgentTaskRecoveryTraceId,
   discardAgentTaskRecoveryResult,
   discardEncryptedAgentTaskRecovery,
@@ -2387,7 +2388,8 @@ export async function handleComboResponses(
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
-  const body = expandPreviousResponseInput(rawBody, inboundClientThreadId);
+  const body = expandPreviousResponseInput(rawBody, inboundClientThreadId,
+    isThreadSpawnRequest(req.headers) ? agentTaskRecoveryReplayScope(req, config) : undefined);
   const scopeMismatch = previousResponseScopeMismatch(body);
   if (scopeMismatch) {
     console.warn("[opencodex] dropped a previous_response_id with a mismatched client task scope; continuing fresh");
@@ -3036,11 +3038,13 @@ async function handleResponsesInner(
   }
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
   const cursorClientThreadId = codexPoolAffinityKey(req.headers);
+  const ephemeralReplayScope = agentTaskRecovery && isThreadSpawnRequest(req.headers)
+    ? agentTaskRecoveryReplayScope(req, config) : undefined;
   const originalBody = body;
   if (options.comboReplaySnapshot) {
     copyPreviousResponseReplayProvenance(options.comboReplaySnapshot.sourceBody, body);
   } else {
-    body = expandPreviousResponseInput(body, inboundClientThreadId);
+    body = expandPreviousResponseInput(body, inboundClientThreadId, ephemeralReplayScope);
     if (previousResponseScopeMismatch(body)) {
       console.warn("[opencodex] dropped a previous_response_id with a mismatched client task scope; continuing fresh");
     }
@@ -4290,12 +4294,18 @@ async function handleResponsesInner(
       && (!parsed.previousResponseId || parsed._previousResponseInputExpanded === true);
     const rememberPassthroughResponse = passthroughRecordEligible
       ? (response: { id?: unknown; output?: unknown; status?: unknown }) =>
-        rememberResponseState(parsed._rawBody, response, undefined, responseStateOptions(true))
+        rememberResponseState(parsed._rawBody, response, undefined, {
+          ...responseStateOptions(true),
+          // Recovered assignments must never enter the disk-backed cache. xAI HTTP
+          // store:false continuations still need a bounded, memory-only full replay.
+          ephemeral: isXaiResponsesDestination(route.provider),
+          ephemeralScope: ephemeralReplayScope,
+        })
       : undefined;
     if (parsed.previousResponseId && !parsed._previousResponseInputExpanded) {
       console.warn(
         `[responses] previous_response_id ${parsed.previousResponseId} not found in local replay state `
-        + `(model ${parsed.modelId}); forwarding without it — earlier turns may be missing from this request`,
+        + `(model ${parsed.modelId}); continuation handling depends on the upstream adapter`,
       );
     }
     // Preserve the caller's readable catalog boundary before provider-specific normalization can

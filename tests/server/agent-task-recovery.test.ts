@@ -1109,6 +1109,49 @@ describe("agent task recovery (opt-in, default off)", () => {
     });
   });
 
+  test("replays recovered xAI native tool continuations without upstream storage", async () => {
+    const config = routedConfig();
+    config.providers.xai!.adapter = "openai-responses";
+    config.providers.xai!.modelAdapters = { "grok-4.5": "openai-responses" };
+    const assignment = "Keep recovered-assignment-731 through the tool round trip.";
+    const bodies: Array<Record<string, unknown>> = [];
+    const call = { type: "function_call", id: "fc_probe", name: "probe", call_id: "call_probe", arguments: "{}", status: "completed" };
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        return new Response(recoverySse(assignment), { headers: { "content-type": "text/event-stream" } });
+      }
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ id: `resp_native_${bodies.length}`, object: "response", status: "completed",
+        model: "grok-4.5", output: bodies.length === 1 ? [call] : [],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } });
+    }) as typeof fetch;
+    const headers = codexHeaders("acct-caller", { "x-codex-parent-thread-id": "task-native-continuation" });
+    const tools = [{ type: "function", name: "probe", parameters: { type: "object", properties: {} } }];
+    const send = (body: Record<string, unknown>, requestHeaders = headers) => handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json", ...Object.fromEntries(requestHeaders) },
+      body: JSON.stringify({ model: "xai/grok-4.5", store: false, stream: false, tools, ...body }),
+    }), config, { model: "", provider: "" });
+    const first = await send({ input: encryptedInput(), instructions: "Initial instruction." });
+    expect(first.status).toBe(200);
+    await first.text();
+    const foreign = await send({ previous_response_id: "resp_native_1", input: [] },
+      codexHeaders("acct-other", { "x-codex-parent-thread-id": "task-native-continuation" }));
+    expect(foreign.status).toBe(400);
+    expect(JSON.stringify(await foreign.json())).not.toContain(assignment);
+    expect(bodies).toHaveLength(1);
+    const second = await send({ previous_response_id: "resp_native_1", instructions: "Updated instruction.",
+      input: [{ type: "function_call_output", call_id: "call_probe", output: "result-731" }] });
+    expect(second.status).toBe(200);
+    await second.text();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).not.toHaveProperty("previous_response_id");
+    expect(bodies[1]!.instructions).toBe("Updated instruction.");
+    expect(JSON.stringify(bodies[1]!.input)).toContain(assignment);
+    expect(JSON.stringify(bodies[1]!.input)).toContain("result-731");
+    expect(JSON.stringify(bodies[1]!.input)).toContain('"name":"probe"');
+    expect(JSON.stringify(bodies[1]!.input)).not.toContain(FERNET_TASK);
+  });
+
   test("recovers an encrypted routed task materialized from previous_response_id", async () => {
     const assignment = "Recover the continued GPT child assignment.";
     rememberResponseState(

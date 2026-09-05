@@ -731,3 +731,17 @@ no quota bars rather than a fabricated one, and windows the plan does not report
 absent instead of rendering as 0%.
 
 A provider using a non-canonical `baseUrl` is never sent the key for this probe.
+
+### xAI Responses continuations
+
+Grok 4.5 and 4.6 subscription routes use native Responses. OpenCodex adapts
+continuation instructions to xAI's request format while preserving the current
+instructions and tool results. API-key routes can also select `openai-responses`.
+
+When an encrypted subagent assignment has been recovered, `store: false` tool
+continuations use a separate memory-only replay cache bound to the authenticated
+recovery credential and client task. Recovered plaintext never
+enters the response snapshot or spill files. This cache is bounded to 128 entries
+and 8 MiB, with a 15-minute expiry inherited across the continuation chain; a proxy
+restart clears it. Start a fresh subagent if its continuation state has expired
+the recovery credential changed, or the proxy restarted.

@@ -22,6 +22,7 @@ import { rewriteRoutedToolSearchForUpstream } from "../responses/tool-search-com
 import { rewriteRoutedNamespaceToolsForUpstream } from "../responses/namespace-tool-compat";
 import { openaiResponsesUrl } from "./openai-responses-url";
 import { normalizeResponsesCodeMode } from "./responses-code-mode";
+import { isXaiResponsesDestination } from "../providers/xai-transport";
 import { injectXaiResponsesXSearch, normalizeXaiResponsesWebSearch } from "./xai-web-search";
 import { EMPTY_TOOL_OUTPUT_ANNOTATION, isWhitespaceOnlyTextPartArray } from "./empty-tool-output-annotation";
 import {
@@ -1370,6 +1371,22 @@ function stripPreviousResponseId(body: unknown, strip: boolean): unknown {
   return rest;
 }
 
+/** xAI forbids top-level instructions with a native continuation id. Keep both meanings:
+ * retain the upstream chain and send the current instructions as a privileged input message.
+ * In particular, encrypted task recovery deliberately cannot use the persisted replay cache.
+ */
+function normalizeXaiContinuationInstructions(body: unknown, provider: OcxProviderConfig): unknown {
+  if (!isXaiResponsesDestination(provider) || !isPlainObject(body)
+    || typeof body.previous_response_id !== "string" || body.previous_response_id.length === 0
+    || typeof body.instructions !== "string") return body;
+  const { instructions, ...rest } = body;
+  if (instructions === "") return rest;
+  const input = Array.isArray(body.input) ? body.input
+    : typeof body.input === "string" ? [{ role: "user", content: body.input }] : undefined;
+  if (!input) return body;
+  return { ...rest, input: [{ role: "system", content: instructions }, ...input] };
+}
+
 /** Apply the settled tier only to a fresh outbound object; `_rawBody` remains caller-owned. */
 function applyTierDecisionToResponsesBody(body: unknown, decision: TierDecision | undefined): unknown {
   if (!decision || decision.kind === "forward-caller" || !isPlainObject(body)) return body;
@@ -2455,6 +2472,8 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       // Run after routed compaction so nested input_image parts are replaced before a malformed
       // tool output is flattened to text and can no longer be inspected structurally.
       outBody = repairUnidentifiedToolOutputItems(outBody);
+      // Code-mode guidance can add instructions, so normalize the xAI envelope after it.
+      outBody = normalizeXaiContinuationInstructions(outBody, provider);
       const threadServingIdentityChanged = parsed._stripReasoningEncryptedContent === true;
       const sanitizedBody = normalizeToolSchemas(
         stripSparkCompatibility(

@@ -394,6 +394,13 @@ function recoveryAdmission(req: Request, config: OcxConfig, traceId?: string): R
   return { headers, cacheScope };
 }
 
+/** Reuse the authenticated, process-keyed recovery scope for memory-only replay.
+ * No bearer or account identifier is retained by the continuation store.
+ */
+export function agentTaskRecoveryReplayScope(req: Request, config: OcxConfig): string | undefined {
+  return agentTaskRecoveryConfig(config) ? recoveryAdmission(req, config)?.cacheScope : undefined;
+}
+
 interface AdmittedRecovery {
   envelope: AgentEnvelope;
   admission: RecoveryAdmission;

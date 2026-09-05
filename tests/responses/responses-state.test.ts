@@ -27,6 +27,7 @@ import { createSseInspector } from "../../src/server/relay";
 import {
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
+  copyPreviousResponseReplayProvenance,
   evictOldestResponseContinuationForBudget,
   expandPreviousResponseInput,
   flushResponseState,
@@ -3751,6 +3752,201 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
       const raw = readFileSync(join(home, "responses-state.json"), "utf-8");
       expect(raw).not.toContain("resp_marked");
       expect(raw).toContain("resp_sibling");
+    });
+
+    test("explicit ephemeral retention replays in memory without reaching disk", async () => {
+      const recovered = {
+        model: "m",
+        input: [{ type: "message", role: "user", content: "EPHEMERAL-PLAINTEXT-SENTINEL" }],
+        store: false,
+      };
+      markBodyNonPersistable(recovered);
+      const firstResponse = completedResponse("resp_ephemeral", "tool call");
+      firstResponse.output[0]!.id = "msg_ephemeral";
+      rememberResponseState(
+        recovered,
+        firstResponse,
+        undefined,
+        { force: true, ephemeral: true, ephemeralScope: "scope-a" },
+      );
+
+      const expanded = expandPreviousResponseInput({
+        previous_response_id: "resp_ephemeral",
+        input: [{ type: "function_call_output", call_id: "call_1", output: "done" }],
+      }, undefined, "scope-a") as { input: unknown[] };
+      expect(expanded.input[0]).toMatchObject({
+        type: "message", role: "user", content: "EPHEMERAL-PLAINTEXT-SENTINEL",
+      });
+      expect(previousResponseReplayPrefixLength(expanded)).toBe(2);
+      recovered.input[0]!.content = "MUTATED-AFTER-RECORD";
+      firstResponse.output[0]!.content[0]!.text = "MUTATED-AFTER-RECORD";
+      expect(JSON.stringify(expanded)).not.toContain("MUTATED-AFTER-RECORD");
+
+      rememberResponseState(
+        expanded,
+        completedResponse("resp_ephemeral_child", "finished"),
+        undefined,
+        { force: true, ephemeral: true, ephemeralScope: "scope-a" },
+      );
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_child" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toHaveLength(4);
+
+      const carried = expandPreviousResponseInput({
+        previous_response_id: "resp_ephemeral",
+        input: expanded.input.slice(0, 2),
+      }, undefined, "scope-a") as { input: unknown[] };
+      expect(carried.input).toHaveLength(2);
+      rememberResponseState(
+        carried,
+        completedResponse("resp_ephemeral_carried", "carried"),
+        undefined,
+        { ephemeral: true, ephemeralScope: "scope-a" },
+      );
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_carried" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeDefined();
+
+      const cloned = structuredClone(expanded);
+      copyPreviousResponseReplayProvenance(expanded, cloned);
+      rememberResponseState(
+        cloned,
+        completedResponse("resp_ephemeral_clone", "clone"),
+        undefined,
+        { ephemeral: true, ephemeralScope: "scope-a" },
+      );
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_clone" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeDefined();
+
+      rememberResponseState(
+        { input: ["ordinary snapshot trigger"] },
+        completedResponse("resp_snapshot_trigger", "persist me"),
+      );
+      await flushResponseState();
+      const raw = existsSync(join(home, "responses-state.json"))
+        ? readFileSync(join(home, "responses-state.json"), "utf-8")
+        : "";
+      expect(raw).not.toContain("EPHEMERAL-PLAINTEXT-SENTINEL");
+      expect(raw).not.toContain("resp_ephemeral");
+      expect(raw).toContain("resp_snapshot_trigger");
+    });
+
+    test("ephemeral chain expiry is absolute and cannot be refreshed by descendants", () => {
+      const realNow = Date.now;
+      let clock = realNow();
+      Date.now = () => clock;
+      try {
+        const recovered = { input: ["secret"] };
+        markBodyNonPersistable(recovered);
+        rememberResponseState(
+          recovered,
+          completedResponse("resp_ephemeral_root", "root"),
+          undefined,
+          { ephemeral: true, ephemeralScope: "scope-a" },
+        );
+        clock += 14 * 60 * 1_000;
+        const expanded = expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_root" }, undefined, "scope-a") as {
+          input?: unknown[];
+        };
+        expect(expanded.input).toBeDefined();
+        rememberResponseState(
+          expanded,
+          completedResponse("resp_ephemeral_descendant", "child"),
+          undefined,
+          { ephemeral: true, ephemeralScope: "scope-a" },
+        );
+        clock += 61 * 1_000;
+        expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_root" }, undefined, "scope-a") as {
+          input?: unknown[];
+        }).input).toBeUndefined();
+        expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_descendant" }, undefined, "scope-a") as {
+          input?: unknown[];
+        }).input).toBeUndefined();
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
+    test("ephemeral retention enforces task ownership and count capacity", () => {
+      for (let index = 0; index < 129; index += 1) {
+        const request = { input: [`secret-${index}`] };
+        markBodyNonPersistable(request);
+        rememberResponseState(
+          request,
+          completedResponse(`resp_ephemeral_count_${index}`, `result-${index}`),
+          undefined,
+          { ephemeral: true, ephemeralScope: "scope-a", clientThreadId: "task-a" },
+        );
+      }
+      expect((expandPreviousResponseInput(
+        { previous_response_id: "resp_ephemeral_count_0" },
+        "task-a",
+        "scope-a",
+      ) as { input?: unknown[] }).input).toBeUndefined();
+      expect((expandPreviousResponseInput(
+        { previous_response_id: "resp_ephemeral_count_128" },
+        "task-b",
+        "scope-a",
+      ) as { input?: unknown[] }).input).toBeUndefined();
+      expect((expandPreviousResponseInput(
+        { previous_response_id: "resp_ephemeral_count_128" },
+        "task-a",
+        "scope-a",
+      ) as { input?: unknown[] }).input).toBeDefined();
+    });
+
+    test("ephemeral response IDs are isolated by credential scope", () => {
+      for (const [scope, secret] of [["scope-a", "secret-a"], ["scope-b", "secret-b"]] as const) {
+        const request = { input: [secret] };
+        markBodyNonPersistable(request);
+        rememberResponseState(
+          request,
+          completedResponse("resp_shared_ephemeral", scope),
+          undefined,
+          { ephemeral: true, ephemeralScope: scope, clientThreadId: "task-shared" },
+        );
+      }
+      const replay = (scope?: string) => {
+        const request = { previous_response_id: "resp_shared_ephemeral" };
+        const result = expandPreviousResponseInput(request, "task-shared", scope) as { input?: unknown[] };
+        return { request, result, failure: previousResponseReplayFailure(result) };
+      };
+      expect(JSON.stringify(replay("scope-a").result)).toContain("secret-a");
+      expect(JSON.stringify(replay("scope-a").result)).not.toContain("secret-b");
+      expect(JSON.stringify(replay("scope-b").result)).toContain("secret-b");
+      expect(JSON.stringify(replay("scope-b").result)).not.toContain("secret-a");
+      expect(replay("scope-c").failure).toEqual({
+        code: "previous_response_not_found", reason: "ephemeral_scope_mismatch",
+      });
+      expect(replay().failure).toEqual({
+        code: "previous_response_not_found", reason: "ephemeral_scope_mismatch",
+      });
+    });
+
+    test("ephemeral byte capacity evicts oldest entries and rejects one oversized entry", () => {
+      const rememberEphemeral = (id: string, content: string) => {
+        const request = { input: [content] };
+        markBodyNonPersistable(request);
+        rememberResponseState(request, completedResponse(id, "ok"), undefined, { ephemeral: true, ephemeralScope: "scope-a" });
+      };
+      rememberEphemeral("resp_ephemeral_small", "small");
+      rememberEphemeral("resp_ephemeral_bytes_1", "a".repeat(5 * 1024 * 1024));
+      rememberEphemeral("resp_ephemeral_bytes_2", "b".repeat(5 * 1024 * 1024));
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_bytes_1" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeUndefined();
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_bytes_2" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeDefined();
+
+      rememberEphemeral("resp_ephemeral_oversized", "z".repeat(9 * 1024 * 1024));
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_oversized" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeUndefined();
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_bytes_2" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeDefined();
     });
   });
 });
