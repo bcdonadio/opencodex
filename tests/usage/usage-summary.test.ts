@@ -11,6 +11,8 @@ import {
   summarizeUsage,
 } from "../../src/usage/summary";
 import type { PersistedUsageEntry } from "../../src/usage/log";
+import { buildRouteDecisionTrace } from "../../src/routing/trace";
+import { isUnresolvedRequestedModel } from "../../src/usage/model-identity";
 
 const FIXED_NOW = Date.UTC(2026, 5, 28, 12, 0, 0);
 
@@ -31,8 +33,120 @@ function entry(overrides: Partial<PersistedUsageEntry> & { ts: number }): Persis
     ...(rest.totalTokens !== undefined ? { totalTokens: rest.totalTokens } : {}),
     ...(rest.attempts ? { attempts: rest.attempts } : {}),
     ...(rest.apiKeyId !== undefined ? { apiKeyId: rest.apiKeyId } : {}),
+    ...(rest.routeDecision ? { routeDecision: rest.routeDecision } : {}),
   };
 }
+
+describe("unresolved requested model attribution", () => {
+  function fallback(model: string, overrides: Partial<PersistedUsageEntry> = {}): PersistedUsageEntry {
+    return entry({
+      ts: FIXED_NOW - 1, provider: "kimi", model, usageStatus: "reported",
+      usage: { inputTokens: 30, outputTokens: 8 }, totalTokens: 38,
+      routeDecision: buildRouteDecisionTrace({
+        requestedModel: model, routeKind: "default-provider",
+        selected: { provider: "kimi", model, reason: "default-provider" },
+      }),
+      ...overrides,
+    });
+  }
+
+  test("preserves slash and bare selectors, provider and tokens without inventing actual models", () => {
+    for (const model of ["anthropic/claude-opus-5", "cursor/grok-4.5", "policy/does-not-exist", "gemini-3.5-pro", "qwen3.8-max"]) {
+      const row = fallback(model);
+      const before = JSON.stringify(row);
+      const summary = summarizeUsage([row], "all", FIXED_NOW);
+      expect(summary.summary).toMatchObject({ requests: 1, attemptCount: 1, totalTokens: 38 });
+      expect(summary.providers[0]).toMatchObject({ provider: "kimi", requests: 1, totalTokens: 38 });
+      expect(summary.models[0]).toMatchObject({ provider: "kimi", model, totalTokens: 38, hasUnresolvedRequestedModel: true });
+      expect(summary.days.flatMap(day => day.models)[0]).toMatchObject({ model, totalTokens: 38, hasUnresolvedRequestedModel: true });
+      expect(summary.models[0]?.resolvedModel).toBeUndefined();
+      expect(JSON.stringify(row)).toBe(before);
+    }
+  });
+
+  test("bare fallback remains priced, slash fallback loses only inferred vendor price", () => {
+    const bare = summarizeUsage([fallback("claude-3-haiku-20240307")], "all", FIXED_NOW);
+    expect(bare.models[0]?.hasUnresolvedRequestedModel).toBe(true);
+    expect(bare.models[0]?.estimatedCostUsd).toBeGreaterThan(0);
+    const slash = summarizeUsage([fallback("anthropic/claude-3-haiku-20240307")], "all", FIXED_NOW);
+    expect(slash.models[0]?.hasUnresolvedRequestedModel).toBe(true);
+    expect(slash.models[0]?.estimatedCostUsd).toBeUndefined();
+    expect(slash.summary).toMatchObject({ totalTokens: 38, pricedRequests: 0, unpricedRequests: 1 });
+  });
+
+  test("requires matching complete trace, not resolvedModel or current model-name guesses", () => {
+    const row = fallback("anthropic/claude-3-haiku-20240307");
+    const trace = row.routeDecision!;
+    const nonEvidence: PersistedUsageEntry[] = [
+      { ...row, routeDecision: undefined, resolvedModel: "kimi-k2.5" },
+      { ...row, routeDecision: { ...trace, truncated: { strings: true } } },
+      { ...row, routeDecision: { ...trace, routeKind: "explicit-provider" } },
+      { ...row, routeDecision: { ...trace, requestedModel: "different" } },
+      { ...row, routeDecision: { ...trace, selected: { ...trace.selected, reason: "blocked-model-redirect" } } },
+      { ...row, provider: "other" },
+      { ...row, model: "different" },
+    ];
+    for (const candidate of nonEvidence) {
+      expect(isUnresolvedRequestedModel(candidate, candidate)).toBe(false);
+      expect(summarizeUsage([candidate], "all", FIXED_NOW).models[0]?.hasUnresolvedRequestedModel).toBeUndefined();
+    }
+    expect(isUnresolvedRequestedModel(row, { ...row, provider: "kimi-pabcdef" })).toBe(true);
+    const echoed = { ...row, resolvedModel: "echo" };
+    expect(isUnresolvedRequestedModel(echoed, row)).toBe(true);
+  });
+
+  test("matches each attempt and preserves partial-cost and filtered attribution", () => {
+    const row = fallback("anthropic/claude-3-haiku-20240307");
+    const attempt = {
+      ordinal: 1, provider: row.provider, model: row.model, adapter: "openai-chat", status: 200,
+      durationMs: 1, sendCount: 1, recoveryKinds: [], usageStatus: "reported" as const,
+      usage: { inputTokens: 15, outputTokens: 4 }, totalTokens: 19,
+    };
+    row.attempts = [attempt, { ...attempt, ordinal: 2, provider: "anthropic", model: "claude-3-haiku-20240307" }];
+    const before = JSON.stringify(row);
+    const summary = summarizeUsage([row], "all", FIXED_NOW);
+    expect(summary.summary).toMatchObject({ requests: 1, attemptCount: 2, totalTokens: 38, pricedRequests: 1 });
+    expect(summary.models.find(model => model.provider === "kimi")).toMatchObject({ totalTokens: 19, hasUnresolvedRequestedModel: true, unpricedRequests: 1 });
+    expect(summary.models.find(model => model.provider === "anthropic")?.hasUnresolvedRequestedModel).toBeUndefined();
+    expect(summary.models.find(model => model.provider === "anthropic")?.estimatedCostUsd).toBeGreaterThan(0);
+    const filtered = createUsageSummaryAccumulator({ filter: { provider: "kimi" } });
+    filtered.add(row);
+    expect(filtered.summarize("all", FIXED_NOW).summary).toMatchObject({ totalTokens: 19, pricedRequests: 0, unpricedRequests: 1 });
+    expect(filtered.summarize("all", FIXED_NOW).models[0]?.hasUnresolvedRequestedModel).toBe(true);
+    expect(JSON.stringify(row)).toBe(before);
+  });
+
+  test("mixed rows retain marker across insertion order, day partitions and cloned accumulation", () => {
+    const marked = fallback("qwen3.8-max");
+    const ordinary = { ...marked, requestId: "ordinary", timestamp: FIXED_NOW - 86_400_000, routeDecision: undefined };
+    for (const rows of [[marked, ordinary], [ordinary, marked]]) {
+      const accumulator = createUsageSummaryAccumulator();
+      accumulator.add(rows[0]!);
+      const cloned = accumulator.clone();
+      cloned.add(rows[1]!);
+      const summary = cloned.summarize("all", FIXED_NOW);
+      expect(summary.models).toHaveLength(1);
+      expect(summary.models[0]).toMatchObject({ requests: 2, totalTokens: 76, hasUnresolvedRequestedModel: true });
+      expect(summary.days.flatMap(day => day.models).filter(model => model.hasUnresolvedRequestedModel)).toHaveLength(1);
+    }
+    const sameDay = { ...ordinary, timestamp: marked.timestamp };
+    for (const rows of [[marked, sameDay], [sameDay, marked]]) {
+      const summary = summarizeUsage(rows, "all", FIXED_NOW);
+      expect(summary.models[0]).toMatchObject({ requests: 2, totalTokens: 76, hasUnresolvedRequestedModel: true });
+      expect(summary.days.flatMap(day => day.models)[0]?.hasUnresolvedRequestedModel).toBe(true);
+    }
+  });
+
+  test("overflow retains includes semantics and all tokens", () => {
+    const rows = Array.from({ length: MAX_USAGE_MODEL_BREAKDOWN_ROWS }, (_, index) =>
+      fallback(`ordinary-${index}`, { requestId: `ordinary-${index}`, routeDecision: undefined }));
+    rows.push(fallback("qwen3.8-max", { requestId: "overflow" }));
+    const summary = summarizeUsage(rows, "all", FIXED_NOW);
+    expect(summary.models.at(-1)).toMatchObject({ provider: "other", model: "other", totalTokens: 76, hasUnresolvedRequestedModel: true });
+    expect(summary.days.flatMap(day => day.models).at(-1)).toMatchObject({ model: "other", hasUnresolvedRequestedModel: true });
+    expect(summary.summary.totalTokens).toBe(rows.length * 38);
+  });
+});
 
 describe("parseRange", () => {
   test("accepts 7d / 30d / all", () => {

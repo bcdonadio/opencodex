@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { saveConfigPreservingClaudeCode } from "../config";
 import { isCodexAccountGenerationLive, readCodexAccountRecord } from "./account-store";
 import { codexAccountLogLabel } from "./account-label";
+import { NATIVE_RESERVE_MODEL } from "./catalog/native-models";
 import { isCodexAccountPaused } from "./account-pause";
 import { clearCodexAccountPin, codexAccountPriorityLookup, pinnedCodexAccountId } from "./account-priority";
 import { isCodexAccountUsable, type CodexAccountUsabilityOptions } from "./account-usability";
@@ -173,7 +174,7 @@ export type CodexCooldownSource = "retry-after" | "reset-derived" | "default";
  * Add a new explicit group here only when its independent upstream quota is
  * confirmed, so shared limits never receive cross-model bypasses.
  */
-export type CodexQuotaScope = "shared" | "spark";
+export type CodexQuotaScope = "shared" | "spark" | "reserve";
 
 export type CodexQuotaRecoveryProbeClaim = {
   accountId: string;
@@ -208,6 +209,7 @@ function isModelDetourAffinityScope(scope: ThreadAffinityScope): scope is ModelD
 
 const NATIVE_MODEL_QUOTA_SCOPES: Readonly<Record<string, CodexQuotaScope>> = {
   "gpt-5.3-codex-spark": "spark",
+  [NATIVE_RESERVE_MODEL]: "reserve",
 };
 
 export function codexQuotaScopeForModel(modelId: string | undefined): CodexQuotaScope | undefined {
@@ -566,7 +568,7 @@ function canAcquireQuotaProbeLease(health: CodexUpstreamHealth | undefined, now:
 
 /**
  * Claim due reset-derived cooldown probes without consulting account selection.
- * Pool credentials only: the main account has no quota-refresh single-flight.
+ * Added Pool credentials only; owned main usage recovery is handled separately.
  */
 export function claimDueCodexQuotaRecoveryProbes(
   config: OcxConfig,
@@ -593,11 +595,10 @@ export function claimDueCodexQuotaRecoveryProbes(
       { scope: undefined, health: upstreamHealth.get(account.id) },
       ...[...(quotaScopedHealth.get(account.id) ?? [])].map(([scope, health]) => ({ scope, health })),
     ].filter((entry): entry is { scope?: CodexQuotaScope; health: CodexUpstreamHealth } =>
-      // `spark` is deliberately never claimed. `GET /backend-api/wham/usage` takes no scope
-      // parameter and returns generic weekly/monthly windows, so its result can never prove a
-      // spark recovery — a claim here would spend an upstream call to settle `false` every
-      // time, and (with one claim per account per pass) delay the shared scope that CAN recover.
-      entry.scope !== "spark"
+      // Generic WHAM evidence can recover only ordinary quota, never Spark or Reserve.
+      // Do not spend this account's one claim per pass on an independent scope and
+      // delay the shared scope that the response can actually recover.
+      (entry.scope === undefined || entry.scope === "shared")
       && entry.health?.cooldownSource === "reset-derived"
       && canAcquireQuotaProbeLease(entry.health, now))
       .sort((a, b) =>

@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction } from "../../src/adapters/openai-responses";
 import { openaiResponsesUrl } from "../../src/adapters/openai-responses-url";
+import { normalizeResponsesCodeMode } from "../../src/adapters/responses-code-mode";
+import { CODE_MODE_RESULT_ECHO_SENTENCE, EMPTY_EXEC_OUTPUT_MESSAGE, FAILED_EXEC_OUTPUT_MESSAGE } from "../../src/adapters/exec-tool-result-normalize";
+import { chatCompletionsToResponsesBody } from "../../src/chat/inbound";
+import { anthropicToResponsesBody } from "../../src/claude/inbound";
+import { parseRequest } from "../../src/responses/parser";
 import { enrichProviderFromRegistry, providerConfigSeed } from "../../src/providers/derive";
 import { getProviderRegistryEntry } from "../../src/providers/registry";
 import { XAI_GROK_CLI_BASE_URL } from "../../src/providers/xai-transport";
@@ -24,6 +30,214 @@ const provider = {
   baseUrl: "https://chatgpt.com/backend-api/codex",
   authMode: "forward" as const,
 };
+
+describe("native routed code-mode result visibility", () => {
+  const routed = { adapter: "openai-responses", baseUrl: "https://api.x.ai/v1", authMode: "key" as const };
+  const exec = { type: "custom", name: "exec", description: "Run JavaScript in a V8 isolate." };
+  const empty = "Script completed\nWall time 0.2 seconds\nOutput:\n";
+  const raw = (output: unknown = empty) => ({
+    model: "grok-4.6", instructions: "Keep this instruction.",
+    tools: [{ type: "namespace", name: "functions", tools: [exec] }],
+    input: [
+      { type: "custom_tool_call", name: "exec", call_id: "call_probe", input: 'await tools.exec_command({cmd: "printf marker"})' },
+      { type: "custom_tool_call_output", call_id: "call_probe", output },
+    ],
+  });
+
+  test("first native request carries the echo rule in instructions and the exact input schema", () => {
+    const body = { ...raw(), input: [{ role: "user", content: "Read a marker with the shell helper." }] };
+    const before = JSON.stringify(body);
+    const request = createResponsesPassthroughAdapter(routed).buildRequest(parseRequest(body));
+    const wire = JSON.parse(request.body);
+    expect(wire.instructions).toBe(`Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}`);
+    expect(wire.tools.find((tool: { name: string }) => tool.name === "exec").parameters.properties.input.description)
+      .toContain(CODE_MODE_RESULT_ECHO_SENTENCE);
+    expect(JSON.stringify(body)).toBe(before);
+  });
+
+  test("the advertised first-call example emits a helper result exactly once", async () => {
+    const example = CODE_MODE_RESULT_ECHO_SENTENCE.match(/`(text\(JSON\.stringify\(await tools\.exec_command[^`]+)`/)?.[1];
+    if (!example) throw new Error("Missing executable result-emission example");
+    const output: unknown[] = [];
+    let calls = 0;
+    const tools = { exec_command: async () => { calls++; return { output: "marker", exit_code: 0 }; } };
+    const run = new Function("tools", "text", `return (async () => { ${example}; })();`);
+    await run(tools, (value: unknown) => output.push(value));
+    expect(calls).toBe(1);
+    expect(output).toEqual(['{"output":"marker","exit_code":0}']);
+  });
+
+  test.each([
+    [empty, EMPTY_EXEC_OUTPUT_MESSAGE],
+    [[{ type: "input_text", text: empty }], EMPTY_EXEC_OUTPUT_MESSAGE],
+    ["Script failed\nWall time 0.1 seconds\nOutput:\n", FAILED_EXEC_OUTPUT_MESSAGE],
+  ])("explains a wholly empty paired exec result %# without rewriting its program", (output, expected) => {
+    const body = raw(output);
+    const wire = JSON.parse(createResponsesPassthroughAdapter(routed).buildRequest(parseRequest(body)).body);
+    expect(wire.input[1].output).toBe(expected);
+    expect(JSON.parse(wire.input[0].arguments).input).toBe(body.input[0].input);
+  });
+
+  test.each([
+    "actual result",
+    [{ type: "input_text", text: empty }, { type: "input_text", text: "actual result" }],
+    [{ type: "input_text", text: empty }, { type: "input_image", image_url: "https://example.test/image.png" }],
+    [{ type: "input_file", file_id: "file_probe" }],
+    null,
+  ].map(output => ({ output })))("preserves populated, multimodal and incomplete results %#", ({ output }) => {
+    const body = raw(output);
+    const normalized = normalizeResponsesCodeMode(body, parseRequest(body), routed) as typeof body;
+    expect(normalized.input[1]).toBe(body.input[1]);
+    expect(normalized.input[0]).toBe(body.input[0]);
+  });
+
+  test("does not duplicate instructions or explain an unpaired or unrelated result", () => {
+    const body = raw();
+    body.input[0].name = "other";
+    const parsed = parseRequest(body);
+    const first = normalizeResponsesCodeMode(body, parsed, routed) as typeof body;
+    const second = normalizeResponsesCodeMode(first, parsed, routed) as typeof body;
+    expect(first.input[1]).toBe(body.input[1]);
+    expect(second.instructions).toBe(first.instructions);
+  });
+
+  test("official OpenAI and non-code-mode catalogs remain untouched", () => {
+    const body = raw();
+    for (const native of [provider, { ...routed, baseUrl: "https://api.openai.com/v1" }]) {
+      expect(normalizeResponsesCodeMode(body, parseRequest(body), native)).toBe(body);
+      const wire = JSON.parse(createResponsesPassthroughAdapter(native).buildRequest(parseRequest(body)).body);
+      expect(wire.instructions).toBe(body.instructions);
+      expect(JSON.stringify(wire.tools)).not.toContain(CODE_MODE_RESULT_ECHO_SENTENCE);
+    }
+    for (const tools of [
+      [{ type: "function", name: "exec", parameters: { type: "object" } }],
+      [exec, { type: "function", name: "exec_command", parameters: { type: "object" } }],
+      [{ type: "namespace", name: "remote", tools: [exec] }],
+    ]) {
+      const alternate = { ...body, tools };
+      expect(normalizeResponsesCodeMode(alternate, parseRequest(alternate), routed)).toBe(alternate);
+    }
+    const excluded = { ...body, tool_choice: "none" };
+    expect(normalizeResponsesCodeMode(excluded, parseRequest(excluded), routed)).toBe(excluded);
+    const compact = parseRequest(body);
+    compact._compactionRequest = true;
+    expect(normalizeResponsesCodeMode(body, compact, routed)).toBe(body);
+  });
+});
+
+describe("external image wire matrix", () => {
+  // Same decodable 1x1 PNG as anthropic-image-normalize.test.ts; no fetch is needed.
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const dataUrl = `data:image/png;base64,${png}`;
+  const httpsUrl = "https://images.example/second.png";
+  const keyed = { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1", authMode: "key" as const, apiKey: "test-key" };
+  const ingresses = [
+    {
+      name: "Chat", convert: chatCompletionsToResponsesBody,
+      images: [
+        { type: "image_url", image_url: { url: dataUrl, detail: "high" } },
+        { type: "image_url", image_url: { url: httpsUrl, detail: "low" } },
+      ],
+      call: { role: "assistant", tool_calls: [{ id: "call_image", type: "function", function: { name: "screenshot", arguments: "{}" } }] },
+      responsesImages: [
+        { type: "input_image", image_url: dataUrl, detail: "high" },
+        { type: "input_image", image_url: httpsUrl, detail: "low" },
+      ],
+      chatImages: [
+        { type: "image_url", image_url: { url: dataUrl, detail: "high" } },
+        { type: "image_url", image_url: { url: httpsUrl, detail: "low" } },
+      ],
+    },
+    {
+      name: "Claude", convert: anthropicToResponsesBody,
+      images: [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: png } },
+        { type: "image", source: { type: "url", url: httpsUrl } },
+      ],
+      call: { role: "assistant", content: [{ type: "tool_use", id: "call_image", name: "screenshot", input: {} }] },
+      responsesImages: [
+        { type: "input_image", image_url: dataUrl },
+        { type: "input_image", image_url: httpsUrl },
+      ],
+      chatImages: [
+        { type: "image_url", image_url: { url: dataUrl } },
+        { type: "image_url", image_url: { url: httpsUrl } },
+      ],
+    },
+  ];
+
+  for (const ingress of ingresses) {
+    for (const placement of ["user", "tool", "image-only tool"]) {
+      for (const target of ["API-key Responses", "ChatGPT forward", "Chat"]) {
+        test(`${ingress.name} ${placement} images -> ${target}`, async () => {
+          const isTool = placement !== "user";
+          const imageOnly = placement === "image-only tool";
+          const content = [...(imageOnly ? [] : [{ type: "text", text: "screenshot" }]), ...structuredClone(ingress.images)];
+          const result = ingress.name === "Chat"
+            ? { role: "tool", tool_call_id: "call_image", content }
+            : { role: "user", content: [{ type: "tool_result", tool_use_id: "call_image", content }] };
+          const raw = {
+            model: "test-model", stream: true,
+            messages: isTool
+              ? [structuredClone(ingress.call), result, { role: "user", content: "continue" }]
+              : [{ role: "user", content }],
+          };
+          const original = structuredClone(raw);
+          const translated = ingress.convert(raw);
+          const translatedBefore = structuredClone(translated);
+          const parsed = parseRequest(translated);
+          const adapter = target === "Chat"
+            ? withTestTranslatorBudget(createOpenAIChatAdapter({ ...keyed, adapter: "openai-chat" }))
+            : createResponsesPassthroughAdapter(target === "ChatGPT forward" ? provider : keyed);
+          const request = await adapter.buildRequest(parsed, { headers: new Headers() });
+          const body = JSON.parse(request.body) as { model: string; input?: unknown[]; messages?: unknown[] };
+          expect(request.url).toBe(target === "ChatGPT forward"
+            ? "https://chatgpt.com/backend-api/codex/responses"
+            : target === "Chat" ? "https://api.openai.com/v1/chat/completions" : "https://api.openai.com/v1/responses");
+          expect(body.model).toBe("test-model");
+          // Expected payloads are hand-authored, never taken from translator/parser output.
+          if (target === "Chat") {
+            expect(body.messages).toEqual(isTool ? [
+              { role: "assistant", content: "", tool_calls: [{ id: "call_image", type: "function", function: { name: "screenshot", arguments: "{}" } }] },
+              { role: "tool", tool_call_id: "call_image", content: imageOnly ? "[image][image]" : "screenshot" },
+              { role: "user", content: [{ type: "text", text: "[ocx] image output from the preceding tool result(s):" }, ...ingress.chatImages] },
+              { role: "user", content: "continue" },
+            ] : [{ role: "user", content: [{ type: "text", text: "screenshot" }, ...ingress.chatImages] }]);
+          } else {
+            const expectedContent = [...(imageOnly ? [] : [{ type: "input_text", text: "screenshot" }]), ...ingress.responsesImages];
+            expect(body.input).toEqual(isTool ? [
+              { type: "function_call", call_id: "call_image", name: "screenshot", arguments: "{}" },
+              { type: "function_call_output", call_id: "call_image", output: expectedContent },
+              { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+            ] : [{ type: "message", role: "user", content: expectedContent }]);
+          }
+          expect(raw).toEqual(original);
+          expect(translated).toEqual(translatedBefore);
+        });
+      }
+    }
+
+    test(`${ingress.name} orphan image-only output survives canonical forward repair`, async () => {
+      const content = structuredClone(ingress.images);
+      const raw = { model: "test-model", messages: [ingress.name === "Chat"
+        ? { role: "tool", tool_call_id: "call_orphan", content }
+        : { role: "user", content: [{ type: "tool_result", tool_use_id: "call_orphan", content }] }],
+      };
+      const original = structuredClone(raw);
+      const translated = { ...ingress.convert(raw), previous_response_id: "resp_missing" };
+      const translatedBefore = structuredClone(translated);
+      const request = await createResponsesPassthroughAdapter(provider).buildRequest(parseRequest(translated));
+      const body = JSON.parse(request.body) as { previous_response_id?: string; input: unknown[] };
+      expect(body.previous_response_id).toBeUndefined();
+      expect(body.input).toEqual([{
+        type: "message", role: "user",
+        content: [{ type: "input_text", text: "[tool output for call_orphan]" }, ...ingress.responsesImages],
+      }]);
+      expect(raw).toEqual(original);
+      expect(translated).toEqual(translatedBefore);
+    });
+  }
+});
 
 test("noncanonical forward providers cannot receive caller or runtime credentials", () => {
   const userInfoUrl = new URL("https://chatgpt.com/backend-api/codex");

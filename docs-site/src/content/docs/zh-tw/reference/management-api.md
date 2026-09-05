@@ -147,7 +147,10 @@ Session 簽發在需要 data-plane 認證時停用，這包含遠端綁定。遠
 | `PUT /api/model-visibility` | 原子地變更供應商或模型層級可見性 | 400 無效供應商、scope、目標或 body |
 | `GET, POST /api/custom-models` | 列出自訂模型或新增一個 | 400 無效欄位；404 供應商缺失；409 重複模型 |
 | `PUT, DELETE /api/custom-models/{id}` | 編輯或刪除一個自訂模型 | 400 無效 id/欄位；404 未找到；409 重複模型 |
-| `GET, PUT /api/selected-models` | 讀取供應商允許清單與可用性，或取代一個允許清單 | 400 缺失供應商/body；404 未知供應商 |
+| `GET, PUT /api/selected-models` | 讀取供應商允許清單與可用性，或取代一個允許清單 | 400 缺失供應商/body；404 未知供應商; PUT 409 `initial_model_selection_pending` |
+| `GET, PUT /api/model-presets` | 讀取預設資訊或選擇 preset/all/custom 模式 | 400 模式無效或不支援該預設；404 未知供應商; PUT 409 `initial_model_selection_pending` |
+
+尚未確認可靠的初始模型清單時，有效的 `PUT /api/selected-models` 和 `PUT /api/model-presets` 請求也會回傳 HTTP 409 和代碼 `initial_model_selection_pending`。請使用 `GET /api/models` 等方式更新模型清單，成功後再重試。
 
 ### OAuth 帳號、供應商金鑰與 data-plane 金鑰
 

@@ -348,6 +348,21 @@ the request, and they never raise it.
 
 ## Subagents
 
+New non-OAuth provider registrations carry `initialModelSelection` with a unique
+registration identity. Until reliable live/static discovery completes, public
+catalogs and model candidates withhold those providers' models; the provider itself
+stays active. At 20 or more canonical Models switch rows, initialization appends
+all corresponding disabled selectors once. Existing registrations and later manual
+choices are not reinitialized. OAuth/ChatGPT forwarding is exempt using the same
+usable-key override predicate as routing. Display aliases do not add switch rows.
+
+`src/providers/initial-model-selection-runtime.ts` commits the decision against a
+matching registration/inventory snapshot before catalog authority is captured.
+Ordinary management discovery also completes it with Codex integration OFF. The
+final catalog merge fences pending retained rows, including delete/re-add recovery.
+Raw management rows remain visible as pending/OFF. Config listener bindings are
+excluded from inventory identity because live and persisted bindings may differ.
+
 Codex `spawn_agent` advertises only the highest-priority first five picker-visible catalog rows.
 Use at most five configured `subagentModels` ids; they may contain bare catalog ids, routed
 `provider/model` ids, or exact account-qualified `<selector>/<native-openai-model>` ids. The

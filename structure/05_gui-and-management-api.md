@@ -121,7 +121,7 @@ this document owns is which module holds which area and what invariant that area
 | Windows tray | `GET/POST /api/windows-tray` controls an owned, per-user HKCU login tray. The tray delegates fixed actions to the CLI and is never a proxy supervisor or restart-protection signal. |
 | Updates | `GET /api/update/check`, `POST /api/update/run`, and `GET /api/update/status` own dashboard self-update state. A launched worker PID is persisted in `update-job.json`; dead PIDs recover immediately, while legacy active records without a PID recover only after ten minutes. Live PIDs remain exclusive regardless of record age. `GET /api/update/badge` backs the sidebar badge: it reports that an update exists and links to the update surface rather than gating other actions. |
 | Providers | Create/update/delete ordinary provider configs and enrich registry metadata. The reserved `openai` card exposes Pool(default)/Direct account mode; `openai-apikey` remains the separate API route. |
-| Models | Fetch routed model lists, disabled model visibility, and catalog-facing ids. |
+| Models | Fetch routed model lists, disabled model visibility, and catalog-facing ids. New non-OAuth registration holds exposure until authoritative discovery; 20 or more distinct switch rows start OFF without disabling the provider. Pending rows cannot accept visibility changes. |
 | OAuth | Login/status/logout for OAuth-backed providers, plus multiauth account management: `GET /api/oauth/accounts`, `PUT /api/oauth/accounts/active`, `PUT /api/oauth/accounts/alias`, `DELETE /api/oauth/accounts` list masked accounts per provider, switch the active one, edit its display-only alias, and remove one. The login flow itself is `GET /api/oauth/providers`, `POST /api/oauth/login`, `POST /api/oauth/login/code`, `POST /api/oauth/login/cancel`, `POST /api/oauth/logout`, and `GET /api/oauth/status`; pool controls are `GET/PUT/PATCH /api/oauth/accounts/pool` and `POST /api/oauth/accounts/clear-cooldown`. Login accepts `addAccount: true` to force a fresh browser identity. Device flows return a structured `deviceCode`; the GUI highlights and copies it before the user opens the verification page. |
 | Key providers | `GET /api/key-providers` exposes API-key provider presets for setup and dashboard flows, and `GET/POST/DELETE /api/keys` owns the proxy's own admission keys. Multi-key pool per key-auth provider: `GET /api/providers/keys`, `POST /api/providers/keys`, `PUT /api/providers/keys/active`, `PUT /api/providers/keys/alias`, `DELETE /api/providers/keys` masked list, add (upsert + activate), switch, rename, and remove keys. `provider.apiKey` always mirrors the active pool entry so routing stays single-key. |
 | OpenAI account mode | Report one OpenAI Codex card with Pool/Direct controls and one API-key card. Mode PATCH persists live without restart or catalog identity changes; Pool owns account/quota controls and Direct uses caller/main login only. Main-account DTOs report real credential presence and terminal `needsReauth` state instead of treating missing/invalid native auth as an unknown quota. Selection order has its own route: `PUT /api/codex-auth/accounts/priority` takes `{ id, priority }`, where `priority` is an integer -100..100 or `null` to restore the default, accepts `__main__`, 404s an unknown id, and echoes the stored value. Re-ordering never clears thread affinity, so the response carries no `appliesImmediately`, but it does release any pin — see [`08_openai-provider-tiers.md`](08_openai-provider-tiers.md) for why. `PUT /api/codex-auth/active` with a null id releases one too, but that drops the operator's account selection along with it, so this route is the only operator-facing way to clear a pin while leaving the selected account in place. `GET /api/codex-auth/active` reports `pinned`, true only while the manually selected account is still the effective active one, plus `pinnedAccountId`, which names the pinned account whether or not it is the active one. Surfaces should render `pinnedAccountId`: under round-robin and fill-first the pin caps the tier ceiling at its own tier while the strategy cursor moves freely inside that tier, so `pinned` goes false on a sibling's turn even though the pin is still suppressing every higher tier — which is why the dashboard badges `pinnedAccountId` and the GUI controller tracks only the id. `pinned` answers the narrower question of whether routing is *currently* on the operator's choice; no surface in this repo asks it, and a new one almost certainly wants the id instead. |
@@ -341,6 +341,27 @@ keeps the saved state and renders fixed `ocx sync` guidance without server/accou
 
 ## Usage accounting
 
+Account quota discovery is capability-based. Cheap OAuth and provider-key lists include
+`quotaMode` (`probe`, `passive`, or `unsupported`) without contacting upstream quota APIs.
+`GET /api/oauth/accounts?provider=...&quota=1` and
+`GET /api/providers/keys?name=...&quota=1` enrich each supported credential separately;
+`refresh=1` bypasses settled quota cache while joining a current same-identity read.
+OAuth readers use the named stored account; key readers use isolated per-key configuration,
+never active-key mutation or the provider-wide cache. Response projection rechecks key identity
+and exposes only quota/availability fields, not its internal identity guard. Passive observations
+retain their original timestamp and never trigger inference or token renewal. Unsupported,
+unobserved, failed and measured-zero readings remain distinct; multiple keys are not summed
+because they may share one upstream balance.
+
+Provider details use one account-quota reading renderer for Overview, Usage and Accounts/API
+keys. Current-account usage sits below usage statistics; a known-mode active row is authoritative
+even when empty, so a newly selected passive account cannot inherit a previous account's cached
+report. Pool reports project only `aggregation.currentAccount.quota` with its own timestamp;
+missing or malformed aggregation stays unknown rather than using total capacity. Shared states
+include credits-only and measured-zero readings, unsupported, unobserved, explicit pending and
+unavailable-with-last-good. Forced account/key enrichment settles before its control reports a
+completed check, and provider-report waiters are bound to the exact refresh epoch.
+
 `src/usage/log.ts` writes append-only JSONL to `~/.opencodex/usage.jsonl` with file mode `0o600`.
 An opt-in shadow-call rewrite persists the bounded, redacted original helper model as
 `shadowCallRewrittenFrom`, so helper traffic remains identifiable after restart without storing
@@ -363,6 +384,15 @@ request as a measured zero — that is what the `measured / reported / unreporte
 estimated` split exists for, and why coverage is reported alongside totals. The dashboard Usage tab renders the same shape, and the
 main Dashboard surfaces a 30d token / coverage summary. The in-memory `requestLog` is capped at
 200 entries and is **not** the source of truth for aggregation — the JSONL on disk is.
+
+Usage aggregation does not infer confirmed model identity merely from a requested selector.
+Model rows with saved unchanged
+default-provider route evidence carry `hasUnresolvedRequestedModel`: their tokens stay under
+the recorded serving provider, with an unresolved-request annotation. For those slash-containing
+selectors, a vendor-only inferred price is unavailable; exact provider and user prices remain
+eligible. Missing trace evidence is not reconstructed from today's configuration. Provider-detail
+model shares use that provider's token total, not the global total. Unknown reserved `policy/`
+selectors are rejected before upstream dispatch; historical rows remain unchanged.
 
 The management API retains the compact accumulator plus bounded query summaries; it never retains
 normalized per-request rows after a response. File identity changes, shrinkage, same-size metadata

@@ -1328,6 +1328,28 @@ describe("provider cost overlay (user-configured)", () => {
 });
 
 describe("aggregator vendor-prefixed model ids (#3136)", () => {
+  test("restricted resolution partitions memoization and only removes vendor fallback", () => {
+    const model = "anthropic/claude-3-haiku-20240307";
+    const restricted = { allowModelLevelFallback: false };
+    expect(resolveMatchedPrice("kimi", model)).not.toBeNull();
+    expect(resolveMatchedPrice("kimi", model, undefined, undefined, restricted)).toBeNull();
+    expect(resolveMatchedPrice("kimi", model)).not.toBeNull();
+    // Reverse the order with another provider to catch a cached restricted miss.
+    expect(resolveMatchedPrice("fixture-aggregator", model, undefined, undefined, restricted)).toBeNull();
+    expect(resolveMatchedPrice("fixture-aggregator", model)).not.toBeNull();
+    expect(resolveMatchedPrice("openrouter", "anthropic/claude-3.5-sonnet", undefined, undefined, restricted)?.source).toBe("jawcode");
+    const overlay: ExpectedPriceOverlay = {
+      provider: "kimi", modelId: model, cost4: { input: 3, output: 7, cacheRead: 0, cacheWrite: 0 },
+      source: "fixture", verifiedAt: "2026-09-05", status: "verified",
+    };
+    expect(resolveMatchedPrice("kimi", model, [overlay], [], restricted)).toMatchObject({ source: "expected", cost4: overlay.cost4 });
+    expect(resolveMatchedPrice("kimi", model, [], [overlay], restricted)).toMatchObject({ source: "user", cost4: overlay.cost4 });
+    const input = { provider: "kimi", model, usageStatus: "reported" as const, usage: { inputTokens: 100, outputTokens: 10 }, ...restricted };
+    expect(estimateRequestCost(input)).toBeNull();
+    expect(estimateAttemptCost({ ...input, ordinal: 1 })).toBeNull();
+    expect(estimateComboCost([{ ...input, ordinal: 1 }])).toBeNull();
+    expect(estimateRequestCost(input, [], [overlay])?.price?.source).toBe("user");
+  });
   // CommandCode serves "deepseek/deepseek-v4-flash"; the cost catalog stores the bare id.
   // The exact lookup missed a price that is present, so every request through such a
   // provider reported no cost at all.

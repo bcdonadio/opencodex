@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isConnectionRefused, isUncleanExitEvidence, proxyHealthFailureReason, resolveStatusPid, selectListenTarget } from "../../src/cli/status";
+import * as statusFacade from "../../src/cli/status";
+import * as statusProbes from "../../src/cli/status-probes";
 import { findDeadPid } from "../helpers/dead-pid";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -22,6 +24,14 @@ function runStatusJson(opencodexHome: string) {
 }
 
 describe("CLI status JSON", () => {
+  test("status facade preserves probe identity without exposing its health helper", () => {
+    expect(statusFacade.proxyHealthFailureReason).toBe(statusProbes.proxyHealthFailureReason);
+    expect(statusFacade.isConnectionRefused).toBe(statusProbes.isConnectionRefused);
+    expect(statusFacade.isUncleanExitEvidence).toBe(statusProbes.isUncleanExitEvidence);
+    expect(statusFacade.probeUncleanExitState).toBe(statusProbes.probeUncleanExitState);
+    expect(statusFacade).not.toHaveProperty("checkProxyHealth");
+  });
+
   test("status --json prints valid read-only diagnostics without secrets", () => {
     const opencodexHome = mkdtempSync(join(tmpdir(), "ocx-status-json-"));
     try {

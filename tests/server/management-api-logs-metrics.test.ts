@@ -11,6 +11,8 @@ import {
   type RequestLogEntry,
 } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
+import { buildRouteDecisionTrace } from "../../src/routing/trace";
+import { summarizeUsage } from "../../src/usage/summary";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const config = { providers: [] } as unknown as OcxConfig;
@@ -58,6 +60,67 @@ function baseEntry(overrides: Partial<RequestLogEntry>): RequestLogEntry {
 }
 
 describe("GET /api/logs display metrics", () => {
+  test("parent, individual attempt DTO and summary agree on unresolved slash cost without rewriting history", async () => {
+    const model = "anthropic/claude-3-haiku-20240307";
+    const row = baseEntry({
+      requestId: "unresolved", provider: "kimi", model,
+      usage: { inputTokens: 100, outputTokens: 10 }, totalTokens: 110,
+      routeDecision: buildRouteDecisionTrace({ requestedModel: model, routeKind: "default-provider", selected: { provider: "kimi", model, reason: "default-provider" } }),
+      attempts: [{
+        ordinal: 1, provider: "kimi", model, adapter: "openai-chat", status: 200, durationMs: 1000,
+        sendCount: 1, recoveryKinds: [], usageStatus: "reported", usage: { inputTokens: 100, outputTokens: 10 }, totalTokens: 110,
+      }],
+    });
+    addRequestLog(row);
+    const ledgerBefore = readFileSync(usageLogPath(), "utf8");
+    const [dto] = await readLogs();
+    expect(dto!.displayMetrics.cost).toEqual({ kind: "unavailable", reason: "combo_attempt_unavailable" });
+    expect(dto!.attempts[0].displayMetrics.cost).toEqual({ kind: "unavailable", reason: "price_unmatched" });
+    expect(dto!.attempts[0].displayMetrics.tokPerSecond.kind).toBe("value");
+    const summary = summarizeUsage([{ ...row, accountLogLabel: undefined }], "all", Date.now());
+    expect(summary.models[0]).toMatchObject({ provider: "kimi", model, totalTokens: 110, hasUnresolvedRequestedModel: true, unpricedRequests: 1 });
+    expect(summary.models[0]?.estimatedCostUsd).toBeUndefined();
+    expect(readFileSync(usageLogPath(), "utf8")).toBe(ledgerBefore);
+    expect(getRequestLogEntries()[0]?.attempts?.[0]).not.toHaveProperty("allowModelLevelFallback");
+    expect(getRequestLogEntries()[0]?.attempts?.[0]).not.toHaveProperty("displayMetrics");
+  });
+
+  test("bare fallback annotation keeps parent and attempt pricing; another attempt is not restricted by parent trace", async () => {
+    const model = "claude-3-haiku-20240307";
+    const row = baseEntry({
+      requestId: "bare-fallback", provider: "kimi", model,
+      usage: { inputTokens: 100, outputTokens: 10 },
+      routeDecision: buildRouteDecisionTrace({ requestedModel: model, routeKind: "default-provider", selected: { provider: "kimi", model, reason: "default-provider" } }),
+      attempts: [{
+        ordinal: 1, provider: "kimi", model, adapter: "openai-chat", status: 200, durationMs: 1000,
+        sendCount: 1, recoveryKinds: [], usageStatus: "reported", usage: { inputTokens: 100, outputTokens: 10 },
+      }],
+    });
+    addRequestLog(row);
+    const [dto] = await readLogs();
+    expect(dto!.displayMetrics.cost.kind).toBe("value");
+    expect(dto!.attempts[0].displayMetrics.cost.kind).toBe("value");
+    expect(summarizeUsage([{ ...row, accountLogLabel: undefined }], "all", Date.now()).models[0]).toMatchObject({ hasUnresolvedRequestedModel: true, pricedRequests: 1 });
+    clearRequestLogsForTests();
+    const selector = `anthropic/${model}`;
+    addRequestLog({ ...row, requestId: "retargeted", routeDecision: buildRouteDecisionTrace({
+      requestedModel: selector, routeKind: "default-provider", selected: { provider: "kimi", model: selector, reason: "default-provider" },
+    }), attempts: row.attempts!.map(attempt => ({ ...attempt, provider: "fixture-aggregator", model: selector })) });
+    const [retargeted] = await readLogs();
+    expect(retargeted!.displayMetrics.cost.kind).toBe("value");
+    expect(retargeted!.attempts[0].displayMetrics.cost.kind).toBe("value");
+  });
+
+  test("parent-only unresolved slash cost agrees with summary", async () => {
+    const model = "anthropic/claude-3-haiku-20240307";
+    const row = baseEntry({ provider: "kimi", model, usage: { inputTokens: 100, outputTokens: 10 },
+      routeDecision: buildRouteDecisionTrace({ requestedModel: model, routeKind: "default-provider", selected: { provider: "kimi", model, reason: "default-provider" } }),
+    });
+    addRequestLog(row);
+    const [dto] = await readLogs();
+    expect(dto!.displayMetrics.cost).toEqual({ kind: "unavailable", reason: "price_unmatched" });
+    expect(summarizeUsage([{ ...row, accountLogLabel: undefined }], "all", Date.now()).summary.unpricedRequests).toBe(1);
+  });
   test("reports filtered total before limit pagination", async () => {
     addRequestLog(baseEntry({ requestId: "ok-a", provider: "anthropic", status: 200 }));
     addRequestLog(baseEntry({ requestId: "ok-b", provider: "anthropic", status: 200 }));

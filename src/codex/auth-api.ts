@@ -96,7 +96,9 @@ import {
   clearMainAccountInfoCache,
   getMainAccountCredentialPresence,
   getMainAccountInfoCache,
+  getMainQuotaCredentialGeneration,
   isMainAccountIdentityGenerationLive,
+  matchesMainQuotaCredential,
   observeMainQuotaCredential,
   setMainAccountCredentialPresence,
   setMainAccountInfoCache,
@@ -104,6 +106,7 @@ import {
 } from "./main-account-cache";
 export { clearMainAccountInfoCache } from "./main-account-cache";
 import { getMainAccountHardLockStatus, type MainAccountHardLockStatus } from "./main-account-hard-lock";
+import { observeMainReserveRevocation } from "./reserve-availability";
 import { maskEmail } from "../lib/privacy";
 import { codexWarmupFailureReason, warmCodexAccount } from "./warmup";
 export { maskEmail } from "../lib/privacy";
@@ -896,6 +899,7 @@ async function fetchMainAccountInfoWhileOwned(
   const mainQuotaWriter = requestAccountId === tokens.account_id
     ? observeMainQuotaCredential(tokens.access_token, tokens.account_id)
     : undefined;
+  const mainQuotaCredentialGeneration = getMainQuotaCredentialGeneration();
   try {
     const resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
       headers: { Authorization: `Bearer ${tokens.access_token}`, "ChatGPT-Account-Id": tokens.account_id },
@@ -914,6 +918,12 @@ async function fetchMainAccountInfoWhileOwned(
     const data = (await resp.json()) as WhamUsageResponse;
     const retried = await retryMainAccountInfoIfIdentityChanged(requestAccountId, retriesRemaining, nativeMainLease, explicitRefresh);
     if (retried) return retried;
+    // A delayed response from a replaced bearer cannot revoke a newer Reserve grant,
+    // even in the same workspace or after an A→B→A credential transition.
+    if (mainQuotaCredentialGeneration === getMainQuotaCredentialGeneration()
+      && matchesMainQuotaCredential(tokens.access_token, tokens.account_id)) {
+      observeMainReserveRevocation(data, mainQuotaWriter);
+    }
     const plan = nonEmptyPlan(data.plan_type) ?? nonEmptyPlan(cached?.plan) ?? nonEmptyPlan(getMainAccountPlan());
     const usage = { ...data, ...(plan ? { plan_type: plan } : {}) };
     const quota = parseUsageQuota(usage);
@@ -1440,10 +1450,9 @@ export async function runCodexCooldownRecoveryProbes(config: OcxConfig, now = Da
       }
       try {
         const result = await fetchPoolAccountQuota(claim.accountId, true, account.plan);
-        // Defence in depth: `spark` is already excluded at the claim site, since generic WHAM
-        // cannot prove a spark recovery. Keep the settle-side guard so a future claim change
-        // cannot silently start clearing spark on generic evidence.
-        const recovered = claim.scope !== "spark"
+        // Defence in depth: independent scopes are already excluded at the claim site.
+        // Generic WHAM must never clear Spark or Reserve even if claim selection changes.
+        const recovered = (claim.scope === undefined || claim.scope === "shared")
           && isCompleteCodexQuotaRecoverySnapshot(result.freshQuota ?? null, result.freshPlan ?? account.plan);
         settleCodexQuotaRecoveryProbe(claim, recovered, {
           credentialGeneration: result.freshCredentialGeneration,

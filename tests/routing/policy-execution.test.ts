@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { NoEligiblePolicyCandidateError, routeModel } from "../../src/router";
+import { NoEligiblePolicyCandidateError, UnknownRoutingPolicyError, routeCompactionModel, routeConcreteModel, routeModel } from "../../src/router";
 import { isValidProviderName } from "../../src/config";
 import { getRoutingProfile } from "../../src/routing/profile";
 import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
@@ -234,13 +234,15 @@ describe("policy execution (RI-05)", () => {
     expect(() => routeModel(config, "policy/tools", { toolsRequired: true })).toThrow(NoEligiblePolicyCandidateError);
   });
 
-  test("unresolved policy/<id> falls through to normal resolution", () => {
+  test("missing and empty reserved policies reject before default routing", () => {
     const config = baseConfig();
-    // No profile named "nope": the reserved-looking id must not throw and not
-    // shadow provider/default resolution.
-    const route = routeModel(config, "policy/nope");
-    expect(route.routeKind).toBe("default-provider");
-    expect(route.providerName).toBe("a");
+    for (const selector of ["policy/nope", "policy/", "policy/constructor"]) {
+      expect(() => routeModel(config, selector)).toThrow(UnknownRoutingPolicyError);
+      expect(() => routeCompactionModel(config, selector)).toThrow(UnknownRoutingPolicyError);
+    }
+    expect(routeModel(config, "vendor/native-model")).toMatchObject({ routeKind: "default-provider", providerName: "a", modelId: "vendor/native-model" });
+    expect(routeModel(config, "unknown-bare")).toMatchObject({ routeKind: "default-provider", modelId: "unknown-bare" });
+    expect(routeConcreteModel(config, "a/policy/nope")).toMatchObject({ providerName: "a", modelId: "policy/nope" });
   });
 
   test("policy selection is deterministic across calls", () => {

@@ -1,9 +1,10 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { parseRequest } from "../../src/responses/parser";
 import { buildClaudeReplayConfig } from "../../src/server/claude-messages";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { planVisionSidecar } from "../../src/vision";
 import { planWebSearch } from "../../src/web-search";
+import * as sidecarAuth from "../../src/sidecar/auth";
 
 const routed: OcxProviderConfig = {
   adapter: "openai-chat",
@@ -123,4 +124,41 @@ test("unset Claude overrides inherit the global sidecar backend and model", () =
     backend: "openai",
     settings: { model: "global-vision" },
   });
+});
+
+test("live policy eligibility remains separate from Claude helper override snapshots", () => {
+  const authSpy = spyOn(sidecarAuth, "resolveSidecarAuth").mockReturnValue({ isCodexAuth: true, isAnthropicAuth: false });
+  try {
+    const config: OcxConfig = {
+      port: 0, defaultProvider: "routed", providers: { routed, forward }, codexDesktopAuthless: false,
+      webSearchSidecar: { backend: "openai", model: "global-search", timeoutMs: 12_345 },
+      visionSidecar: { backend: "openai", model: "global-vision", timeoutMs: 23_456 },
+      claudeCode: {
+        webSearchSidecar: { model: "gpt-reserve" },
+        visionSidecar: { model: "gpt-reserve" },
+      },
+    };
+    const replay = buildClaudeReplayConfig(config);
+    const admission = { source: "loopback" } as const;
+    const options = { admission, codexAuthPolicy: config };
+    config.codexDesktopAuthless = true;
+    expect(replay.codexDesktopAuthless).toBe(false);
+    expect(planWebSearch(replay, request, false, routed, "text-model", openAiSidecar, options)).toMatchObject({
+      settings: { model: "gpt-reserve", timeoutMs: 12_345, reserveCompatibility: true },
+    });
+    expect(planVisionSidecar(replay, routed, "text-model", request, openAiSidecar, options)).toMatchObject({
+      settings: { model: "gpt-reserve", timeoutMs: 23_456, reserveCompatibility: true },
+    });
+    expect(planWebSearch(replay, request, false, routed, "text-model", openAiSidecar, { admission })?.settings.reserveCompatibility)
+      .toBeUndefined();
+    config.runtimeRole = "client";
+    expect(planWebSearch(replay, request, false, routed, "text-model", openAiSidecar, options)?.settings.reserveCompatibility)
+      .toBeUndefined();
+    expect(planVisionSidecar(replay, routed, "text-model", request, openAiSidecar, options)?.settings.reserveCompatibility)
+      .toBeUndefined();
+    expect(config.webSearchSidecar?.model).toBe("global-search");
+    expect(config.visionSidecar?.model).toBe("global-vision");
+    expect(replay.webSearchSidecar?.model).toBe("gpt-reserve");
+    expect(replay.visionSidecar?.model).toBe("gpt-reserve");
+  } finally { authSpy.mockRestore(); }
 });

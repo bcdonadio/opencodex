@@ -112,6 +112,14 @@ recursively within bounded traversal limits. When `store: false`, `item_referenc
 omitted because the destination cannot resolve an item it did not persist. Function/tool `call_id`
 pairs and `reasoning.effort` are preserved.
 
+[Luna Reserve compatibility](/reference/cli/providers-accounts/#luna-reserve-alongside-routed-models)
+uses this canonical ChatGPT-forward path, not key-auth or arbitrary Responses gateways. It retains
+the safe caller-header allowlist and destination-scoped request normalization described here.
+OpenCodex sends its Reserve capability header on the owned main-account usage lookup; that header
+is not itself permission. Eligible compatibility requests recheck credential-bound authorization
+at dispatch. Conversation and compaction are supported; vision helpers, web-search helpers, and
+standalone search relay are not.
+
 For `key` auth, [`retryOn429`](/reference/configuration/) applies here too: a pre-stream 429
 waits and replays the identical request on the same key before any other handling, exactly like
 the translated `openai-chat` / Anthropic request path. Custom `runTurn` transports are not part

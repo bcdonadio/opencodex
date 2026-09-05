@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decideDevVersion } from "../../scripts/bump-dev-version";
+import { assertReleasable } from "../../scripts/version-line";
 
 /**
- * The bump rule that keeps dev off an already-published version.
+ * The bump rule that moves dev ahead of an intended or already-published version.
  *
  * Every case here is a real repair this repository performed by hand. The rule was got
  * wrong once during design - "increment the released minor" - and befcac3e1 is the
@@ -18,10 +19,28 @@ import { decideDevVersion } from "../../scripts/bump-dev-version";
 // and the malformed-input case read that same load failure as a correct rejection.
 const CLI = fileURLToPath(new URL("../../scripts/bump-dev-version.ts", import.meta.url));
 const WORKFLOW = fileURLToPath(new URL("../../.github/workflows/dev-version-bump.yml", import.meta.url));
+const VERSION_LINE_CLI = fileURLToPath(new URL("../../scripts/version-line.ts", import.meta.url));
 
 function runCli(...args: string[]) {
   const proc = Bun.spawnSync([process.execPath, CLI, ...args]);
   return { ...proc, stderrText: new TextDecoder().decode(proc.stderr) };
+}
+
+async function runVersionLineCli(args: string[], stdin = "") {
+  const proc = Bun.spawn([process.execPath, VERSION_LINE_CLI, ...args], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdoutPromise = new Response(proc.stdout).text();
+  const stderrPromise = new Response(proc.stderr).text();
+  proc.stdin.write(stdin);
+  proc.stdin.end();
+  return {
+    exitCode: await proc.exited,
+    stdoutText: await stdoutPromise,
+    stderrText: await stderrPromise,
+  };
 }
 
 function tempPackageJson(version: string): string {
@@ -56,6 +75,17 @@ describe("dev version bump rule", () => {
     expect(block).not.toContain("isCrossRepository");
   });
 
+  test("an intended release uses the same shape rule before publication", () => {
+    expect(decideDevVersion("2.42.0", "2.42.0")).toMatchObject({
+      changed: true,
+      version: "2.43.0",
+    });
+    expect(decideDevVersion("2.43.0-preview.20260904", "2.42.0")).toMatchObject({
+      changed: true,
+      version: "2.43.0",
+    });
+  });
+
   test("a stable release moves dev to the next minor", () => {
     // e4a85d134 (2.33.0 -> 2.34.0) and 076ad3036 (2.34.0 -> 2.35.0).
     expect(decideDevVersion("2.36.0", "2.36.0")).toMatchObject({ changed: true, version: "2.37.0" });
@@ -85,7 +115,7 @@ describe("dev version bump rule", () => {
   });
 
   test("a v-prefixed release tag is accepted, not double-prefixed", () => {
-    // The workflow passes github.event.release.tag_name, which is "v2.36.0", while
+    // The workflow accepts an intended version with an optional leading v, while
     // package.json holds a bare "2.36.0". Prefixing blindly built "vv2.36.0" and the
     // comparison silently misordered, so the script rejected a correct candidate with
     // "candidate 2.37.0 does not rank ahead of released v2.36.0". Both forms must agree.
@@ -108,6 +138,68 @@ describe("dev version bump rule", () => {
     expect(() => decideDevVersion("not-a-version", "2.36.0")).toThrow(/not parseable/);
     expect(() => decideDevVersion("2.36", "2.36.0")).toThrow(/not parseable/);
     expect(() => decideDevVersion("2.36.0", "garbage")).toThrow(/not parseable/);
+  });
+
+  test("release ordering refuses a patch after a higher-core preview opens", () => {
+    expect(assertReleasable({
+      candidate: "2.42.1",
+      tags: ["v2.42.0"],
+    })).toEqual({ ok: true });
+    expect(assertReleasable({
+      candidate: "2.42.1",
+      tags: ["v2.42.0", "v2.43.0-preview.1"],
+    })).toEqual({ ok: false, blockedBy: "v2.43.0-preview.1" });
+  });
+
+  test("release ordering preserves only the explicit equal-tag dry-run exception", () => {
+    expect(assertReleasable({
+      candidate: "2.42.0",
+      tags: ["v2.42.0"],
+    })).toEqual({ ok: false, blockedBy: "v2.42.0" });
+    expect(assertReleasable({
+      candidate: "2.42.0",
+      tags: ["v2.42.0"],
+      allowExistingTagAtHead: true,
+    })).toEqual({ ok: true });
+    expect(assertReleasable({
+      candidate: "2.42.0",
+      tags: ["v2.42.0", "v2.43.0-preview.1"],
+      allowExistingTagAtHead: true,
+    })).toEqual({ ok: false, blockedBy: "v2.43.0-preview.1" });
+  });
+
+  test("the version-line CLI wires both gates, stdin tags, and usage failures", async () => {
+    const ahead = await runVersionLineCli(["assert-ahead", "2.43.0", "2.42.0"]);
+    expect(ahead.exitCode, ahead.stderrText).toBe(0);
+
+    const behind = await runVersionLineCli(["assert-ahead", "2.42.0", "2.42.0"]);
+    expect(behind.exitCode).not.toBe(0);
+    expect(behind.stderrText).toContain("does not outrank 2.42.0");
+
+    const releasable = await runVersionLineCli(
+      ["assert-releasable", "2.42.1"],
+      "v2.42.0\n",
+    );
+    expect(releasable.exitCode, releasable.stderrText).toBe(0);
+
+    const blocked = await runVersionLineCli(
+      ["assert-releasable", "2.42.1"],
+      "v2.42.0\nv2.43.0-preview.1\n",
+    );
+    expect(blocked.exitCode).not.toBe(0);
+    expect(blocked.stderrText).toContain("blocked by v2.43.0-preview.1");
+
+    const allowedEqual = await runVersionLineCli(
+      ["assert-releasable", "2.42.0", "--allow-existing-tag-at-head"],
+      "v2.42.0\n",
+    );
+    expect(allowedEqual.exitCode, allowedEqual.stderrText).toBe(0);
+
+    const unknown = await runVersionLineCli(["nonsense"]);
+    expect(unknown.exitCode).not.toBe(0);
+    expect(unknown.stderrText).toContain(
+      "usage: bun scripts/version-line.ts assert-ahead <a> <b> | assert-releasable <version> [--allow-existing-tag-at-head]",
+    );
   });
 
   test("the CLI rewrites only the version line", () => {

@@ -194,7 +194,10 @@ first and submit the returned digest. Prefer quarantine when recovery may be nee
 | `PUT /api/model-visibility` | Atomically change provider- or model-level visibility | 400 invalid provider, scope, target, or body |
 | `GET, POST /api/custom-models` | List custom models or add one | 400 invalid fields; 404 provider missing; 409 duplicate model |
 | `PUT, DELETE /api/custom-models/{id}` | Edit or delete one custom model | 400 invalid id/fields; 404 not found; 409 duplicate model |
-| `GET, PUT /api/selected-models` | Read provider allowlists and availability, or replace one allowlist | 400 missing provider/body; 404 unknown provider |
+| `GET, PUT /api/selected-models` | Read provider allowlists and availability, or replace one allowlist | 400 missing provider/body; 404 unknown provider; PUT 409 `initial_model_selection_pending` |
+| `GET, PUT /api/model-presets` | Read preset summaries or choose preset/all/custom mode | 400 invalid mode or unsupported preset; 404 unknown provider; PUT 409 `initial_model_selection_pending` |
+
+Valid PUT requests to `/api/selected-models` and `/api/model-presets` return HTTP 409 with code `initial_model_selection_pending` until a reliable initial model list is available. Refresh model discovery (for example, `GET /api/models`) and retry after it succeeds.
 
 ### OAuth accounts, provider keys, and data-plane keys
 

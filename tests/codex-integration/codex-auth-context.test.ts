@@ -1269,6 +1269,7 @@ describe("Codex auth context", () => {
   });
 
   test("a caller-entitled gated model honors a manually pinned request-scoped main", async () => {
+    let callerEntitlementChecks = 0;
     const cfg = config();
     cfg.activeCodexAccountId = MAIN_CODEX_ACCOUNT_ID;
     cfg.activeCodexAccountPinned = MAIN_CODEX_ACCOUNT_ID;
@@ -1284,11 +1285,14 @@ describe("Codex auth context", () => {
     });
 
     const ctx = await resolveCodexAuthContext(inbound, cfg, "pool", {
-      modelId: "gpt-5.6-sol",
+      modelId: "gpt-daybreak-blue-latest",
       requestScopedMainCredential: true,
-      isDirectCallerEntitledToCodexModel: async () => true,
+      isDirectCallerEntitledToCodexModel: async () => {
+        callerEntitlementChecks += 1;
+        return true;
+      },
       resolveCodexModelEntitlements: async () => ({
-        modelsByAccount: new Map([["pool-a", new Set(["gpt-5.6-sol"])]]),
+        modelsByAccount: new Map([["pool-a", new Set(["gpt-daybreak-blue-latest"])]]),
         confirmedAccountIds: new Set(["pool-a"]),
         credentialIdentities: new Map(),
       }),
@@ -1300,6 +1304,7 @@ describe("Codex auth context", () => {
       accountId: MAIN_CODEX_ACCOUNT_ID,
       credentialSource: "caller",
     });
+    expect(callerEntitlementChecks).toBe(1);
     expect(cfg.activeCodexAccountId).toBe(MAIN_CODEX_ACCOUNT_ID);
     expect(cfg.activeCodexAccountPinned).toBe(MAIN_CODEX_ACCOUNT_ID);
   });
@@ -1321,11 +1326,11 @@ describe("Codex auth context", () => {
     });
 
     const ctx = await resolveCodexAuthContext(inbound, cfg, "pool", {
-      modelId: "gpt-5.6-sol",
+      modelId: "gpt-daybreak-blue-latest",
       requestScopedMainCredential: true,
       isDirectCallerEntitledToCodexModel: async () => false,
       resolveCodexModelEntitlements: async () => ({
-        modelsByAccount: new Map([["pool-a", new Set(["gpt-5.6-sol"])]]),
+        modelsByAccount: new Map([["pool-a", new Set(["gpt-daybreak-blue-latest"])]]),
         confirmedAccountIds: new Set(["pool-a"]),
         credentialIdentities: new Map(),
       }),
@@ -1358,7 +1363,7 @@ describe("Codex auth context", () => {
     const started = new Promise<void>(resolve => { markStarted = resolve; });
 
     const staleResolution = resolveCodexAuthContext(inbound, cfg, "pool", {
-      modelId: "gpt-5.6-sol",
+      modelId: "gpt-daybreak-blue-latest",
       requestScopedMainCredential: true,
       isDirectCallerEntitledToCodexModel: async () => false,
       resolveCodexModelEntitlements: async (_config, options) => {
@@ -1366,7 +1371,7 @@ describe("Codex auth context", () => {
         await entitlementGate;
         expect(options?.excludeAccountIds?.has(MAIN_CODEX_ACCOUNT_ID)).toBe(true);
         return {
-          modelsByAccount: new Map([["pool-a", new Set(["gpt-5.6-sol"])]]),
+          modelsByAccount: new Map([["pool-a", new Set(["gpt-daybreak-blue-latest"])]]),
           confirmedAccountIds: new Set(["pool-a"]),
           credentialIdentities: new Map(),
         };
@@ -1414,7 +1419,7 @@ describe("Codex auth context", () => {
     const started = new Promise<void>(resolve => { markStarted = resolve; });
 
     const staleResolution = resolveCodexAuthContext(inbound, cfg, "pool", {
-      modelId: "gpt-5.6-sol",
+      modelId: "gpt-daybreak-blue-latest",
       requestScopedMainCredential: true,
       isDirectCallerEntitledToCodexModel: async () => {
         markStarted();
@@ -1422,7 +1427,7 @@ describe("Codex auth context", () => {
         return true;
       },
       resolveCodexModelEntitlements: async () => ({
-        modelsByAccount: new Map([["pool-a", new Set(["gpt-5.6-sol"])]]),
+        modelsByAccount: new Map([["pool-a", new Set(["gpt-daybreak-blue-latest"])]]),
         confirmedAccountIds: new Set(["pool-a"]),
         credentialIdentities: new Map(),
       }),

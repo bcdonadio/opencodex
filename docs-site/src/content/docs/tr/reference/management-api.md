@@ -187,7 +187,10 @@ gönderin. Kurtarma gerekebileceğinde karantinayı tercih edin.
 | `PUT /api/model-visibility` | Sağlayıcı veya model düzeyindeki görünürlüğü atomik olarak değiştirin | 400 geçersiz sağlayıcı, kapsam, hedef veya gövde |
 | `GET, POST /api/custom-models` | Özel modelleri listeleyin veya bir tane ekleyin | 400 geçersiz alanlar; 404 sağlayıcı eksik; 409 yinelenen model |
 | `PUT, DELETE /api/custom-models/{id}` | Bir özel modeli düzenleyin veya silin | 400 geçersiz kimlik/alanlar; 404 bulunamadı; 409 yinelenen model |
-| `GET, PUT /api/selected-models` | Sağlayıcı izin listelerini ve kullanılabilirliğini okuyun veya bir izin listesini değiştirin | 400 eksik sağlayıcı/gövde; 404 bilinmeyen sağlayıcı |
+| `GET, PUT /api/selected-models` | Sağlayıcı izin listelerini ve kullanılabilirliğini okuyun veya bir izin listesini değiştirin | 400 eksik sağlayıcı/gövde; 404 bilinmeyen sağlayıcı; PUT 409 `initial_model_selection_pending` |
+| `GET, PUT /api/model-presets` | Ön ayarları okuyun veya preset/all/custom modunu seçin | 400 geçersiz mod veya desteklenmeyen ön ayar; 404 bilinmeyen sağlayıcı; PUT 409 `initial_model_selection_pending` |
+
+Güvenilir ilk model listesi hazır olana kadar `/api/selected-models` ve `/api/model-presets` için geçerli PUT istekleri de HTTP 409 ve `initial_model_selection_pending` kodunu döndürür. Model keşfini örneğin `GET /api/models` ile yenileyin ve başarılı olduktan sonra yeniden deneyin.
 
 ### OAuth hesapları, sağlayıcı anahtarları ve veri düzlemi anahtarları
 

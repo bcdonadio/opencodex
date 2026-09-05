@@ -499,6 +499,7 @@ describe("rate-limit reset credits", () => {
         "x-codex-secondary-window-minutes": "10080",
         "x-codex-secondary-reset-at": "1788000000",
       });
+      const observedAfter = Date.now();
       applyAccountQuotaFromUpstreamHeaders("burst-A", headers);
       const stored = getAccountQuota("burst-A");
       expect(stored).toEqual({
@@ -511,6 +512,8 @@ describe("rate-limit reset credits", () => {
         updatedAt: expect.any(Number),
       });
       expect(stored?.shortObservedAt).toBe(stored?.updatedAt);
+      expect(stored?.shortObservedAt).toBeGreaterThanOrEqual(observedAfter);
+      expect(stored?.shortObservedAt).toBeLessThanOrEqual(Date.now());
     });
 
     it("an exhausted burst window does not poison the weekly reading", () => {

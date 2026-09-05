@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 /**
  * #1798: the Codex app rewrites config.toml AFTER injection, so the journal's
@@ -130,12 +131,25 @@ const REINJECT_AFTER_USER_EDIT_RESTORE = [
 ].join(String.fromCharCode(10));
 
 function runScript(codexHome: string, script: string): { stdout: string; stderr: string; status: number } {
-  const result = spawnSync(process.execPath, ["--eval", script], {
+  // Normally disabled; reproduces a healthy child exceeding the old case limit.
+  const delayMs = Number(process.env.OCX_TEST_CODEX_RESTORE_DELAY_MS ?? 0);
+  if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 60_000) {
+    throw new Error("invalid restore child delay fault");
+  }
+  const evaluatedScript = delayMs > 0 ? `await Bun.sleep(${delayMs});\n${script}` : script;
+  const result = spawnSync(process.execPath, ["--eval", evaluatedScript], {
     cwd: repoRoot,
     env: { ...process.env, CODEX_HOME: codexHome },
     encoding: "utf8",
+    timeout: SPAWN_BUDGET_MS,
+    killSignal: "SIGKILL",
   });
-  return { stdout: result.stdout?.trim() ?? "", stderr: result.stderr?.trim() ?? "", status: result.status ?? 1 };
+  const stdout = result.stdout?.trim() ?? "";
+  const stderr = result.stderr?.trim() ?? "";
+  if (result.error || result.status !== 0 || result.signal !== null) {
+    throw new Error(`restore child failed: status=${result.status} signal=${result.signal ?? "none"} error=${result.error?.message ?? "none"}\nstdout=${stdout.slice(-8192)}\nstderr=${stderr.slice(-8192)}`);
+  }
+  return { stdout, stderr, status: result.status };
 }
 
 describe("#1798 restore after the Codex app rewrites the config", () => {
@@ -161,7 +175,7 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     expect(restored).not.toContain("127.0.0.1:10100");
     // The user's own pre-injection content is still theirs.
     expect(restored).toContain("gpt-5.5");
-  }, 15_000);
+  }, 2 * SPAWN_BUDGET_MS);
 
   test("a user's own openai_base_url written before injection is preserved", () => {
     // Force a byte mismatch so exact journal restore cannot hide a fallback ownership bug.
@@ -179,7 +193,7 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     const restored = readFileSync(join(testDir, "config.toml"), "utf8");
     expect(restored).toContain("https://my-own-gateway.example/v1");
     expect(restored).not.toContain("127.0.0.1:10100");
-  }, 15_000);
+  }, 2 * SPAWN_BUDGET_MS);
 
   test("reinjection refreshes the owned route and catalog recorded for restore", () => {
     writeFileSync(join(testDir, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
@@ -190,7 +204,7 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     const recorded = JSON.parse(r.stdout) as { url: string; catalog: string };
     expect(recorded.url).toBe("http://127.0.0.1:10200/v1");
     expect(recorded.catalog).toBe(join(testDir, "second-catalog.json"));
-  }, 20_000);
+  }, 2 * SPAWN_BUDGET_MS);
 
   test("a user setting added after first injection survives reinjection and restore", () => {
     writeFileSync(join(testDir, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
@@ -214,7 +228,7 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     expect(result.afterRestore).not.toContain("openai_base_url");
     expect(result.afterRestore).not.toContain("127.0.0.1:10200");
     expect(result.profileExistsAfterRestore).toBe(false);
-  }, 20_000);
+  }, 2 * SPAWN_BUDGET_MS);
 
   test("the routed catalog we wrote is restored even when the rewrite dropped model_catalog_json", () => {
     // The catalog half of #1798. Restore used to re-resolve its target from the CURRENT
@@ -230,5 +244,5 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     const routed = (cache.models ?? []).filter((m: { slug?: string }) => typeof m.slug === "string" && m.slug.includes("/"));
     expect(routed).toEqual([]);
     expect(JSON.parse(r.stdout).catalog).toBe(cachePath);
-  }, 15_000);
+  }, 2 * SPAWN_BUDGET_MS);
 });

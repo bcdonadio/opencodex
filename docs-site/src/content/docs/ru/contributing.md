@@ -74,11 +74,25 @@ GitHub Actions намеренно остаются компактными:
 
 Для релизов используйте helper:
 
+
+Перед запуском helper выберите версию релиза и запустите
+`.github/workflows/dev-version-bump.yml` из ветки по умолчанию с параметрами
+`intended-version=<version>` и `mode=pre-move`. Проверьте и влейте созданный PR
+в `dev`, затем перенесите изменения в `main` или `preview` и запустите helper.
+Если версия `dev` уже выше целевой, workflow вернёт `changed=false` и PR для
+смены версии не потребуется. Публикация по-прежнему требует успешного CI
+для точного коммита релиза.
+
 ```bash
 bun run release <version>           # коммитит/пушит bump версии; publish workflow по умолчанию dry-run
+bun run release --bump minor        # вычисляет следующую patch, minor или major версию по тегам и каналам npm
 bun run release <version> --publish # publish после осознанного CI-gated dry-run
 bun run release:watch               # наблюдение за последним запуском Release workflow
 ```
+
+`--bump patch|minor|major` можно использовать вместо явной версии. После появления preview-тега
+для более высокого core команда `--bump patch` откажется продолжать старую stable patch-линию;
+включите исправление в уже открытую preview-версию.
 
 ## Ветки
 

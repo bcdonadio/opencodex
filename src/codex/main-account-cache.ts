@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import type { StoredAccountQuota } from "./quota";
+import type { StoredAccountQuota } from "./quota-types";
 import { truncateRetainedUtf8 } from "../lib/admission";
 
 const MAX_DIAGNOSTIC_VALUE_BYTES = 8 * 1024;
@@ -20,6 +20,10 @@ let mainAccountIdentityGeneration = 0;
 let observedMainQuotaIdentityKey: string | undefined;
 const mainQuotaCredentialKey = randomBytes(32);
 let mainQuotaCredential: { bearerHmac: Buffer; writer: MainQuotaWriter } | undefined;
+let mainQuotaCredentialGeneration = 0;
+
+/** Process-local transition fence; no credential material or persisted identity. */
+export function getMainQuotaCredentialGeneration(): number { return mainQuotaCredentialGeneration; }
 
 export type MainQuotaWriter = Readonly<{ identityKey: string; identityGeneration: number }>;
 
@@ -35,6 +39,7 @@ export function observeMainQuotaIdentity(accountId: string): void {
   observedMainQuotaIdentityKey = identityKey;
   mainAccountIdentityGeneration += 1;
   mainQuotaCredential = undefined;
+  mainQuotaCredentialGeneration += 1;
 }
 
 export function captureMainQuotaWriter(accountId: string): MainQuotaWriter | undefined {
@@ -48,10 +53,10 @@ export function captureMainQuotaWriter(accountId: string): MainQuotaWriter | und
 export function observeMainQuotaCredential(accessToken: string, accountId: string): MainQuotaWriter | undefined {
   const writer = captureMainQuotaWriter(accountId);
   if (!accessToken || !writer) return undefined;
-  mainQuotaCredential = {
-    bearerHmac: createHmac("sha256", mainQuotaCredentialKey).update(accessToken).digest(),
-    writer,
-  };
+  const bearerHmac = createHmac("sha256", mainQuotaCredentialKey).update(accessToken).digest();
+  if (!mainQuotaCredential || !isMainQuotaWriterLive(mainQuotaCredential.writer)
+    || !timingSafeEqual(bearerHmac, mainQuotaCredential.bearerHmac)) mainQuotaCredentialGeneration += 1;
+  mainQuotaCredential = { bearerHmac, writer };
   return { ...writer };
 }
 
@@ -96,6 +101,7 @@ export function clearMainAccountInfoCache(): void {
   cachedMainAccountInfo = null;
   mainAccountIdentityGeneration += 1;
   mainQuotaCredential = undefined;
+  mainQuotaCredentialGeneration += 1;
 }
 
 /** Last physical credential presence observed while native-main ownership was held. */

@@ -345,6 +345,13 @@ export interface OcxProviderConfig {
    * full set so the user can pick). See devlog issue_052_provider-model-allowlist.
    */
   selectedModels?: string[];
+  /** Registration-owned state. Absent means legacy or OAuth-exempt, not uninitialized. */
+  initialModelSelection?: {
+    version: 1;
+    registrationId: string;
+    status: "pending" | "ready" | "all-off";
+    modelCount?: number;
+  };
   /**
    * Per-provider retention allowlist for authoritative live discovery. When non-empty, any
    * model id in this list is preserved in the routed catalog even if the live `/models`
@@ -514,6 +521,8 @@ export interface OcxProviderConfig {
    * from the web-search sidecar's `search.xSearch` options and never widens caller tool selectors.
    */
   xaiResponsesXSearch?: boolean;
+  /** One-time Grok subscription wire upgrade; later explicit Chat choices remain authoritative. */
+  xaiResponsesDefaultVersion?: number;
   /**
    * Whether the Responses upstream accepts native custom tools and custom_tool_call items.
    * Set false only for a provider whose native contract rejects them; absence preserves
@@ -716,7 +725,7 @@ export interface OcxProviderConfig {
    * headless and cannot control a screen itself; provide commands here only when running on a host
    * that can. With no executor, these tools honestly report "not supported".
    */
-  desktopExecutor?: import("../adapters/cursor/native-exec-desktop").DesktopExecutorConfig;
+  desktopExecutor?: import("../adapters/cursor/desktop-executor-contract").DesktopExecutorConfig;
   /**
    * Cursor adapter only: unsafe opt-in escape hatch for Cursor server-driven built-in local
    * read/write/delete/ls/grep/shell/fetch execution. Prefer `nativeLocalExec: "on"` for new

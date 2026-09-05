@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { create, fromBinary } from "@bufbuild/protobuf";
+import type { OcxMessage, OcxToolResultMessage } from "../../../src/types";
 import {
   CursorImageError,
   CURSOR_VISION_IMAGE_OMITTED,
@@ -47,6 +48,223 @@ async function oversizedDecodablePng(): Promise<Uint8Array> {
   const src = new Uint8Array(await Bun.file(pngPath).arrayBuffer());
   return new Uint8Array(await new Bun.Image(src).resize(2400, 2400).png().bytes());
 }
+
+function toolImageResult(
+  content: OcxToolResultMessage["content"],
+  toolCallId = "call_view",
+  toolName = "view_image",
+): OcxToolResultMessage {
+  return { role: "toolResult", toolCallId, toolName, content, isError: false, timestamp: 1 };
+}
+
+describe("Cursor opted-in trailing tool image preparation", () => {
+  test("prepares all results in attachment order even when the final result is text-only", async () => {
+    const raw = [
+      toolImageResult([
+        { type: "text", text: "first screenshots" },
+        { type: "image", imageUrl: PNG_DATA_URL, detail: "high" },
+        { type: "image", imageUrl: PNG_DATA_URL, detail: "auto" },
+      ], "call_a"),
+      toolImageResult("no screenshot", "call_b"),
+      toolImageResult([{ type: "image", imageUrl: PNG_DATA_URL, detail: "original" }], "call_c"),
+      toolImageResult("all done", "call_d"),
+    ];
+    const prepared = await prepareCursorRawMessages(raw, undefined, { trailingToolImages: true });
+    expect(prepared.images.map(image => image.sourceLabel)).toEqual([
+      'tool result 1, image 1: {"tool":"view_image","call_id":"call_a"}',
+      'tool result 1, image 2: {"tool":"view_image","call_id":"call_a"}',
+      'tool result 3, image 1: {"tool":"view_image","call_id":"call_c"}',
+    ]);
+    expect(prepared.images.map(image => image.detail)).toEqual(["high", "auto", "original"]);
+    for (const image of prepared.images) {
+      expect(image.mimeType).toBe("image/jpeg");
+      expect(image.data.slice(0, 2)).toEqual(new Uint8Array([0xff, 0xd8]));
+    }
+    const normalizedParts = prepared.messages?.flatMap(message =>
+      typeof message.content === "string" ? [] : message.content.filter(part => part.type === "image"));
+    expect(normalizedParts?.map(part => part.imageUrl)).toEqual(
+      prepared.images.map(image => `data:image/jpeg;base64,${Buffer.from(image.data).toString("base64")}`),
+    );
+    expect(prepared.messages?.[1]).toBe(raw[1]);
+    expect(prepared.messages?.[3]).toBe(raw[3]);
+  });
+
+  test("omits invalid and remote images without gaps in ready-image ordinals", async () => {
+    const prepared = await prepareCursorRawMessages([
+      toolImageResult([{ type: "image", imageUrl: "data:image/png;base64,!!!!" }], "call_bad"),
+      toolImageResult([
+        { type: "image", imageUrl: "data:image/png;base64,!!!!" },
+        { type: "image", imageUrl: PNG_DATA_URL },
+        { type: "image", imageUrl: "https://example.com/remote.png" },
+        { type: "image", imageUrl: PNG_DATA_URL },
+      ], "call_good"),
+    ], undefined, { trailingToolImages: true });
+    expect(prepared.images.map(image => image.sourceLabel)).toEqual([
+      'tool result 2, image 1: {"tool":"view_image","call_id":"call_good"}',
+      'tool result 2, image 2: {"tool":"view_image","call_id":"call_good"}',
+    ]);
+    expect(prepared.messages?.[0]?.content).toEqual([{ type: "text", text: CURSOR_VISION_IMAGE_OMITTED }]);
+    const content = prepared.messages?.[1]?.content;
+    expect(Array.isArray(content)).toBe(true);
+    if (!Array.isArray(content)) throw new Error("expected parts");
+    expect(content.map(part => part.type)).toEqual(["text", "image", "text", "image"]);
+    expect(content[0]).toEqual({ type: "text", text: CURSOR_VISION_IMAGE_OMITTED });
+    expect(content[2]).toEqual({ type: "text", text: CURSOR_VISION_IMAGE_OMITTED });
+  });
+
+  test("JSON-escapes quotes and controls in bounded source labels", async () => {
+    const prepared = await prepareCursorRawMessages([
+      toolImageResult([{ type: "image", imageUrl: PNG_DATA_URL }], 'call"\\\n\r\t\u0000', 'view"\\\n\u001b'),
+    ], undefined, { trailingToolImages: true });
+    expect(prepared.images.map(image => image.sourceLabel)).toEqual([
+      'tool result 1, image 1: {"tool":"view\\"\\\\\\n\\u001b","call_id":"call\\"\\\\\\n\\r\\t\\u0000"}',
+    ]);
+    expect(prepared.images[0]?.sourceLabel).not.toMatch(/[\u0000-\u001f]/);
+  });
+
+  test("truncates identifiers before escaping and keeps colliding labels distinct by ordinal", async () => {
+    const name = '"'.repeat(128);
+    const id = "\\".repeat(128);
+    const prepared = await prepareCursorRawMessages([
+      toolImageResult([{ type: "image", imageUrl: PNG_DATA_URL }], `${id}first`, `${name}first`),
+      toolImageResult([{ type: "image", imageUrl: PNG_DATA_URL }], `${id}second`, `${name}second`),
+    ], undefined, { trailingToolImages: true });
+    expect(prepared.images).toHaveLength(2);
+    for (const [index, image] of prepared.images.entries()) {
+      const prefix = `tool result ${index + 1}, image 1: `;
+      expect(image.sourceLabel?.startsWith(prefix)).toBe(true);
+      expect(JSON.parse(image.sourceLabel!.slice(prefix.length))).toEqual({ tool: name, call_id: id });
+      expect(image.sourceLabel!.length).toBeLessThan(600);
+      expect(image.sourceLabel).not.toContain("first");
+      expect(image.sourceLabel).not.toContain("second");
+    }
+    expect(prepared.images[0]?.sourceLabel).not.toBe(prepared.images[1]?.sourceLabel);
+  });
+
+  test("rejects aggregate counts over 12 across results before image decode", async () => {
+    const decode = spyOn(Bun.Image.prototype, "metadata");
+    try {
+      await expect(prepareCursorRawMessages([
+        toolImageResult(Array.from({ length: 6 }, () => ({ type: "image", imageUrl: PNG_DATA_URL }))),
+        toolImageResult(Array.from({ length: 7 }, () => ({ type: "image", imageUrl: "data:image/png;base64,!!!!" }))),
+      ], undefined, { trailingToolImages: true })).rejects.toMatchObject({
+        name: "CursorImageError",
+        message: "Too many images in one request (max 12).",
+      });
+      expect(decode).not.toHaveBeenCalled();
+    } finally {
+      decode.mockRestore();
+    }
+  });
+
+  test("accepts exactly 12 images across results", async () => {
+    const prepared = await prepareCursorRawMessages([
+      toolImageResult(Array.from({ length: 6 }, () => ({ type: "image", imageUrl: PNG_DATA_URL })), "call_a"),
+      toolImageResult(Array.from({ length: 6 }, () => ({ type: "image", imageUrl: PNG_DATA_URL })), "call_b"),
+    ], undefined, { trailingToolImages: true });
+    expect(prepared.images).toHaveLength(12);
+    expect(prepared.images[11]?.sourceLabel).toBe('tool result 2, image 6: {"tool":"view_image","call_id":"call_b"}');
+  });
+
+  test("leaves history before the contiguous run untouched and never mutates input", async () => {
+    const raw: OcxMessage[] = [
+      { role: "user", content: [{ type: "image", imageUrl: PNG_DATA_URL }], timestamp: 1 },
+      toolImageResult(Array.from({ length: 13 }, () => ({ type: "image", imageUrl: PNG_DATA_URL })), "old"),
+      { role: "assistant", content: [{ type: "text", text: "next tool call" }], timestamp: 2 },
+      toolImageResult([{ type: "text", text: "active" }, { type: "image", imageUrl: PNG_DATA_URL }], "new"),
+    ];
+    const before = structuredClone(raw);
+    for (const message of raw) {
+      if (Array.isArray(message.content)) {
+        for (const part of message.content) Object.freeze(part);
+        Object.freeze(message.content);
+      }
+      Object.freeze(message);
+    }
+    Object.freeze(raw);
+    const prepared = await prepareCursorRawMessages(raw, undefined, { trailingToolImages: true });
+    expect(raw).toEqual(before);
+    expect(prepared.messages).not.toBe(raw);
+    for (let index = 0; index < 3; index++) expect(prepared.messages?.[index]).toBe(raw[index]);
+    expect(prepared.messages?.[3]).not.toBe(raw[3]);
+    expect(prepared.images.map(image => image.sourceLabel)).toEqual([
+      'tool result 1, image 1: {"tool":"view_image","call_id":"new"}',
+    ]);
+  });
+
+  test("default, empty options and explicit false preserve trailing tool images unchanged", async () => {
+    const raw = [toolImageResult([{ type: "image", imageUrl: PNG_DATA_URL }])];
+    for (const options of [undefined, {}, { trailingToolImages: false }]) {
+      const prepared = await prepareCursorRawMessages(raw, undefined, options);
+      expect(prepared.messages).toBe(raw);
+      expect(prepared.images).toEqual([]);
+    }
+    expect(cursorVisionPrepareStartIndex(raw)).toBe(raw.length);
+    expect(await resolveActiveCursorImages(raw)).toEqual([]);
+  });
+
+  test("text-only tool runs preserve identity", async () => {
+    const raw = [toolImageResult("done"), toolImageResult([{ type: "text", text: "also done" }])];
+    const prepared = await prepareCursorRawMessages(raw, undefined, { trailingToolImages: true });
+    expect(prepared.messages).toBe(raw);
+    expect(prepared.images).toEqual([]);
+  });
+
+  test("later user/developer turns do not revive stale tool images or receive source labels", async () => {
+    for (const role of ["user", "developer"] as const) {
+      const stale = toolImageResult([{ type: "image", imageUrl: PNG_DATA_URL }]);
+      const raw: OcxMessage[] = [stale, { role, content: "new question", timestamp: 2 }];
+      const textOnly = await prepareCursorRawMessages(raw, undefined, { trailingToolImages: true });
+      expect(textOnly.messages).toBe(raw);
+      expect(textOnly.images).toEqual([]);
+      const ordinary = await prepareCursorRawMessages([
+        stale, { role, content: [{ type: "image", imageUrl: PNG_DATA_URL }], timestamp: 2 },
+      ], undefined, { trailingToolImages: true });
+      expect(ordinary.messages?.[0]).toBe(stale);
+      expect(ordinary.images).toHaveLength(1);
+      expect(ordinary.images[0]).not.toHaveProperty("sourceLabel");
+    }
+  });
+
+  test("retains detail-dependent JPEG soft caps in opted-in results", async () => {
+    const pngPath = new URL("../../helpers/cursor-grumpy-fixture.png", import.meta.url);
+    const imageUrl = `data:image/png;base64,${Buffer.from(await Bun.file(pngPath).arrayBuffer()).toString("base64")}`;
+    const prepared = await prepareCursorRawMessages([
+      toolImageResult([{ type: "image", imageUrl, detail: "auto" }]),
+      toolImageResult([{ type: "image", imageUrl, detail: "original" }]),
+    ], undefined, { trailingToolImages: true });
+    expect(prepared.images).toHaveLength(2);
+    expect(prepared.images[0]!.data.byteLength).toBeLessThanOrEqual(CURSOR_VISION_SOFT_MAX_BYTES);
+    expect(prepared.images[1]!.data.byteLength).toBeLessThanOrEqual(CURSOR_VISION_SOFT_MAX_BYTES_HIGH);
+    expect(prepared.images[1]!.data.byteLength).toBeGreaterThan(prepared.images[0]!.data.byteLength);
+  });
+
+  test("propagates pre-abort and abort during normalization without preparing later results", async () => {
+    const raw = [
+      toolImageResult([{ type: "image", imageUrl: PNG_DATA_URL }], "call_a"),
+      toolImageResult([{ type: "image", imageUrl: PNG_DATA_URL }], "call_b"),
+    ];
+    const before = structuredClone(raw);
+    const preAborted = new AbortController();
+    preAborted.abort();
+    await expect(prepareCursorRawMessages(raw, preAborted.signal, { trailingToolImages: true }))
+      .rejects.toMatchObject({ name: "AbortError" });
+
+    const controller = new AbortController();
+    const reason = new Error("stop image preparation");
+    const decode = spyOn(Bun.Image.prototype, "metadata").mockImplementation(() => {
+      controller.abort(reason);
+      return Promise.reject(reason);
+    });
+    try {
+      await expect(prepareCursorRawMessages(raw, controller.signal, { trailingToolImages: true })).rejects.toBe(reason);
+      expect(decode).toHaveBeenCalledTimes(1);
+      expect(raw).toEqual(before);
+    } finally {
+      decode.mockRestore();
+    }
+  });
+});
 
 describe("Cursor image resolver", () => {
   test("rejects more than MAX_CURSOR_IMAGES in one request", async () => {
@@ -102,6 +320,7 @@ describe("Cursor image resolver", () => {
     expect(resolved[0]!.data[0]).toBe(0xff);
     expect(resolved[0]!.data[1]).toBe(0xd8);
     expect(resolved[0]?.uuid.length).toBeGreaterThan(0);
+    expect(resolved[0]).not.toHaveProperty("sourceLabel");
   });
 
   test("soft-omits malformed and non-image data URLs", async () => {
@@ -428,6 +647,7 @@ describe("Cursor image resolver", () => {
     expect(selectedImages).toHaveLength(1);
     expect(selectedImages[0]).toBe(prepared.images[0]);
     expect(selectedImages[0]?.data).toBe(prepared.images[0]?.data);
+    expect(selectedImages[0]).not.toHaveProperty("sourceLabel");
   });
 
   test("image-only remote soft-omit yields userMessageAction with omission text", async () => {

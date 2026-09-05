@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveCredential } from "../../src/oauth/store";
+import { getAccountSet, saveCredential, setActiveAccount } from "../../src/oauth/store";
 import type { OcxConfig } from "../../src/types";
 import {
   clearAccountQuotaCache,
@@ -13,6 +13,7 @@ import {
   reconcileProviderAccountQuotaRows,
   resetProviderQuotaReconcileStateForTests,
   supportsPerAccountQuota,
+  providerOAuthAccountQuotaMode,
 } from "../../src/providers/quota";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -204,13 +205,12 @@ describe("fetchProviderAccountQuotas", () => {
 
   test("providers without a per-account usage API are skipped", async () => {
     expect(supportsPerAccountQuota("anthropic")).toBe(true);
-    // Kiro joined this list once it grew a usage reader; xAI has no per-account usage API,
-    // so it now carries the "unsupported providers never reach the network" contract.
+    // Login capability alone must never select another provider's quota reader.
     expect(supportsPerAccountQuota("kiro")).toBe(true);
-    expect(supportsPerAccountQuota("xai")).toBe(false);
+    expect(supportsPerAccountQuota("github-copilot")).toBe(false);
     let called = false;
     globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 200 }); }) as typeof fetch;
-    expect(await fetchProviderAccountQuotas("xai")).toEqual([]);
+    expect(await fetchProviderAccountQuotas("github-copilot")).toEqual([]);
     expect(called).toBe(false);
   });
 
@@ -421,6 +421,228 @@ describe("fetchProviderAccountQuotas", () => {
     await reportPromise;
 
     expect(getCachedProviderAccountQuota("anthropic", first!.id)).toBeNull();
+  });
+});
+
+describe("explicit OAuth account quota readers", () => {
+  test("explicit OAuth probe failure drops last-good quota that expires during the upstream await", async () => {
+    const realDateNow = Date.now;
+    const observedAt = realDateNow();
+    await saveCredential("kimi", {
+      access: "quota-settlement-fixture", refresh: "refresh-settlement-fixture",
+      expires: observedAt + 60 * 60_000, accountId: "quota-settlement-user",
+    });
+    let now = observedAt;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      if (calls === 1) return Response.json({ usage: { limit: 100, used: 25 } });
+      expect(now).toBe(observedAt + 29 * 60_000 + 59_000);
+      now = observedAt + 30 * 60_000;
+      return new Response("{}", { status: 429 });
+    }) as typeof fetch;
+    Date.now = () => now;
+    try {
+      expect((await fetchProviderAccountQuotas("kimi"))[0]?.quota?.updatedAt).toBe(observedAt);
+      now = observedAt + 29 * 60_000 + 59_000;
+      const [failed] = await fetchProviderAccountQuotas("kimi", true);
+      expect(calls).toBe(2);
+      expect(failed?.quota).toBeNull();
+      expect(failed?.unavailable).toBe(true);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  test("a recent failed explicit OAuth probe cannot extend a last-good measurement past thirty minutes", async () => {
+    const realDateNow = Date.now;
+    const observedAt = realDateNow();
+    await saveCredential("kimi", {
+      access: "quota-age-fixture", refresh: "refresh-age-fixture",
+      expires: observedAt + 60 * 60_000, accountId: "quota-age-user",
+    });
+    let now = observedAt;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return calls === 1 ? Response.json({ usage: { limit: 100, used: 25 } }) : new Response("{}", { status: 429 });
+    }) as typeof fetch;
+    Date.now = () => now;
+    try {
+      const [initial] = await fetchProviderAccountQuotas("kimi");
+      expect(initial?.quota?.updatedAt).toBe(observedAt);
+      now = observedAt + 29 * 60_000 + 59_000;
+      const [failed] = await fetchProviderAccountQuotas("kimi", true);
+      expect(failed?.unavailable).toBe(true);
+      expect(failed?.quota?.updatedAt).toBe(observedAt);
+      expect(calls).toBe(2);
+      now += 1_000;
+      const [expired] = await fetchProviderAccountQuotas("kimi");
+      expect(expired?.quota).toBeNull();
+      expect(expired?.unavailable).toBe(true);
+      expect(calls).toBe(3);
+      now += 1;
+      expect((await fetchProviderAccountQuotas("kimi"))[0]?.quota).toBeNull();
+      expect(calls).toBe(3);
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  const cases = [
+    { provider: "xai", adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", field: "weeklyPercent" },
+    { provider: "cursor", adapter: "cursor", baseUrl: "https://api2.cursor.sh", field: "monthlyPercent" },
+    { provider: "kimi", adapter: "openai-chat", baseUrl: "https://api.kimi.com/coding/v1", field: "weeklyPercent" },
+    { provider: "command-code", adapter: "command-code", baseUrl: "https://api.commandcode.ai", field: "fiveHourPercent" },
+  ] as const;
+
+  test("capability distinguishes seven readers, passive observations and unsupported login providers", () => {
+    for (const provider of ["anthropic", "kiro", "google-antigravity", ...cases.map(row => row.provider)]) {
+      expect(providerOAuthAccountQuotaMode(provider)).toBe("probe");
+    }
+    expect(providerOAuthAccountQuotaMode("meta-muse")).toBe("passive");
+    expect(supportsPerAccountQuota("meta-muse")).toBe(false);
+    expect(providerOAuthAccountQuotaMode("github-copilot")).toBe("unsupported");
+  });
+
+  for (const fixture of cases) {
+    test(`${fixture.provider} reads both credentials without switching active selection`, async () => {
+      const expires = Date.now() + 60 * 60_000;
+      for (const name of ["first", "second"]) {
+        await saveCredential(fixture.provider, { access: `quota-${name}`, refresh: `refresh-${name}`, expires, accountId: `user-${name}`, email: `${name}@example.com` });
+      }
+      const active = getAccountSet(fixture.provider)!.activeAccountId;
+      const seen = new Set<string>();
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        const auth = headers.get("authorization")!;
+        const first = auth === "Bearer quota-first";
+        const amount = first ? 12 : 68;
+        const label = first ? "first" : "second";
+        seen.add(auth);
+        const url = String(input);
+        expect(init?.redirect).toBe("error");
+        expect(new URL(url).protocol).toBe("https:");
+        if (fixture.provider === "xai") {
+          expect(headers.get("x-userid")).toBe(`user-${label}`);
+          return Response.json({ config: { creditUsagePercent: amount, currentPeriod: { type: "USAGE_PERIOD_TYPE_WEEKLY" } } });
+        }
+        if (fixture.provider === "cursor") return Response.json({ planUsage: { totalPercentUsed: amount } });
+        if (fixture.provider === "kimi") return Response.json({ usage: { limit: 100, used: amount } });
+        if (url.endsWith("/alpha/whoami")) return Response.json({ org: { id: `org-${label}` } });
+        expect(new URL(url).searchParams.get("orgId")).toBe(`org-${label}`);
+        if (url.includes("subscriptions")) return Response.json({ currentPeriodStart: "2026-09-01T00:00:00Z" });
+        if (url.includes("usage/summary")) return Response.json({ totalCost: amount });
+        return Response.json({ credits: { monthlyCredits: 10 }, windowLimits: { fiveHour: { cap: 100, used: amount } } });
+      }) as typeof fetch;
+      const rows = await fetchProviderAccountQuotas(fixture.provider, false, { adapter: fixture.adapter, baseUrl: fixture.baseUrl, authMode: "oauth" });
+      expect(rows.map(row => row.quota?.[fixture.field]).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([12, 68]);
+      expect(seen.size).toBe(2);
+      expect(getAccountSet(fixture.provider)!.activeAccountId).toBe(active);
+      expect(rows.every(row => row.isCurrent?.())).toBe(true);
+      expect(Object.keys(rows[0]!)).toEqual(["accountId", "quota"]);
+      expect(JSON.stringify(rows)).not.toContain("quota-first");
+      expect(JSON.stringify(rows)).not.toContain("identity");
+      clearAccountQuotaCache(fixture.provider);
+      expect(rows.every(row => row.isCurrent?.() === false)).toBe(true);
+    });
+  }
+
+  test("same-id credential replacement invalidates a pending row and cannot poison the cache", async () => {
+    const credential = { access: "cursor-before", refresh: "cursor-refresh", expires: Date.now() + 60 * 60_000, accountId: "same-user", email: "same@example.com" };
+    await saveCredential("cursor", credential);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    globalThis.fetch = (async () => {
+      started(); await gate;
+      return Response.json({ planUsage: { totalPercentUsed: 95 } });
+    }) as typeof fetch;
+    const pending = fetchProviderAccountQuotas("cursor");
+    await entered;
+    await saveCredential("cursor", { ...credential, access: "cursor-after" });
+    release();
+    const [row] = await pending;
+    expect(row?.isCurrent?.()).toBe(false);
+    expect(row?.quota).toBeNull();
+    expect(getCachedProviderAccountQuota("cursor", row!.accountId)).toBeNull();
+  });
+
+  test("current provider report rejects an account switch during its explicit read", async () => {
+    for (const accountId of ["first-user", "second-user"]) {
+      await saveCredential("cursor", { access: accountId, refresh: `${accountId}-refresh`, expires: Date.now() + 60 * 60_000, accountId });
+    }
+    const set = getAccountSet("cursor")!;
+    const next = set.accounts.find(row => row.id !== set.activeAccountId)!;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    globalThis.fetch = (async () => { started(); await gate; return Response.json({ planUsage: { totalPercentUsed: 90 } }); }) as typeof fetch;
+    const config = { defaultProvider: "cursor", providers: { cursor: { adapter: "cursor", authMode: "oauth", baseUrl: "https://api2.cursor.sh" } } } as OcxConfig;
+    const pending = fetchProviderQuotaReports(config, true);
+    await entered;
+    await setActiveAccount("cursor", next.id);
+    release();
+    expect((await pending).reports).toEqual([]);
+  });
+
+  test("invalid configured Kimi destination never resolves to the default quota host", async () => {
+    await saveCredential("kimi", { access: "kimi-fixture", refresh: "refresh", expires: Date.now() + 60 * 60_000, accountId: "kimi-user" });
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; return Response.json({}); }) as typeof fetch;
+    const rows = await fetchProviderAccountQuotas("kimi", true, { adapter: "openai-chat", authMode: "oauth", baseUrl: "https://kimi.example.invalid/v1" });
+    expect(rows[0]?.unavailable).toBe(true);
+    expect(rows[0]?.quota).toBeNull();
+    expect(calls).toBe(0);
+  });
+
+  test("OAuth roster uses four workers and force joins same-identity work", async () => {
+    for (let i = 0; i < 6; i++) {
+      await saveCredential("cursor", { access: `cursor-${i}`, refresh: `refresh-${i}`, expires: Date.now() + 60 * 60_000, accountId: `user-${i}` });
+    }
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let fourStarted!: () => void;
+    const entered = new Promise<void>(resolve => { fourStarted = resolve; });
+    let calls = 0;
+    let active = 0;
+    let peak = 0;
+    globalThis.fetch = (async () => {
+      calls++; active++; peak = Math.max(peak, active);
+      if (calls === 4) fourStarted();
+      await gate;
+      active--;
+      return Response.json({ planUsage: { totalPercentUsed: 20 } });
+    }) as typeof fetch;
+    const pending = fetchProviderAccountQuotas("cursor");
+    await entered;
+    expect(calls).toBe(4);
+    release();
+    expect(await pending).toHaveLength(6);
+    expect(peak).toBe(4);
+    await fetchProviderAccountQuotas("cursor");
+    expect(calls).toBe(6);
+    await fetchProviderAccountQuotas("cursor", true);
+    expect(calls).toBe(12);
+  });
+
+  test("forced OAuth quota waits for an already-running same-identity probe", async () => {
+    await saveCredential("cursor", { access: "cursor-only", refresh: "refresh", expires: Date.now() + 60 * 60_000, accountId: "only-user" });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let started!: () => void;
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; started(); await gate; return Response.json({ planUsage: { totalPercentUsed: 20 } }); }) as typeof fetch;
+    const ordinary = fetchProviderAccountQuotas("cursor");
+    await entered;
+    const force = fetchProviderAccountQuotas("cursor", true);
+    release();
+    const [a, b] = await Promise.all([ordinary, force]);
+    expect(calls).toBe(1);
+    expect(a[0]?.quota).toEqual(b[0]?.quota);
   });
 });
 

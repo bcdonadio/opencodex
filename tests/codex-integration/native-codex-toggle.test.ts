@@ -12,7 +12,7 @@
  * act on — rather than artifacts the next start silently undoes.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -75,9 +75,9 @@ function persistedCodexIntent(): unknown {
 beforeEach(() => {
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
-  // realpath: macOS hands out /var/... from tmpdir() but getCodexHome() resolves to
-  // /private/var/..., and the status row reports the resolved path.
-  fixtureRoot = realpathSync(mkdtempSync(join(tmpdir(), "ocx-codex-toggle-")));
+  // Native realpath resolves macOS /var aliases and expands Windows RUNNER~1
+  // short names, matching the filesystem identity that the status row reports.
+  fixtureRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "ocx-codex-toggle-")));
   codexHome = join(fixtureRoot, "codex");
   mkdirSync(codexHome);
   cleanup.push(fixtureRoot);
@@ -105,6 +105,26 @@ test("the status row names Codex's effective config file", async () => {
   const body = await response!.json() as { clients: { clientId: string; configPath: string }[] };
   const codex = body.clients.find(client => client.clientId === "codex");
   expect(codex?.configPath).toBe(join(codexHome, "config.toml"));
+});
+
+test("the status row follows a changed home through a directory alias without a config file", async () => {
+  const otherHome = join(fixtureRoot, "codex other");
+  const alias = join(fixtureRoot, "codex alias");
+  mkdirSync(otherHome);
+  symlinkSync(otherHome, alias, process.platform === "win32" ? "junction" : "dir");
+  expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
+  expect(existsSync(join(otherHome, "config.toml"))).toBe(false);
+
+  const first = await dispatch(baseConfig(), "/api/native-integrations");
+  const firstBody = await first!.json() as { clients: { clientId: string; configPath: string }[] };
+  expect(firstBody.clients.find(client => client.clientId === "codex")?.configPath)
+    .toBe(join(codexHome, "config.toml"));
+
+  process.env.CODEX_HOME = alias;
+  const second = await dispatch(baseConfig(), "/api/native-integrations");
+  const secondBody = await second!.json() as { clients: { clientId: string; configPath: string }[] };
+  expect(secondBody.clients.find(client => client.clientId === "codex")?.configPath)
+    .toBe(join(otherHome, "config.toml"));
 });
 
 describe("request validation", () => {

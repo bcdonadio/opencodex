@@ -352,6 +352,144 @@ describe("Command Code provider", () => {
     });
   });
 
+  test.each(["", "before\n"])("preserves standalone orphan data and HTTPS images with text %j", async (text) => {
+    const image = "data:image/png;base64,QUJDRA==";
+    const remote = "https://example.com/screenshot.JPEG?size=2#preview";
+    const built = await builtRequest({
+      ...parsed(),
+      context: {
+        ...parsed().context,
+        messages: [{
+          role: "toolResult", toolCallId: "call_orphan", toolName: "view_image",
+          content: [
+            { type: "text", text },
+            { type: "image", imageUrl: image },
+            { type: "text", text: "" },
+            { type: "image", imageUrl: remote },
+            { type: "text", text },
+          ],
+          isError: false, timestamp: 1,
+        }],
+      },
+    });
+    const wire = JSON.parse(built.body).params.messages;
+    expect(wire).toEqual([{
+      role: "user",
+      content: [
+        { type: "text", text: `[tool result without adjacent tool call: view_image (call_orphan)]\n${text}[image][image]${text}` },
+        { type: "image", image, mediaType: "image/png" },
+        { type: "image", image: remote, mediaType: "image/jpeg" },
+      ],
+    }]);
+    expect(wire[0].content[0].text).not.toContain("QUJDRA==");
+    expect(wire[0].content[0].text).not.toContain(remote);
+  });
+
+  test.each(["duplicate", "user barrier"])("preserves orphan images after a %s without repairing the pairing", async (scenario) => {
+    const image = "data:image/png;base64,QUJDRA==";
+    const remote = "https://example.com/late.webp";
+    const request = parsed();
+    request.context.messages = [{
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_1", name: "view_image", arguments: {} }],
+      timestamp: 1,
+    }];
+    if (scenario === "duplicate") {
+      request.context.messages.push({
+        role: "toolResult", toolCallId: "call_1", toolName: "view_image",
+        content: [{ type: "text", text: "first" }, { type: "image", imageUrl: image }],
+        isError: false, timestamp: 2,
+      });
+    } else {
+      request.context.messages.push({ role: "user", content: "continue", timestamp: 2 });
+    }
+    request.context.messages.push({
+      role: "toolResult", toolCallId: "call_1", toolName: "view_image",
+      content: [{ type: "text", text: "late:" }, { type: "image", imageUrl: remote }],
+      isError: false, timestamp: 3,
+    });
+    const built = await builtRequest(request);
+    const wire = JSON.parse(built.body).params.messages;
+    expect(wire).toEqual([
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "call_1", toolName: "view_image", input: {} }] },
+      { role: "tool", content: [{
+        type: "tool-result", toolCallId: "call_1", toolName: "view_image",
+        output: scenario === "duplicate"
+          ? { type: "text", value: "first[image]" }
+          : { type: "error-text", value: "[ocx] no tool result was recorded for this tool call; execution status unknown." },
+      }] },
+      scenario === "duplicate"
+        ? { role: "user", content: [{ type: "image", image, mediaType: "image/png" }] }
+        : { role: "user", content: [{ type: "text", text: "continue" }] },
+      { role: "user", content: [
+        { type: "text", text: "[tool result without adjacent tool call: view_image (call_1)]\nlate:[image]" },
+        { type: "image", image: remote, mediaType: "image/webp" },
+      ] },
+    ]);
+  });
+
+  test("closes outstanding calls before buffered and unmatched orphan image carriers", async () => {
+    const image = "data:image/png;base64,QUJDRA==";
+    const remote = "https://example.com/orphan.jpg";
+    const built = await builtRequest({
+      ...parsed(),
+      context: {
+        ...parsed().context,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "toolCall", id: "call_1", name: "view_image", arguments: {} },
+              { type: "toolCall", id: "call_2", name: "lookup", arguments: {} },
+            ],
+            timestamp: 1,
+          },
+          {
+            role: "toolResult", toolCallId: "call_1", toolName: "view_image",
+            content: [{ type: "image", imageUrl: image }], isError: false, timestamp: 2,
+          },
+          {
+            role: "toolResult", toolCallId: "call_orphan", toolName: "view_image",
+            content: [{ type: "text", text: "unmatched:" }, { type: "image", imageUrl: remote }],
+            isError: true, timestamp: 3,
+          },
+        ],
+      },
+    });
+    expect(JSON.parse(built.body).params.messages).toEqual([
+      { role: "assistant", content: [
+        { type: "tool-call", toolCallId: "call_1", toolName: "view_image", input: {} },
+        { type: "tool-call", toolCallId: "call_2", toolName: "lookup", input: {} },
+      ] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "call_1", toolName: "view_image", output: { type: "text", value: "[image]" } }] },
+      { role: "tool", content: [{
+        type: "tool-result", toolCallId: "call_2", toolName: "lookup",
+        output: { type: "error-text", value: "[ocx] no tool result was recorded for this tool call; execution status unknown." },
+      }] },
+      { role: "user", content: [{ type: "image", image, mediaType: "image/png" }] },
+      { role: "user", content: [
+        { type: "text", text: "[tool result without adjacent tool call: view_image (call_orphan)]\nunmatched:[image]" },
+        { type: "image", image: remote, mediaType: "image/jpeg" },
+      ] },
+    ]);
+  });
+
+  test.each(["", " outcome\n"])("preserves exact image-free orphan text %j for strings and arrays", async (text) => {
+    for (const content of [text, [{ type: "text" as const, text }, { type: "text" as const, text: "" }]]) {
+      const built = await builtRequest({
+        ...parsed(),
+        context: {
+          ...parsed().context,
+          messages: [{ role: "toolResult", toolCallId: "call_orphan", toolName: "lookup", content, isError: false, timestamp: 1 }],
+        },
+      });
+      expect(JSON.parse(built.body).params.messages).toEqual([{
+        role: "user",
+        content: [{ type: "text", text: `[tool result without adjacent tool call: lookup (call_orphan)]\n${text}` }],
+      }]);
+    }
+  });
+
   test("keeps the generate config to bounded workspace and git metadata", async () => {
     const built = await builtRequest(parsed());
     const body = JSON.parse(built.body);

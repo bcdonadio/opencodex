@@ -147,7 +147,10 @@ Authorization: Bearer <admin-token>
 | `PUT /api/model-visibility` | 原子性地更改 provider 级或 model 级可见性 | 400 provider、scope、target 或请求体无效 |
 | `GET, POST /api/custom-models` | 列出自定义模型或添加一个 | 400 字段无效；404 provider 缺失；409 模型重复 |
 | `PUT, DELETE /api/custom-models/{id}` | 编辑或删除一个自定义模型 | 400 id/字段无效；404 未找到；409 模型重复 |
-| `GET, PUT /api/selected-models` | 读取 provider 允许列表和可用性，或替换一个允许列表 | 400 缺少 provider/请求体；404 未知 provider |
+| `GET, PUT /api/selected-models` | 读取 provider 允许列表和可用性，或替换一个允许列表 | 400 缺少 provider/请求体；404 未知 provider; PUT 409 `initial_model_selection_pending` |
+| `GET, PUT /api/model-presets` | 读取预设信息或选择 preset/all/custom 模式 | 400 模式无效或不支持该预设；404 未知提供者; PUT 409 `initial_model_selection_pending` |
+
+可靠的初始模型列表尚未确认时，有效的 `PUT /api/selected-models` 和 `PUT /api/model-presets` 请求也会返回 HTTP 409 和代码 `initial_model_selection_pending`。请使用 `GET /api/models` 等方式刷新模型列表，成功后再重试。
 
 ### OAuth 账户、provider 密钥和数据平面密钥
 

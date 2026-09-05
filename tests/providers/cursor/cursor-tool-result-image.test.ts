@@ -29,9 +29,9 @@ function blobData(blobId: Uint8Array): Uint8Array {
 /**
  * Every content item the ENCODER emits for the tool result attached to the assistant's tool call.
  * This is encoder-level: it calls encodeCursorRunRequest directly, so it deliberately bypasses the
- * server's vision preprocessing. In production every Cursor model is in noVisionModels, so images
- * are described or stripped before the adapter runs — these assertions prove encoder support, not
- * end-to-end delivery.
+ * server's vision preprocessing. These assertions cover native MCP image encoding, not external
+ * tool screenshots promoted to selectedContext by the live transport; that path has separate
+ * encoded-request regressions in cursor-live-transport.test.ts, not end-to-end delivery proof.
  */
 function toolResultItems(bytes: Uint8Array) {
   const msg = fromBinary(AgentClientMessageSchema, bytes);

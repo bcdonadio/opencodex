@@ -790,7 +790,7 @@ describe("native fallback account preview", () => {
 
     const response = await postSpawn(
       cfg,
-      { model: "gpt-5.6-sol", input: readableAgentInput(), stream: false },
+      { model: "gpt-daybreak-blue-latest", input: readableAgentInput(), stream: false },
       {},
       logCtx,
       { "chatgpt-account-id": "caller-account" },
@@ -1553,7 +1553,10 @@ describe("native fallback account preview", () => {
     })).filter(({ body }) => body.length > 0);
     expect(bodyRequests).toHaveLength(2);
     expect(bodyRequests[0]?.body).toContain("capture_assignment");
-    expect(bodyRequests[1]?.body).toContain("Use the recovered candidate-scope assignment.");
+    // Canonical native forwarding preserves Codex's reserved encrypted collaboration schema
+    // byte-for-byte after the recovery probe; the native backend owns decrypting this payload.
+    expect(bodyRequests[1]?.body).toContain(`"encrypted_content":"${FERNET_TASK}"`);
+    expect(bodyRequests[1]?.body).not.toContain("Use the recovered candidate-scope assignment.");
     expect(bodyRequests[1]?.body).toContain('"model":"gpt-5.3-codex-spark"');
     expect(selectionStarts).toBe(3);
     expect(selectionReleases).toBe(3);

@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { AnthropicRequestError as LeafAnthropicRequestError } from "../../src/claude/inbound-records";
+import { repoPath } from "../helpers/repo-root";
 import { AnthropicRequestError, anthropicToResponsesBody, anthropicToResponsesTranslation, effortForThinkingBudget, extractOcxEffortDirective, resolveInboundModel } from "../../src/claude/inbound";
 import { parseRequest } from "../../src/responses/parser";
 import { responsesRequestSchema } from "../../src/responses/schema";
@@ -89,6 +92,98 @@ describe("claude inbound translation", () => {
     const tail = input[4].content as Record<string, any>[];
     expect(tail[0]).toEqual({ type: "input_text", text: "now summarize" });
     expect(tail[1]).toEqual({ type: "input_image", image_url: "data:image/png;base64,aWc=" });
+  });
+
+  for (const carrier of ["user", "tool_result"] as const) {
+    test(`${carrier} file-backed images throw the fixed AnthropicRequestError without file IDs`, () => {
+      const image = { type: "image", source: { type: "file", file_id: "file_private_image_030" } };
+      const request = {
+        model: "m", max_tokens: 10,
+        messages: carrier === "user"
+          ? [{ role: "user", content: [image] }]
+          : [
+            { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [image] }] },
+          ],
+      };
+      let error: unknown;
+      try {
+        anthropicToResponsesBody(request);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toBeInstanceOf(AnthropicRequestError);
+      expect(error).toHaveProperty(
+        "message",
+        "File-backed images require native Anthropic passthrough; use base64 or URL images on translated routes.",
+      );
+      expect(String(error)).not.toContain(image.source.file_id);
+    });
+
+    test(`${carrier} base64 and URL images preserve their translated content`, () => {
+      const content = [
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "aWc=" } },
+        { type: "image", source: { type: "url", url: "https://example.com/image.png" } },
+      ];
+      const body = anthropicToResponsesBody({
+        model: "m", max_tokens: 10,
+        messages: carrier === "user"
+          ? [{ role: "user", content }]
+          : [
+            { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content }] },
+          ],
+      });
+      const images = [
+        { type: "input_image", image_url: "data:image/png;base64,aWc=" },
+        { type: "input_image", image_url: "https://example.com/image.png" },
+      ];
+      expect(body.input).toEqual(carrier === "user"
+        ? [{ type: "message", role: "user", content: images }]
+        : [
+          { type: "function_call", call_id: "t1", name: "Read", arguments: "{}" },
+          { type: "function_call_output", call_id: "t1", output: images },
+        ]);
+    });
+
+    test(`${carrier} file-backed documents retain attachment markers without rejection`, () => {
+      const content = [
+        { type: "document", source: { type: "file", file_id: "file_document_030" }, title: "report.pdf" },
+      ];
+      const body = anthropicToResponsesBody({
+        model: "m", max_tokens: 10,
+        messages: carrier === "user"
+          ? [{ role: "user", content }]
+          : [
+            { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content }] },
+          ],
+      });
+      const marker = [{ type: "input_text", text: "[document: report.pdf]" }];
+      expect(body.input).toEqual(carrier === "user"
+        ? [{ type: "message", role: "user", content: marker }]
+        : [
+          { type: "function_call", call_id: "t1", name: "Read", arguments: "{}" },
+          { type: "function_call_output", call_id: "t1", output: marker },
+        ]);
+    });
+  }
+
+  test("file-backed image-shaped tool arguments remain opaque JSON without rejection", () => {
+    const body = anthropicToResponsesBody({
+      model: "m", max_tokens: 10,
+      messages: [{
+        role: "assistant",
+        content: [{
+          type: "tool_use", id: "t1", name: "Read",
+          input: { image: { type: "image", source: { type: "file", file_id: "file_argument_030" } } },
+        }],
+      }],
+    });
+    expect(body.input).toEqual([{
+      type: "function_call", call_id: "t1", name: "Read",
+      arguments: '{"image":{"type":"image","source":{"type":"file","file_id":"file_argument_030"}}}',
+    }]);
   });
 
   test("thinking variants", () => {
@@ -537,4 +632,15 @@ describe("ocx-route directive (devlog 072)", () => {
     expect(extractOcxRouteDirective(null)).toBeNull();
     expect(extractOcxEffortDirective(null)).toBeNull();
   });
+});
+
+test("inbound leaves preserve the tool_choice error identity and avoid facade back-edges", () => {
+  const base = { model: "m", max_tokens: 10, messages: [{ role: "user", content: "hi" }] };
+  expect(() => anthropicToResponsesBody({ ...base, tool_choice: { type: "tool" } }))
+    .toThrow(AnthropicRequestError);
+  expect(AnthropicRequestError).toBe(LeafAnthropicRequestError);
+  for (const leaf of ["inbound-records.ts", "inbound-model-options.ts", "inbound-content-options.ts"]) {
+    expect(readFileSync(repoPath("src", "claude", leaf), "utf8"))
+      .not.toMatch(/from\s+["']\.\/inbound["']/);
+  }
 });

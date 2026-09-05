@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,7 @@ import type { OcxConfig } from "../../src/types/config";
 import { resetUsageReadCacheForTests, type PersistedUsageEntry } from "../../src/usage/log";
 import * as usageLedgerScannerModule from "../../src/usage/ledger-scanner";
 import { refreshUserCostOverlays } from "../../src/usage/user-cost-overlays";
+import { buildRouteDecisionTrace } from "../../src/routing/trace";
 
 const NOW = Date.parse("2026-09-01T10:00:00.000Z");
 
@@ -71,6 +72,29 @@ afterEach(() => {
 });
 
 describe("retained usage aggregate cache", () => {
+  test("append and rebuild preserve unresolved attribution and restricted pricing without ledger changes", async () => {
+    const path = join(testDir, "usage.jsonl");
+    writeFileSync(path, line("ordinary"));
+    await getUsageAggregate();
+    const model = "anthropic/claude-3-haiku-20240307";
+    const fallback = { ...entry("fallback"), provider: "kimi", model,
+      routeDecision: buildRouteDecisionTrace({ requestedModel: model, routeKind: "default-provider", selected: { provider: "kimi", model, reason: "default-provider" } }),
+    };
+    appendFileSync(path, `${JSON.stringify(fallback)}\n`);
+    const before = readFileSync(path, "utf8");
+    const appended = await getUsageAggregate();
+    expect(appended.update).toBe("append");
+    const summary = appended.accumulator.summarize("all", NOW);
+    expect(summary.summary).toMatchObject({ requests: 2, totalTokens: 4 });
+    expect(summary.models.find(row => row.provider === "kimi")).toMatchObject({ model, hasUnresolvedRequestedModel: true, unpricedRequests: 1 });
+    expect(summary.models.find(row => row.provider === "kimi")?.estimatedCostUsd).toBeUndefined();
+    const filtered = (await getFilteredUsageAggregate({ provider: "kimi" })).accumulator.summarize("all", NOW);
+    expect(filtered.models[0]).toMatchObject({ hasUnresolvedRequestedModel: true, totalTokens: 2 });
+    resetUsageAggregateCacheForTests();
+    const rebuilt = (await getUsageAggregate()).accumulator.summarize("all", NOW);
+    expect(rebuilt).toEqual(summary);
+    expect(readFileSync(path, "utf8")).toBe(before);
+  });
   test("settled filtered callers reuse a bounded retained aggregate", async () => {
     writeFileSync(join(testDir, "usage.jsonl"), `${line("one")}${line("two")}`);
     const originalScan = usageLedgerScannerModule.scanUsageLedgerCooperatively;

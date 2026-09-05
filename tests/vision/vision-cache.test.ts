@@ -138,6 +138,41 @@ describe("vision description cache and per-turn cap", () => {
     expect(resolveMaxDescriptionsPerTurn(Number.NaN)).toBe(8);
   });
 
+  test.each(["function_call_output", "custom_tool_call_output"])("%s empty URLs cannot consume another image's caption", async type => {
+    const request = parseRequest({
+      model: "routed/blind",
+      input: [{ type, call_id: "call_images", output: [
+        { type: "input_image", image_url: "", file_id: "file-marker" },
+        { type: "input_image", image_url: "" },
+        { type: "input_image", image_url: DATA_B },
+        { type: "input_image", image_url: DATA_C },
+      ] }],
+    });
+    const seen: string[] = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      const caption = imageCaption(JSON.parse(String(init?.body)));
+      seen.push(caption);
+      return openaiSse(caption);
+    }) as typeof fetch;
+    await describeImagesInPlace(request, plan(), new Headers({ authorization: "Bearer test" }));
+    expect(seen).toEqual(["caption-b", "caption-c"]);
+    const raw = request._rawBody as { input: Array<{ output: Array<{ type: string; text: string }> }> };
+    const output = raw.input[0]!.output;
+    expect(output[0]).toEqual({ type: "input_text", text: "[image: file-marker]" });
+    expect(output[1]!.text).toContain("image omitted");
+    expect(output[2]!.text).toContain("caption-b");
+    expect(output[3]!.text).toContain("caption-c");
+    expect(output[0]!.text).not.toContain("caption-");
+    expect(output[1]!.text).not.toContain("caption-");
+    const result = request.context.messages[0]!;
+    expect(result.role).toBe("toolResult");
+    expect(result.content).toEqual([
+      { type: "text", text: "[image: file-marker]" },
+      { type: "text", text: output[2]!.text },
+      { type: "text", text: output[3]!.text },
+    ]);
+  });
+
   test("normalizes vision timeoutMs to the runtime bounds", () => {
     expect(resolveVisionTimeoutMs(undefined)).toBe(DEFAULT_VISION_TIMEOUT_MS);
     expect(resolveVisionTimeoutMs(12_000)).toBe(12_000);
@@ -355,4 +390,17 @@ describe("vision description cache and per-turn cap", () => {
     expect(released).toBeGreaterThan(0);
     expect(visionDescriptionRetainedStoreSnapshot().bytes).toBe(before.bytes - released);
   });
+});
+
+test("vision planning and image-rewrite seams preserve boundary identity and dependency direction", async () => {
+  const boundary = await import("../../src/vision");
+  const planning = await import("../../src/vision/plan");
+  const rewrite = await import("../../src/vision/image-rewrite");
+  const { readFileSync } = await import("node:fs");
+  const { repoPath } = await import("../helpers/repo-root");
+
+  expect(boundary.resolveMaxDescriptionsPerTurn).toBe(planning.resolveMaxDescriptionsPerTurn);
+  expect(boundary.stripImagesInPlace).toBe(rewrite.stripImagesInPlace);
+  expect(readFileSync(repoPath("src/vision/image-rewrite.ts"), "utf8")).not.toMatch(/from\s+["']\.\/(plan|index)["']/);
+  expect(readFileSync(repoPath("src/vision/plan.ts"), "utf8")).not.toMatch(/from\s+["']\.\/index["']/);
 });

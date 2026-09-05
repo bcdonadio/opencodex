@@ -147,7 +147,10 @@ Authorization: Bearer <admin-token>
 | `PUT /api/model-visibility` |プロバイダーレベルまたはモデルレベルの可視性をアトミックに変更 | 400 プロバイダー、スコープ、ターゲット、または本文が無効です。
 | `GET, POST /api/custom-models` |カスタム モデルをリストするか追加する | 400 個の無効なフィールド。 404 プロバイダーがありません。 409 複製モデル |
 | `PUT, DELETE /api/custom-models/{id}` | 1 つのカスタム モデルを編集または削除する | 400 個の無効な ID/フィールド。 404 が見つかりません。 409 複製モデル |
-| `GET, PUT /api/selected-models` |プロバイダーのホワイトリストと可用性を読み取るか、1 つのホワイトリストを置き換えます。 400 のプロバイダー/本体が欠落しています。 404 不明なプロバイダ |
+| `GET, PUT /api/selected-models` | プロバイダーの許可リストと可用性を読む、または許可リストを置き換える | 400 プロバイダー/本文の不足; 404 不明なプロバイダー; PUT 409 `initial_model_selection_pending` |
+| `GET, PUT /api/model-presets` | プリセット情報を読む、または preset/all/custom モードを選ぶ | 400 不正なモードまたは未提供のプリセット; 404 不明なプロバイダー; PUT 409 `initial_model_selection_pending` |
+
+信頼できる初回モデル一覧が確定するまで、有効な `PUT /api/selected-models` と `PUT /api/model-presets` も HTTP 409 とコード `initial_model_selection_pending` を返します。`GET /api/models` などでモデル一覧を更新し、取得に成功してから再試行してください。
 
 ### OAuth アカウント、プロバイダー キー、およびデータプレーン キー
 

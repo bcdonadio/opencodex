@@ -98,11 +98,24 @@ GitHub Actions intentionally stay small:
 
 Use the helper for releases:
 
+
+Before running the helper, choose the intended release version and dispatch
+`.github/workflows/dev-version-bump.yml` from the default branch with
+`intended-version=<version>` and `mode=pre-move`. Review and merge the PR it opens
+into `dev`, then promote to `main` or `preview` and run the helper. If `dev` already
+outranks the intended version, the workflow reports `changed=false` and no bump PR
+is needed. Publishing still requires successful CI on the exact release commit.
+
 ```bash
 bun run release <version>           # commits/pushes the bump; publish workflow is dry-run by default
+bun run release --bump minor        # derive the next patch, minor, or major version from tags and npm channels
 bun run release <version> --publish # publish after the CI-gated dry run is understood
 bun run release:watch               # watch the newest Release workflow run
 ```
+
+`--bump patch|minor|major` is an alternative to an explicit version. Once a preview tag opens a
+higher version core, `--bump patch` refuses to continue the older stable patch line; ship that fix
+in the open preview core instead.
 
 ## Branches
 

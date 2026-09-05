@@ -105,13 +105,38 @@ describe("CL-03 pinned live transport failure classification", () => {
 
   test("preserves the output byte ceiling as output_byte_limit", async () => {
     const port = await listen((_req, res) => {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end("x".repeat(128));
+      // Fault injection: the neighboring 30ms timeout fixture must not decide
+      // this byte-limit case before its oversized response can arrive.
+      setTimeout(() => {
+        if (res.destroyed) return;
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("x".repeat(128));
+      }, 150);
     });
 
-    await expect(send(port, { maxOutputBytes: 16 })).rejects.toMatchObject({
+    await expect(send(port, {
+      maxOutputBytes: 16,
+      firstByteTimeoutMs: 1_000,
+      inactivityTimeoutMs: 1_000,
+    })).rejects.toMatchObject({
       name: "TransportError",
       code: "output_byte_limit",
+    });
+  });
+
+  test("allows a response exactly at the output byte ceiling", async () => {
+    const port = await listen((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("x".repeat(16));
+    });
+
+    await expect(send(port, {
+      maxOutputBytes: 16,
+      firstByteTimeoutMs: 1_000,
+      inactivityTimeoutMs: 1_000,
+    })).resolves.toMatchObject({
+      status: 200,
+      body: "x".repeat(16),
     });
   });
 });

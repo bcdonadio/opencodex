@@ -175,7 +175,10 @@ d’abord et soumettez le résumé renvoyé. Préférez la quarantaine lorsqu’
 | `PUT /api/model-visibility` | Modifier atomiquement la visibilité au niveau du fournisseur ou du modèle | 400 fournisseur, portée, cible ou corps non valide |
 | `GET, POST /api/custom-models` | Répertoriez les modèles personnalisés ou ajoutez-en un | 400 champs invalides ; 404 fournisseur manquant ; 409 dupliquer le modèle |
 | `PUT, DELETE /api/custom-models/{id}` | Modifier ou supprimer un modèle personnalisé | 400 invalide id/fields ; 404 introuvable ; 409 modèle en double |
-| `GET, PUT /api/selected-models` | Lire les listes autorisées et la disponibilité des fournisseurs, ou remplacer une liste autorisée | 400 fournisseur ou corps manquant ; 404 fournisseur inconnu |
+| `GET, PUT /api/selected-models` | Lire les listes autorisées et la disponibilité des fournisseurs, ou remplacer une liste autorisée | 400 fournisseur ou corps manquant ; 404 fournisseur inconnu; PUT 409 `initial_model_selection_pending` |
+| `GET, PUT /api/model-presets` | Lire les préréglages ou choisir le mode preset/all/custom | 400 mode invalide ou préréglage indisponible; 404 fournisseur inconnu; PUT 409 `initial_model_selection_pending` |
+
+Tant qu’une liste initiale fiable n’est pas disponible, les requêtes PUT valides vers `/api/selected-models` et `/api/model-presets` renvoient HTTP 409 avec le code `initial_model_selection_pending`. Actualisez la découverte des modèles (par exemple, `GET /api/models`), puis réessayez après sa réussite.
 
 ### Comptes OAuth, clés de fournisseur et clés du plan de données
 

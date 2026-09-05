@@ -4,7 +4,9 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runNpmCachePreflight } from "../../src/update/npm-cache-preflight.mjs";
+import { resolveCodexHomeDir } from "../../src/codex/home";
 import { isProcessAlive, killProxy } from "../../src/lib/process-control";
+import { createIsolatedTestEnvironment } from "../../scripts/test";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
 
@@ -60,7 +62,7 @@ async function waitForProxy(port: number, onFailure: (lastProbe: string) => void
       if (response.ok) return true;
     } catch (error) {
       // Error messages can contain URLs/credentials. Report only fixed error categories.
-      lastProbe = diagnosticCategories(error instanceof Error ? `${error.name} ${error.message}` : "");
+      lastProbe = JSON.stringify(recoveryErrorFields(error));
     }
     // The detached process exposes readiness only over HTTP; fake timers cannot advance it.
     await Bun.sleep(100);
@@ -69,9 +71,97 @@ async function waitForProxy(port: number, onFailure: (lastProbe: string) => void
   return false;
 }
 
+const RECOVERY_ERROR_CODES = new Set([
+  "ENOENT", "EACCES", "EPERM", "ESRCH", "EADDRINUSE", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT",
+  "EAGAIN", "ENOMEM", "EMFILE", "ENFILE", "ENOSPC", "ENOEXEC", "EIO", "ETXTBSY", "EPIPE",
+  "ERR_MODULE_NOT_FOUND", "ERR_DLOPEN_FAILED", "ERR_WORKER_INIT_FAILED", "ERR_SYSTEM_ERROR",
+]);
+const RECOVERY_ERROR_NAMES = new Set(["Error", "AbortError", "TimeoutError", "TypeError", "SyntaxError", "ReferenceError", "RangeError"]);
+const RECOVERY_SIGNALS = new Set(["SIGINT", "SIGTERM", "SIGHUP", "SIGKILL", "SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGPIPE", "SIGQUIT", "SIGTRAP"]);
+const RECOVERY_EVENTS = new Set([
+  "launcher-start", "launcher-exit", "boot-restore-enter", "boot-restore-result", "boot-restore-error",
+  "runtime-resolution-enter", "runtime-resolved", "runtime-install-enter", "runtime-install-result",
+  "runtime-spawn-call", "runtime-spawned", "runtime-spawn-error", "runtime-exit",
+]);
+
+function recoveryOwnData(value: unknown, key: string): unknown {
+  try {
+    if (value === null || (typeof value !== "object" && typeof value !== "function")) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  } catch { return undefined; }
+}
+
+function recoveryErrorFields(error: unknown): { errorName: string; code: string; causeCode: string } {
+  let name = recoveryOwnData(error, "name");
+  if (name === undefined && error !== null && typeof error === "object") {
+    try { name = recoveryOwnData(Object.getPrototypeOf(error), "name"); } catch { /* unknown */ }
+  }
+  const code = recoveryOwnData(error, "code");
+  const causeCode = recoveryOwnData(recoveryOwnData(error, "cause"), "code");
+  return {
+    errorName: typeof name === "string" && RECOVERY_ERROR_NAMES.has(name) ? name : "unknown",
+    code: typeof code === "string" && RECOVERY_ERROR_CODES.has(code) ? code : "unknown",
+    causeCode: typeof causeCode === "string" && RECOVERY_ERROR_CODES.has(causeCode) ? causeCode : "unknown",
+  };
+}
+
+function recoveryStatusRecord(raw: unknown): Record<string, string | number | null> | null {
+  const event = recoveryOwnData(raw, "event");
+  if (recoveryOwnData(raw, "v") !== 1 || typeof event !== "string" || !RECOVERY_EVENTS.has(event)) return null;
+  const out: Record<string, string | number | null> = { v: 1, event };
+  if (event === "launcher-start" || event === "runtime-spawned") {
+    const pid = recoveryOwnData(raw, "pid");
+    out.pid = typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0 ? pid : "unknown";
+  }
+  if (event === "runtime-resolved") {
+    const source = recoveryOwnData(raw, "source");
+    out.source = source === "override" || source === "bundled" ? source : "unknown";
+  }
+  if (event === "boot-restore-result") {
+    const action = recoveryOwnData(raw, "action");
+    out.action = action === "restored" || action === "failed" || action === "none" || action === "reaped" ? action : "unknown";
+  }
+  if (event === "launcher-exit" || event === "runtime-exit" || event === "runtime-install-result") {
+    const code = recoveryOwnData(raw, "exitCode");
+    const signal = recoveryOwnData(raw, "signal");
+    out.exitCode = code === null || (typeof code === "number" && Number.isInteger(code) && code >= 0 && code <= 255) ? code : "unknown";
+    out.signal = signal === null || (typeof signal === "string" && RECOVERY_SIGNALS.has(signal)) ? signal : "unknown";
+  }
+  if (event === "runtime-spawn-error" || event === "boot-restore-error" || event === "runtime-install-result") {
+    for (const key of ["errorName", "code", "causeCode"]) {
+      const value = recoveryOwnData(raw, key);
+      const allowed = key === "errorName" ? RECOVERY_ERROR_NAMES : RECOVERY_ERROR_CODES;
+      out[key] = typeof value === "string" && allowed.has(value) ? value : "unknown";
+    }
+  }
+  return out;
+}
+
 function diagnosticCategories(text: string): string {
-  const matches = text.match(/\b(?:ENOENT|EACCES|EPERM|EADDRINUSE|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ERR_MODULE_NOT_FOUND|AbortError|TimeoutError|TypeError|SyntaxError|ReferenceError|RangeError|Cannot find package|Cannot find module|Failed to resolve|ConnectionRefused|FailedToOpenSocket)\b/g);
-  return [...new Set(matches ?? [])].join(", ") || "unclassified (text redacted)";
+  const matches = text.match(/\b(?:ENOENT|EACCES|EPERM|ESRCH|EADDRINUSE|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAGAIN|ENOMEM|EMFILE|ENFILE|ENOSPC|ENOEXEC|EIO|ETXTBSY|EPIPE|ERR_MODULE_NOT_FOUND|ERR_DLOPEN_FAILED|ERR_WORKER_INIT_FAILED|ERR_SYSTEM_ERROR|AbortError|TimeoutError|TypeError|SyntaxError|ReferenceError|RangeError|Cannot find package|Cannot find module|Failed to resolve|ConnectionRefused|FailedToOpenSocket)\b/g);
+  const categories = new Set(matches ?? []);
+  if (/out of memory|cannot allocate memory|allocation failed/i.test(text)) categories.add("allocation-failure");
+  if (/dyld\[|library not loaded|symbol not found/i.test(text)) categories.add("native-loader-failure");
+  if (/segmentation fault|bus error|illegal instruction|panic:/i.test(text)) categories.add("native-runtime-failure");
+  return [...categories].join(", ") || "unclassified (text redacted)";
+}
+
+function recoveryStatusRecords(text: string): Array<Record<string, string | number | null>> {
+  const records: Array<Record<string, string | number | null>> = [];
+  for (const line of text.slice(-8192).split("\n")) {
+    try {
+      const record = recoveryStatusRecord(JSON.parse(line));
+      if (record) records.push(record);
+    } catch { /* malformed/torn records are not evidence */ }
+  }
+  return records.slice(-16);
+}
+
+function recoveryLiveness(pid: unknown, probe: (pid: number) => unknown = pid => process.kill(pid, 0)): string {
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return "unrecorded";
+  try { probe(pid); return "alive"; }
+  catch (error) { return recoveryOwnData(error, "code") === "ESRCH" ? "absent" : "unknown"; }
 }
 
 // Read at most 8 KiB even if a broken child logs continuously. Never emit raw output:
@@ -85,8 +175,11 @@ function recoveryDiagnosticFile(path: string, status = false): string {
     const count = readSync(fd, bytes, 0, bytes.length, Math.max(0, size - bytes.length));
     const text = bytes.subarray(0, count).toString("utf8");
     if (status) {
-      // This file contains fixture-generated records only. Still allowlist every field.
-      return text.split("\n").filter(line => /^(?:launcher-start pid=\d+|launcher-exit code=\d+|runtime-exit code=(?:null|\d+) signal=(?:null|SIG[A-Z0-9]+)|runtime-spawn-error)$/.test(line)).slice(-6).join("; ") || "no exit record";
+      const records = recoveryStatusRecords(text);
+      return JSON.stringify({ records, liveness: {
+        launcher: recoveryLiveness(records.findLast(row => row.event === "launcher-start")?.pid),
+        runtime: recoveryLiveness(records.findLast(row => row.event === "runtime-spawned")?.pid),
+      } });
     }
     const frames = [...text.matchAll(/\b(src\/[\w./-]+\.(?:ts|mjs))(?::(\d+)(?::(\d+))?)?/g)]
       .filter(match => !match[1]!.includes("..") && existsSync(join(repoRoot, match[1]!)))
@@ -99,21 +192,27 @@ function recoveryDiagnosticFile(path: string, status = false): string {
   }
 }
 
-function instrumentRecoveryLauncher(source: string, directory: string): string {
-  // Fail closed on launcher drift: never silently run an uninstrumented fixture or
-  // alter another spawn. Production bin/ocx.mjs and all real lifecycle code stay intact.
-  const replaceOnce = (needle: string, replacement: string) => {
-    if (source.split(needle).length !== 2) throw new Error("recovery diagnostic fixture: launcher seam changed");
-    source = source.replace(needle, () => replacement);
-  };
-  replaceOnce('import { spawn, spawnSync } from "node:child_process";', `
+function recoveryInstrumentationPrelude(directory: string): string {
+  // Reuse exactly the projector exercised by the in-process redaction tests.
+  return `
 import { spawn as fixtureSpawn, spawnSync } from "node:child_process";
 import { openSync as fixtureOpen, closeSync as fixtureClose, appendFileSync as fixtureAppend } from "node:fs";
 const fixtureDiagnosticDir = ${JSON.stringify(directory)};
-function fixtureStatus(record) {
-  if (process.argv[2] !== "start") return;
+const RECOVERY_ERROR_CODES = new Set(${JSON.stringify([...RECOVERY_ERROR_CODES])});
+const RECOVERY_ERROR_NAMES = new Set(${JSON.stringify([...RECOVERY_ERROR_NAMES])});
+const RECOVERY_SIGNALS = new Set(${JSON.stringify([...RECOVERY_SIGNALS])});
+const RECOVERY_EVENTS = new Set(${JSON.stringify([...RECOVERY_EVENTS])});
+${recoveryOwnData.toString()}
+${recoveryErrorFields.toString()}
+${recoveryStatusRecord.toString()}
+let fixtureStatusCount = 0;
+function fixtureStatus(event, fields = {}) {
+  if (process.argv[2] !== "start" || fixtureStatusCount >= 16) return;
   try {
-    fixtureAppend(fixtureDiagnosticDir + "/status", record + "\\n", { mode: 0o600 });
+    const record = recoveryStatusRecord({ ...fields, v: 1, event });
+    if (!record) return;
+    fixtureStatusCount += 1;
+    fixtureAppend(fixtureDiagnosticDir + "/status", JSON.stringify(record) + "\\n", { mode: 0o600 });
   } catch { /* diagnostics must not interrupt the real exit/signal handler or teardown */ }
 }
 function spawn(bin, args, options) {
@@ -128,21 +227,262 @@ function spawn(bin, args, options) {
     if (stderr !== undefined) fixtureClose(stderr);
   }
 }
-fixtureStatus("launcher-start pid=" + process.pid);
-process.on("exit", code => fixtureStatus("launcher-exit code=" + code));
-`);
+fixtureStatus("launcher-start", { pid: process.pid });
+process.on("exit", code => fixtureStatus("launcher-exit", { exitCode: code, signal: null }));
+`;
+}
+
+function instrumentRecoveryLauncher(source: string, directory: string): string {
+  // Fail closed on drift, preserving the real calls and every original handler.
+  const replaceOnce = (needle: string, replacement: string) => {
+    if (source.split(needle).length !== 2) throw new Error("recovery diagnostic fixture: launcher seam changed");
+    source = source.replace(needle, () => replacement);
+  };
+  replaceOnce('import { spawn, spawnSync } from "node:child_process";', recoveryInstrumentationPrelude(directory));
+  const boot = 'const probe = bootRestoreProbe(resolve(here, ".."));';
+  replaceOnce(boot, `fixtureStatus("boot-restore-enter");\n    ${boot}\n    fixtureStatus("boot-restore-result", { action: probe.action });`);
+  replaceOnce('} catch { /* the probe must never block launch */ }', '} catch (error) { fixtureStatus("boot-restore-error", recoveryErrorFields(error)); /* the probe must never block launch */ }');
+  const runtime = 'const bunRuntime = resolveBun({ allowInstall: !codexCliUpdateInspection });';
+  replaceOnce(runtime, `fixtureStatus("runtime-resolution-enter");\n${runtime}\nfixtureStatus("runtime-resolved", { source: bunRuntime.source });`);
+  const install = 'const r = spawnSync(process.execPath, [installJs], { stdio: "inherit" });';
+  replaceOnce(install, `fixtureStatus("runtime-install-enter");\n    ${install}\n    fixtureStatus("runtime-install-result", { exitCode: r.status, signal: r.signal, ...recoveryErrorFields(r.error) });`);
+  replaceOnce('const child = spawn(bun,', 'fixtureStatus("runtime-spawn-call");\nconst child = spawn(bun,');
   // The updater exits before its detached child, so observe the Bun child from the
   // recovery launcher itself, BEFORE the existing handler mirrors its exit/signal.
   replaceOnce('child.on("exit", (code, signal) => {', `child.on("exit", (code, signal) => {
-  fixtureStatus("runtime-exit code=" + code + " signal=" + signal);`);
+  fixtureStatus("runtime-exit", { exitCode: code, signal });`);
   replaceOnce('child.on("error", err => {', `child.on("error", err => {
-  fixtureStatus("runtime-spawn-error");`);
+  fixtureStatus("runtime-spawn-error", recoveryErrorFields(err));`);
+  replaceOnce('const clearHandlers = () => {', 'child.on("spawn", () => fixtureStatus("runtime-spawned", { pid: child.pid }));\nconst clearHandlers = () => {');
   return source;
 }
 const updateSource = readFileSync(join(repoRoot, "src", "update", "index.ts"), "utf8");
 const launcherSource = readFileSync(join(repoRoot, "bin", "ocx.mjs"), "utf8");
 const serverSource = readFileSync(join(repoRoot, "src", "server", "index.ts"), "utf8");
 const dispatchSource = readFileSync(join(repoRoot, "src", "cli", "dispatch.ts"), "utf8");
+
+describe("bounded recovery diagnostics", () => {
+  test("structured codes preserve resource causes without messages, paths or getter execution", () => {
+    const cause = { code: "EMFILE", path: "/synthetic-private/credential" };
+    const error = Object.assign(new TypeError("https://secret.invalid/bearer?token=private"), { code: "EAGAIN", cause });
+    expect(recoveryErrorFields(error)).toEqual({ errorName: "TypeError", code: "EAGAIN", causeCode: "EMFILE" });
+    expect(recoveryErrorFields({ name: "secret", code: "ERR_SECRET_TOKEN", cause: { code: "private" } }))
+      .toEqual({ errorName: "unknown", code: "unknown", causeCode: "unknown" });
+    let getterCalls = 0;
+    const getters = Object.defineProperties({}, Object.fromEntries(["name", "message", "code", "cause", "stack"].map(key => [key, {
+      get() { getterCalls += 1; throw new Error("must not read getters"); },
+    }])));
+    expect(recoveryErrorFields(getters)).toEqual({ errorName: "unknown", code: "unknown", causeCode: "unknown" });
+    expect(getterCalls).toBe(0);
+    const cyclic = { name: "Error", code: "ENOMEM", cause: undefined as unknown };
+    cyclic.cause = cyclic;
+    expect(recoveryErrorFields(cyclic)).toEqual({ errorName: "Error", code: "ENOMEM", causeCode: "ENOMEM" });
+    expect(recoveryErrorFields(null)).toEqual({ errorName: "unknown", code: "unknown", causeCode: "unknown" });
+  });
+
+  test("status projects only event-specific fields and rejects forged schemas", () => {
+    expect(recoveryStatusRecord({ v: 1, event: "runtime-resolved", source: "bundled", path: "/synthetic-private", token: "secret", pid: 12 }))
+      .toEqual({ v: 1, event: "runtime-resolved", source: "bundled" });
+    expect(recoveryStatusRecord({ v: 1, event: "runtime-exit", exitCode: 7, signal: null, stack: "secret" }))
+      .toEqual({ v: 1, event: "runtime-exit", exitCode: 7, signal: null });
+    expect(recoveryStatusRecord({ v: 1, event: "runtime-exit", exitCode: -1, signal: "SIG_SECRET" }))
+      .toEqual({ v: 1, event: "runtime-exit", exitCode: "unknown", signal: "unknown" });
+    expect(recoveryStatusRecord({ v: 1, event: "launcher-start", pid: "123 /private" }))
+      .toEqual({ v: 1, event: "launcher-start", pid: "unknown" });
+    expect(recoveryStatusRecord({ v: 2, event: "runtime-exit" })).toBeNull();
+    expect(recoveryStatusRecord({ v: 1, event: "secret" })).toBeNull();
+    const many = Array.from({ length: 30 }, () => JSON.stringify({ v: 1, event: "runtime-spawn-call", token: "secret" })).join("\n");
+    const records = recoveryStatusRecords(`${many}\nnot-json\n{"v":1`);
+    expect(records).toHaveLength(16);
+    for (const record of records) expect(record).toEqual({ v: 1, event: "runtime-spawn-call" });
+    expect(JSON.stringify(records)).not.toContain("secret");
+  });
+
+  test("bounded stderr summaries classify native/resource failures but never expose arbitrary text", () => {
+    const directory = mkdtempSync(join(tmpdir(), "ocx-recovery-redaction-"));
+    try {
+      const path = join(directory, "stderr");
+      writeFileSync(path, "hidden-prefix".repeat(1000) + "\nENOMEM dyld[123]: Library not loaded: /synthetic-private/token\npanic: bearer-secret@example.test\n");
+      const summary = recoveryDiagnosticFile(path);
+      expect(summary).toContain("ENOMEM");
+      expect(summary).toContain("native-loader-failure");
+      expect(summary).toContain("native-runtime-failure");
+      expect(summary).not.toContain("hidden-prefix");
+      expect(summary).not.toContain("/synthetic-private/");
+      expect(summary).not.toContain("bearer-secret");
+      expect(summary).not.toContain("@");
+      expect(summary.length).toBeLessThanOrEqual(1200);
+      expect(diagnosticCategories("220 bytes of unknown material: https://secret.invalid/token"))
+        .toBe("unclassified (text redacted)");
+      const statusPath = join(directory, "status");
+      writeFileSync(statusPath, JSON.stringify({ v: 1, event: "runtime-resolved", source: "bundled", path: "secret" }) + "\n");
+      expect(JSON.parse(recoveryDiagnosticFile(statusPath, true))).toEqual({
+        records: [{ v: 1, event: "runtime-resolved", source: "bundled" }],
+        liveness: { launcher: "unrecorded", runtime: "unrecorded" },
+      });
+    } finally { removeTreeWithRetry(directory); }
+  });
+
+  test("liveness distinguishes absent from inaccessible without sending termination signals", () => {
+    const calls: number[] = [];
+    expect(recoveryLiveness(123, pid => { calls.push(pid); })).toBe("alive");
+    expect(calls).toEqual([123]);
+    expect(recoveryLiveness(123, () => { throw { code: "ESRCH" }; })).toBe("absent");
+    expect(recoveryLiveness(123, () => { throw { code: "EPERM" }; })).toBe("unknown");
+    expect(recoveryLiveness(undefined, () => { throw new Error("must not probe"); })).toBe("unrecorded");
+  });
+
+  test("instrumentation fails closed if any selected launcher seam disappears or duplicates", () => {
+    const seams = [
+      'import { spawn, spawnSync } from "node:child_process";',
+      'const probe = bootRestoreProbe(resolve(here, ".."));',
+      '} catch { /* the probe must never block launch */ }',
+      'const bunRuntime = resolveBun({ allowInstall: !codexCliUpdateInspection });',
+      'const r = spawnSync(process.execPath, [installJs], { stdio: "inherit" });',
+      'const child = spawn(bun,', 'child.on("exit", (code, signal) => {',
+      'child.on("error", err => {', 'const clearHandlers = () => {',
+    ];
+    for (const seam of seams) {
+      expect(() => instrumentRecoveryLauncher(launcherSource.replace(seam, ""), "/fixture"))
+        .toThrow("recovery diagnostic fixture: launcher seam changed");
+      expect(() => instrumentRecoveryLauncher(`${launcherSource}\n${seam}`, "/fixture"))
+        .toThrow("recovery diagnostic fixture: launcher seam changed");
+    }
+  });
+
+  test("generated capture wrapper preserves spawn options, return/error identity and FD finally", () => {
+    const calls: unknown[][] = [];
+    const closed: number[] = [];
+    const records: string[] = [];
+    let unrefs = 0;
+    const child = { unref: () => { unrefs += 1; } };
+    const failure = new Error("fixture spawn failure");
+    let failSpawn = false;
+    let failAppend = false;
+    let failSecondOpen = false;
+    let nextFd = 10;
+    // Evaluate ONLY the generated prelude with inert dependencies, never the real updater.
+    const prelude = recoveryInstrumentationPrelude("/fixture").replace(/^import .*;\n/gm, "");
+    const fixture = new Function("fixtureSpawn", "fixtureOpen", "fixtureClose", "fixtureAppend", "process",
+      `${prelude}\nreturn { spawn, fixtureStatus };`)(
+      (...args: unknown[]) => { calls.push(args); if (failSpawn) throw failure; return child; },
+      (_path: string, flags: string, mode: number) => {
+        expect([flags, mode]).toEqual(["a", 0o600]);
+        if (failSecondOpen && nextFd === 11) throw failure;
+        return nextFd++;
+      },
+      (fd: number) => closed.push(fd),
+      (_path: string, record: string, options: { mode: number }) => {
+        expect(options).toEqual({ mode: 0o600 });
+        if (failAppend) throw failure;
+        records.push(record);
+      },
+      { argv: ["node", "fixture", "start"], pid: 123, on: () => {} },
+    ) as { spawn: (bin: string, args: string[], options: Record<string, unknown>) => typeof child; fixtureStatus: (event: string, fields?: object) => void };
+    const args = ["launcher", "start", "--port", "1234"];
+    const env = { FIXTURE: "unchanged" };
+    const options = { detached: true, stdio: "ignore", windowsHide: true, env };
+    expect(fixture.spawn("node", args, options)).toBe(child);
+    expect(calls[0]).toEqual(["node", args, { ...options, stdio: ["ignore", 10, 11] }]);
+    expect(calls[0][1]).toBe(args);
+    expect((calls[0][2] as { env: unknown }).env).toBe(env);
+    expect(options.stdio).toBe("ignore");
+    expect(closed).toEqual([10, 11]);
+    expect(unrefs).toBe(0);
+    child.unref();
+    expect(unrefs).toBe(1);
+    const ordinary = { stdio: "inherit", env };
+    expect(fixture.spawn("bun", ["cli", "start"], ordinary)).toBe(child);
+    expect(calls[1][2]).toBe(ordinary);
+    expect(closed).toEqual([10, 11]);
+    failAppend = true;
+    expect(() => fixture.fixtureStatus("runtime-spawn-call")).not.toThrow();
+    expect(fixture.spawn("bun", [], ordinary)).toBe(child);
+    failAppend = false;
+    for (let i = 0; i < 40; i++) fixture.fixtureStatus("runtime-resolved", { source: "bundled", token: "secret" });
+    expect(records.length).toBeLessThanOrEqual(16);
+    expect(records.join("")).not.toContain("secret");
+    failSpawn = true;
+    try { fixture.spawn("node", args, options); throw new Error("expected spawn failure"); }
+    catch (error) { expect(error).toBe(failure); }
+    expect(closed).toEqual([10, 11, 12, 13]);
+    failSpawn = false;
+    failSecondOpen = true;
+    nextFd = 10;
+    try { fixture.spawn("node", args, options); throw new Error("expected open failure"); }
+    catch (error) { expect(error).toBe(failure); }
+    expect(closed.at(-1)).toBe(10);
+  });
+
+  test("instrumented inert launcher records milestones without changing error/exit handlers", () => {
+    const inertSource = `import { spawn, spawnSync } from "node:child_process";
+try {
+  const probe = bootRestoreProbe(resolve(here, ".."));
+} catch { /* the probe must never block launch */ }
+function resolveBun() {
+  const r = spawnSync(process.execPath, [installJs], { stdio: "inherit" });
+  return { source: "bundled", path: "fixture-bun" };
+}
+const bunRuntime = resolveBun({ allowInstall: !codexCliUpdateInspection });
+const bun = bunRuntime.path;
+const child = spawn(bun, ["fixture-cli", "start"], childOptions);
+const clearHandlers = () => { events.push("clear"); };
+child.on("error", err => { clearHandlers(); events.push(err); process.exit(1); });
+child.on("exit", (code, signal) => {
+  clearHandlers();
+  if (signal) { process.kill(process.pid, signal); return; }
+  process.exit(code ?? 1);
+});
+return child;`;
+    const source = instrumentRecoveryLauncher(inertSource, "/fixture").replace(/^import .*;\n/gm, "");
+    const records: string[] = [];
+    const events: unknown[] = [];
+    const handlers = new Map<string, (...args: unknown[]) => void>();
+    const child = { pid: 456, on: (event: string, handler: (...args: unknown[]) => void) => handlers.set(event, handler) };
+    const childOptions = { stdio: "inherit", env: { FIXTURE: "same" } };
+    const io = {
+      fixtureSpawn: (bin: string, args: string[], options: unknown) => {
+        expect([bin, args]).toEqual(["fixture-bun", ["fixture-cli", "start"]]);
+        expect(options).toBe(childOptions);
+        return child;
+      },
+      spawnSync: (bin: string, args: string[], options: unknown) => {
+        expect([bin, args, options]).toEqual(["node", ["fixture-install"], { stdio: "inherit" }]);
+        return { status: 0, signal: null };
+      },
+      fixtureOpen: () => { throw new Error("runtime stdio must stay inherited"); },
+      fixtureClose: () => { throw new Error("no capture FD expected"); },
+      fixtureAppend: (_path: string, record: string) => records.push(record),
+      process: { argv: ["node", "fixture", "start"], pid: 123, execPath: "node", on: () => {},
+        exit: (code: number) => events.push(code), kill: (pid: number, signal: string) => events.push([pid, signal]) },
+      bootRestoreProbe: () => ({ action: "none" }), resolve: () => "/fixture", here: "/fixture",
+      installJs: "fixture-install", codexCliUpdateInspection: false, childOptions, events,
+    };
+    const execute = new Function("io", `const { ${Object.keys(io).join(", ")} } = io;\n${source}`);
+    expect(execute(io)).toBe(child);
+    handlers.get("spawn")!();
+    handlers.get("exit")!(7, null);
+    expect(events).toEqual(["clear", 7]);
+    handlers.get("exit")!(null, "SIGTERM");
+    expect(events.slice(-2)).toEqual(["clear", [123, "SIGTERM"]]);
+    const failure = Object.assign(new Error("private error text"), { code: "EAGAIN", cause: { code: "ENOMEM" } });
+    handlers.get("error")!(failure);
+    expect(events.slice(-3)).toEqual(["clear", failure, 1]);
+    const decoded = recoveryStatusRecords(records.join(""));
+    expect(decoded.map(row => row.event)).toEqual([
+      "launcher-start", "boot-restore-enter", "boot-restore-result", "runtime-resolution-enter",
+      "runtime-install-enter", "runtime-install-result", "runtime-resolved", "runtime-spawn-call",
+      "runtime-spawned", "runtime-exit", "runtime-exit", "runtime-spawn-error",
+    ]);
+    expect(decoded.at(-1)).toEqual({ v: 1, event: "runtime-spawn-error", errorName: "Error", code: "EAGAIN", causeCode: "ENOMEM" });
+    expect(records.join("")).not.toContain("private error text");
+    events.length = 0;
+    handlers.clear();
+    expect(execute({ ...io, fixtureAppend: () => { throw new Error("diagnostic disk unavailable"); } })).toBe(child);
+    handlers.get("error")!(failure);
+    expect(events).toEqual(["clear", failure, 1]);
+  });
+});
 
 describe("update stops the running proxy before replacing files", () => {
   // The recovery case starts a real detached proxy, and its own result says nothing about
@@ -153,6 +493,21 @@ describe("update stops the running proxy before replacing files", () => {
   afterAll(() => {
     if (auditedRecoveryPid === undefined) return;
     expect(isProcessAlive(auditedRecoveryPid)).toBe(false);
+  });
+
+  test("recovery sandbox replaces an inherited Codex home without claiming a managed service", () => {
+    const parentEnv = { CODEX_HOME: "/synthetic-parent-codex", OCX_REAL_HOME: "/synthetic-real-home", FIXTURE: "unchanged" };
+    const isolated = createIsolatedTestEnvironment(parentEnv);
+    try {
+      expect(resolveCodexHomeDir({ env: isolated.env })).toBe(join(isolated.root, ".codex"));
+      expect(existsSync(join(isolated.root, ".codex"))).toBe(true);
+      expect(isolated.env.OCX_REAL_HOME).toBe("/synthetic-real-home");
+      expect(isolated.env.FIXTURE).toBe("unchanged");
+      expect(existsSync(join(isolated.root, ".opencodex", "service-state.json"))).toBe(false);
+      expect(parentEnv).toEqual({ CODEX_HOME: "/synthetic-parent-codex", OCX_REAL_HOME: "/synthetic-real-home", FIXTURE: "unchanged" });
+    } finally {
+      isolated.cleanup();
+    }
   });
 
   test("a failed cache pre-flight aborts before the stop callback can run", () => {
@@ -254,26 +609,26 @@ describe("update stops the running proxy before replacing files", () => {
   test.skipIf(process.platform === "win32")(
     "npm launcher restarts the stopped runtime after a staged update failure",
     async () => {
-      const root = mkdtempSync(join(tmpdir(), "ocx-update-recovery-"));
+      const isolated = createIsolatedTestEnvironment();
+      const root = isolated.root;
       const packageRoot = join(root, "node_modules", "@bitkyc08", "opencodex");
       const launcher = join(packageRoot, "bin", "ocx.mjs");
-      const opencodexHome = join(root, "opencodex-home");
+      const opencodexHome = isolated.env.OPENCODEX_HOME!;
       const fakeBin = join(root, "fake-bin");
       const fakeNpm = join(fakeBin, "npm");
       const cache = join(root, "npm-cache");
       const diagnostics = join(root, "recovery-diagnostics");
       const bundledBun = join(repoRoot, "node_modules", "bun");
       const env = {
-        ...process.env,
-        HOME: root,
-        USERPROFILE: root,
-        OPENCODEX_HOME: opencodexHome,
+        ...isolated.env,
         OCX_FAKE_NPM_CACHE: cache,
-        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        PATH: `${fakeBin}:${isolated.env.PATH ?? ""}`,
       };
       let recoveredPid: number | undefined;
 
       try {
+        // Bind the actual child environment, not merely HOME, to this case.
+        expect(resolveCodexHomeDir({ env })).toBe(join(root, ".codex"));
         const port = await freePort();
         expect(existsSync(bundledBun)).toBe(true);
         mkdirSync(dirname(launcher), { recursive: true });

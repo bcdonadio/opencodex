@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { BULK_DURABLE_IO_BUDGET_MS } from "../helpers/test-budget";
 import { findDeadPid } from "../helpers/dead-pid";
 import {
@@ -30,6 +30,7 @@ import {
   evictOldestResponseContinuationForBudget,
   expandPreviousResponseInput,
   flushResponseState,
+  awaitResponseSpillPublicationTailForTests,
   markBodyNonPersistable,
   previousResponseConversationId,
   previousResponseProviderState,
@@ -1513,13 +1514,19 @@ describe("Responses previous_response_id state", () => {
 
     let fallbackFile: string | undefined;
     let abandonedTempCount = -1;
+    // This checks late-write ordering, not elapsed time in the outer fallback reserve.
+    // Keep the real drain timer, but exclude unrelated cleanup wall time from that reserve.
+    const frozenNow = Date.now();
+    const nowSpy = spyOn(Date, "now").mockReturnValue(frozenNow);
     try {
       await flushResponseState();
       fallbackFile = spillFileNames(home)[0];
       expect(fallbackFile).toBeDefined();
       abandonedTempCount = spillTempNames(home).length;
     } finally {
+      nowSpy.mockRestore();
       release();
+      await awaitResponseSpillPublicationTailForTests();
     }
     await hardened;
     await new Promise(resolve => setTimeout(resolve, 0));

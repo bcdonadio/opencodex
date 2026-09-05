@@ -10,12 +10,17 @@ import type { OrcaCodexHomeDiagnostic } from "../../src/codex/home";
 import { claimOwnedServiceHome, withOwnedServiceHomePreload } from "../helpers/owned-service-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
+import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-codex-sync-api");
 const TEST_CODEX_HOME = join(TEST_DIR, "codex");
 const TEST_OCX_HOME = join(TEST_DIR, "ocx");
 const TEST_HOME = join(TEST_DIR, "home");
 const repoRoot = resolveRepoRoot();
+const COMPETING_OFF_REAP_MS = 5_000;
+const COMPETING_OFF_BOOT_MS = SPAWN_BUDGET_MS - COMPETING_OFF_REAP_MS;
+const COMPETING_OFF_CHILD_MS = 2 * COMPETING_OFF_BOOT_MS + COMPETING_OFF_REAP_MS;
+const COMPETING_OFF_TEST_MS = COMPETING_OFF_CHILD_MS + COMPETING_OFF_REAP_MS;
 let prevCodexHome: string | undefined;
 let prevOpenCodexHome: string | undefined;
 let prevHome: string | undefined;
@@ -345,23 +350,35 @@ describe("GUI/CLI Codex sync backend", () => {
         'const { injectCodexConfig } = require("./src/codex/inject");',
         '(async () => {',
         '  const snapshot = loadConfig(); // admitted BEFORE the flip: reads as ON',
+        '  let flipFailure;',
         '  const result = await syncModelsToCodex(12345, snapshot, null, {',
         '    refreshCodexModelCatalog: async () => {',
         '      // The provider-discovery window: a second real process persists OFF.',
         '      // This child only flips desired state; do not propagate the service-probe flag.',
         '      const flipEnv = { ...process.env }; delete flipEnv.OCX_TEST_SERVICE_HOME_PROBE;',
+        `      const flipBudgetMs = ${COMPETING_OFF_BOOT_MS};`,
+        '      const remainingMs = Number(process.env.OCX_TEST_COMPETING_OFF_DEADLINE) - Date.now();',
+        `      if (!Number.isFinite(remainingMs) || remainingMs < flipBudgetMs + ${COMPETING_OFF_REAP_MS}) {`,
+        '        flipFailure = new Error("competing OFF flip not started: insufficient remaining budget " + remainingMs);',
+        '        throw flipFailure;',
+        '      }',
         '      const flip = spawnSync(process.execPath, ["--eval",',
         '        \'const { setIntegrationEnabled } = require("./src/codex/desired-state");\'',
         '        + \'const r = setIntegrationEnabled("codex", false);\'',
         '        + \'if (!r.ok) { console.error(JSON.stringify(r)); process.exit(1); }\',',
-        '      ], { cwd: process.cwd(), env: flipEnv, encoding: "utf8" });',
-        '      if (flip.status !== 0) throw new Error("flip failed: " + flip.stderr);',
+        `      ], { cwd: process.cwd(), env: flipEnv, encoding: "utf8", timeout: ${COMPETING_OFF_BOOT_MS}, killSignal: "SIGKILL", windowsHide: true });`,
+        '      if (flip.error || flip.signal !== null || flip.status !== 0) {',
+        '        flipFailure = new Error("competing OFF flip failed: status=" + flip.status + " signal=" + flip.signal + " error=" + (flip.error?.message ?? "none") + " stdout=" + flip.stdout + " stderr=" + flip.stderr);',
+        '        throw flipFailure;',
+        '      }',
         '      return { added: 0, path: "/tmp/none.json", catalogExists: false, catalogWritten: false, cacheSynced: false, comboOmissions: [] };',
         '    },',
-        '    injectCodexConfig, // the REAL injector; its under-lock re-read is the claim',
+        '    // The REAL injector remains the normal path; fixture failure must not be swallowed by discovery fallback.',
+        '    injectCodexConfig: (...args) => { if (flipFailure) throw flipFailure; return injectCodexConfig(...args); },',
         '  });',
+        '  if (flipFailure) throw flipFailure;',
         '  console.log(JSON.stringify({ status: result.status, skippedReason: result.skippedReason, ok: result.ok }));',
-        '})();',
+        '})().catch(error => { console.error(error); process.exitCode = 1; });',
       ].join("\n");
       const before = readFileSync(join(raceCodexHome, "config.toml"), "utf8");
       const child = spawnSync(process.execPath, childArgs(["--eval", script]), {
@@ -371,10 +388,16 @@ describe("GUI/CLI Codex sync backend", () => {
           USERPROFILE: raceHome,
           CODEX_HOME: raceCodexHome,
           OPENCODEX_HOME: raceOcxHome,
+          OCX_TEST_COMPETING_OFF_DEADLINE: String(Date.now() + COMPETING_OFF_CHILD_MS),
         }),
         encoding: "utf8",
+        timeout: COMPETING_OFF_CHILD_MS,
+        killSignal: "SIGKILL",
+        windowsHide: true,
       });
-      expect(child.status).toBe(0);
+      if (child.error || child.signal !== null || child.status !== 0) {
+        throw new Error(`competing OFF sync failed: status=${child.status} signal=${child.signal} error=${child.error?.message ?? "none"}\nstdout=${child.stdout}\nstderr=${child.stderr}`);
+      }
       const line = child.stdout.trim().split("\n").filter(Boolean).pop() ?? "{}";
       expect(JSON.parse(line)).toMatchObject({ status: "skipped", skippedReason: "desired_disabled", ok: true });
       // The stale ON snapshot wrote nothing: the fixture config is untouched.
@@ -382,7 +405,7 @@ describe("GUI/CLI Codex sync backend", () => {
     } finally {
       removeTreeWithRetry(raceRoot);
     }
-  }, 15_000);
+  }, COMPETING_OFF_TEST_MS);
 
   test("surfaces combo catalog omissions in sync result and CLI stderr (#484)", async () => {
     const logs: string[] = [];

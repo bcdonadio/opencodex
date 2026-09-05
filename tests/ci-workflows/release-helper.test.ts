@@ -24,6 +24,9 @@ const sshTarget = `${"git"}@${"github.com"}:lidge-jun/opencodex.git`;
 
 interface ReleaseScenario {
   branch?: string;
+  gitTags?: string[];
+  remoteGitTags?: string[];
+  remoteTagsExitCode?: number;
   npmLatest?: string;
   npmPreview?: string;
   headSha?: string;
@@ -129,7 +132,23 @@ if (args[0] === "status" && args[1] === "--porcelain") {
   process.exit(0);
 }
 
+if (args[0] === "tag" && args[1] === "--list" && args[2] === "v*") {
+  stdout((process.env.FAKE_GIT_TAGS ?? "") + "\\n");
+  process.exit(0);
+}
+
 if (args[0] === "ls-remote") {
+  if (args[1] === "--tags" && args[2] === "--refs" && args[3] === "origin" && args[4] === "refs/tags/v*") {
+    const exitCode = Number(process.env.FAKE_GIT_REMOTE_TAGS_EXIT_CODE ?? "0");
+    if (exitCode !== 0) {
+      stderr("remote tag lookup failed");
+      process.exit(exitCode);
+    }
+    for (const tag of (process.env.FAKE_GIT_REMOTE_TAGS ?? "").split("\\n").filter(Boolean)) {
+      stdout(headSha + "\\trefs/tags/" + tag + "\\n");
+    }
+    process.exit(0);
+  }
   if (args.some(a => typeof a === "string" && a.startsWith("refs/heads/"))) {
     const branchRef = args.find(a => typeof a === "string" && a.startsWith("refs/heads/"));
     stdout(\`\${process.env.FAKE_GIT_REMOTE_HEAD_SHA ?? headSha}\t\${branchRef}\n\`);
@@ -248,7 +267,7 @@ function findCallIndex(calls: LoggedCall[], name: string, matcher: (call: Logged
   return calls.findIndex(call => call.name === name && matcher(call));
 }
 
-async function runRelease(version: string, scenario: ReleaseScenario = {}) {
+async function runRelease(releaseArgs: string | string[], scenario: ReleaseScenario = {}) {
   const shimDir = mkdtempSync(join(tmpdir(), "ocx-release-helper-"));
   const logPath = join(shimDir, "release-log.jsonl");
   writeFileSync(logPath, "", "utf8");
@@ -279,6 +298,9 @@ async function runRelease(version: string, scenario: ReleaseScenario = {}) {
     [pathKey]: pathValue,
     FAKE_RELEASE_LOG: logPath,
     FAKE_GIT_BRANCH: scenario.branch ?? "main",
+    FAKE_GIT_TAGS: (scenario.gitTags ?? []).join("\n"),
+    FAKE_GIT_REMOTE_TAGS: (scenario.remoteGitTags ?? scenario.gitTags ?? []).join("\n"),
+    FAKE_GIT_REMOTE_TAGS_EXIT_CODE: String(scenario.remoteTagsExitCode ?? 0),
     FAKE_GIT_HEAD_SHA: scenario.headSha ?? "abc123def456",
     ...(scenario.remoteHeadSha ? { FAKE_GIT_REMOTE_HEAD_SHA: scenario.remoteHeadSha } : {}),
     FAKE_BUN_TSC_EXIT_CODE: String(scenario.typecheckExitCode ?? 0),
@@ -292,10 +314,14 @@ async function runRelease(version: string, scenario: ReleaseScenario = {}) {
     ...(scenario.originUrl ? { FAKE_GIT_ORIGIN_URL: scenario.originUrl } : {}),
   };
   try {
-    const result = await runCaptured(process.execPath, [releaseScriptPath, version], {
+    const result = await runCaptured(
+      process.execPath,
+      [releaseScriptPath, ...(typeof releaseArgs === "string" ? [releaseArgs] : releaseArgs)],
+      {
       cwd: repoRoot,
       env,
-    });
+      },
+    );
     return { calls: readLoggedCalls(logPath), result };
   } finally {
     removeTreeWithRetry(shimDir);
@@ -351,6 +377,89 @@ process.exit(0);
 }
 
 describe("release helper", () => {
+  test("--bump minor resolves from latest and dispatches the resolved version", async () => {
+    const { calls, result } = await runRelease(["--bump", "minor"], { npmLatest: "9.9.9" });
+
+    expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
+    expect(findCallIndex(calls, "npm", call =>
+      call.args.join(" ") === "version 9.10.0 --no-git-tag-version",
+    )).toBeGreaterThanOrEqual(0);
+    expect(findCallIndex(calls, "gh", call =>
+      call.args[0] === "workflow"
+      && call.args[1] === "run"
+      && call.args.includes("version=9.10.0"),
+    )).toBeGreaterThanOrEqual(0);
+  });
+
+  test("--bump and an explicit version are rejected before any command runs", async () => {
+    const { calls, result } = await runRelease(["9.9.9", "--bump", "minor"]);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toMatch(/mutually exclusive|exactly one/i);
+    expect(calls).toEqual([]);
+  });
+
+  test("an invalid --bump kind is rejected before any command runs", async () => {
+    const { calls, result } = await runRelease(["--bump", "banana"]);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("patch|minor|major");
+    expect(calls).toEqual([]);
+  });
+
+  test("--bump consults origin tags even when local tags and npm are stale", async () => {
+    const { calls, result } = await runRelease(["--bump", "patch"], {
+      npmLatest: "9.9.0",
+      gitTags: ["v9.9.0"],
+      remoteGitTags: ["v9.9.5"],
+    });
+
+    expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
+    expect(findCallIndex(calls, "npm", call =>
+      call.args.join(" ") === "version 9.9.6 --no-git-tag-version",
+    )).toBeGreaterThanOrEqual(0);
+  });
+
+  test("--bump on preview emits a dated preview version", async () => {
+    const { calls, result } = await runRelease(["--bump", "minor"], {
+      branch: "preview",
+      npmLatest: "9.9.9",
+      npmPreview: "9.9.9-preview.20260903",
+    });
+
+    expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
+    const versionCall = calls.find(call => call.name === "npm" && call.args[0] === "version");
+    expect(versionCall?.args[1]).toMatch(/^\d+\.\d+\.\d+-preview\.\d{8}(?:\.\d+)?$/);
+  });
+
+  test("--bump fails before mutation when origin tags cannot be read", async () => {
+    const { calls, result } = await runRelease(["--bump", "patch"], {
+      npmLatest: "9.9.0",
+      gitTags: ["v9.9.0"],
+      remoteTagsExitCode: 128,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("remote tag lookup failed");
+    expect(findCallIndex(calls, "npm", call => call.args[0] === "version")).toBe(-1);
+    expect(findCallIndex(calls, "git", call => ["add", "commit", "push"].includes(call.args[0] ?? ""))).toBe(-1);
+    expect(findCallIndex(calls, "gh", call => call.args[0] === "workflow")).toBe(-1);
+  });
+
+  test("a higher-core preview refusal reaches the operator before bump or commit", async () => {
+    const blockingPreview = "v9.10.0-preview.1";
+    const { calls, result } = await runRelease(["--bump", "patch"], {
+      npmLatest: "9.9.0",
+      gitTags: ["v9.9.0"],
+      remoteGitTags: [blockingPreview],
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("cannot bump stable patch");
+    expect(result.stderr + result.stdout).toContain(blockingPreview);
+    expect(findCallIndex(calls, "npm", call => call.args[0] === "version")).toBe(-1);
+    expect(findCallIndex(calls, "git", call => call.args[0] === "commit")).toBe(-1);
+  });
+
   test("preflight runs the shared audit, typecheck, test suite, and privacy scan before version bump", async () => {
     const { calls, result } = await runRelease("9.9.9");
 

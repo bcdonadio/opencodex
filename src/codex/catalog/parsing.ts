@@ -596,6 +596,8 @@ export function ensureStrictCatalogFields(
 export type MultiAgentMode = "v1" | "default" | "v2";
 
 export interface MultiAgentModeOptions {
+  /** Caller-owned source metadata already defines the default for these projected rows. */
+  preserveDefaultMultiAgentVersion?: (entry: RawEntry) => boolean;
   /**
    * When the catalog is in v2 mode, stamp ChatGPT-native rows as v1 instead.
    * Routed parents get v2 (plaintext child tasks). Native Sol/Terra stay on v1
@@ -671,6 +673,7 @@ export function applyMultiAgentMode(
     // Restore upstream defaults: clear any stale forced multi_agent_version and
     // re-apply upstream pins from the snapshot for native entries that have one.
     for (const entry of entries) {
+      if (options.preserveDefaultMultiAgentVersion?.(entry)) continue;
       const slug = typeof entry.slug === "string" ? entry.slug : "";
       const nativeAlias = entry.opencodex_catalog_kind === CODEX_NATIVE_ALIAS_CATALOG_KIND;
       const routedNativeSlug = slug.startsWith(`${OPENAI_CODEX_PROVIDER_ID}/`)

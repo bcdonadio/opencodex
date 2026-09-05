@@ -92,11 +92,25 @@ Les workflows GitHub Actions restent volontairement limités :
 
 Utilisez l'assistant pour les versions :
 
+
+Avant d’exécuter le helper, choisissez la version prévue et lancez
+`.github/workflows/dev-version-bump.yml` depuis la branche par défaut avec
+`intended-version=<version>` et `mode=pre-move`. Relisez et fusionnez la PR créée
+vers `dev`, puis promouvez vers `main` ou `preview` avant de lancer le helper.
+Si `dev` dépasse déjà la version prévue, le workflow renvoie `changed=false` et
+aucune PR de version n’est nécessaire. La publication exige toujours une CI
+réussie sur le commit exact de la release.
+
 ```bash
 bun run release <version>           # commits/pushes the bump; publish workflow is dry-run by default
+bun run release --bump minor        # calcule la prochaine version patch, minor ou major depuis les tags et canaux npm
 bun run release <version> --publish # publish after the CI-gated dry run is understood
 bun run release:watch               # watch the newest Release workflow run
 ```
+
+`--bump patch|minor|major` remplace une version explicite. Dès qu’un tag de préversion ouvre un
+core supérieur, `--bump patch` refuse de prolonger l’ancienne ligne stable ; publiez plutôt le
+correctif dans le core de préversion ouvert.
 
 ## Branches
 

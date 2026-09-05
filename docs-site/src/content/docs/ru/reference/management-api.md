@@ -169,7 +169,10 @@ Endpoint'ы storage cleanup могут перемещать или навсег�
 | `PUT /api/model-visibility` | Атомарно изменить видимость на уровне провайдера или модели | 400 invalid provider, scope, target or body |
 | `GET, POST /api/custom-models` | Показать список custom-моделей или добавить одну | 400 invalid fields; 404 provider missing; 409 duplicate model |
 | `PUT, DELETE /api/custom-models/{id}` | Изменить или удалить одну custom-модель | 400 invalid id/fields; 404 not found; 409 duplicate model |
-| `GET, PUT /api/selected-models` | Прочитать allowlist'ы и availability провайдеров либо заменить один allowlist | 400 missing provider/body; 404 unknown provider |
+| `GET, PUT /api/selected-models` | Прочитать allowlist'ы и availability провайдеров либо заменить один allowlist | 400 missing provider/body; 404 unknown provider; PUT 409 `initial_model_selection_pending` |
+| `GET, PUT /api/model-presets` | Прочитать пресеты или выбрать режим preset/all/custom | 400 неверный режим или неподдерживаемый пресет; 404 неизвестный провайдер; PUT 409 `initial_model_selection_pending` |
+
+Пока достоверный исходный список моделей не получен, корректные PUT-запросы к `/api/selected-models` и `/api/model-presets` возвращают HTTP 409 с кодом `initial_model_selection_pending`. Обновите список моделей, например через `GET /api/models`, и повторите запрос после успешного получения списка.
 
 ### OAuth-аккаунты, ключи провайдеров и ключи data plane
 

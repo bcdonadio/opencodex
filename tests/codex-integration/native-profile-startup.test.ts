@@ -54,12 +54,21 @@ import {
 import { startServer } from "../../src/server";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { helperPath, repoRoot } from "../helpers/repo-root";
-import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 const roots: string[] = [];
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 const previousCodexHome = process.env.CODEX_HOME;
 const OWNERSHIP_REPROBE_TEST_HOME = "ownership-reprobe-test-home";
+// One process boot, recovery observation, requests and bounded child teardown.
+const CHILD_CASE_BUDGET_MS = 2 * SPAWN_BUDGET_MS;
+type StartupChild = ReturnType<typeof Bun.spawn>;
+const childOutputs = new WeakMap<StartupChild, {
+  stdout: Promise<string>;
+  stderr: Promise<string>;
+  startedAt: number;
+  ready: boolean;
+}>();
 
 function restoreEnv(name: "OPENCODEX_HOME" | "CODEX_HOME", value: string | undefined): void {
   if (value === undefined) delete process.env[name];
@@ -241,16 +250,26 @@ async function waitForPath(path: string, timeoutMs = INTERNAL_DEADLINE_MS): Prom
  * Wait for a port that is actually a port.
  */
 // A spawned proxy child needs 10-18 s to reach its port file on a loaded windows-latest shard
-// (runs 33601508392 and 33610501053), and run 33930757649 showed 19 s boots elsewhere in the
-// suite. INTERNAL_DEADLINE_MS is the named in-test bound; callers carry a larger case budget.
-async function waitForPort(path: string, timeoutMs = INTERNAL_DEADLINE_MS): Promise<number> {
+// (runs 33601508392 and 33610501053). A 15 s generic deadline therefore rejects healthy
+// children. Use the intrinsic spawn budget; each scenario has its own larger case bound.
+async function waitForPort(path: string, child: StartupChild, timeoutMs = SPAWN_BUDGET_MS): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    if (child.exitCode !== null) {
+      throw new Error(`startup child exited ${child.exitCode} before publishing ${path}\n${await childDiagnostic(child)}`);
+    }
     if (existsSync(path)) {
       const port = Number(readFileSync(path, "utf8").trim());
-      if (Number.isInteger(port) && port > 0) return port;
+      if (Number.isInteger(port) && port > 0 && port <= 65_535) {
+        const output = childOutputs.get(child)!;
+        output.ready = true;
+        console.info(`[native-startup] port-ready elapsedMs=${Date.now() - output.startedAt}`);
+        return port;
+      }
     }
-    if (Date.now() >= deadline) throw new Error(`Timed out waiting for a real port in ${path}`);
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for a real port in ${path}; childExit=${child.exitCode}; elapsedMs=${Date.now() - childOutputs.get(child)!.startedAt}`);
+    }
     await Bun.sleep(10);
   }
 }
@@ -265,8 +284,9 @@ function childPaths(f: Fixture) {
   };
 }
 
-function spawnChild(f: Fixture, paths: ReturnType<typeof childPaths>): ReturnType<typeof Bun.spawn> {
-  return Bun.spawn([process.execPath, helperPath("native-profile-startup-child.ts")], {
+function spawnChild(f: Fixture, paths: ReturnType<typeof childPaths>): StartupChild {
+  const startedAt = Date.now();
+  const child = Bun.spawn([process.execPath, helperPath("native-profile-startup-child.ts")], {
     cwd: repoRoot(),
     env: {
       ...process.env,
@@ -281,23 +301,67 @@ function spawnChild(f: Fixture, paths: ReturnType<typeof childPaths>): ReturnTyp
       NATIVE_STARTUP_SETTLED: paths.settled,
       NATIVE_STARTUP_UPSTREAM: paths.upstream,
       NATIVE_STARTUP_STOP: paths.stop,
+      NATIVE_STARTUP_LAUNCHED_AT: String(startedAt),
     },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
+  childOutputs.set(child, {
+    stdout: new Response(child.stdout).text(),
+    stderr: new Response(child.stderr).text(),
+    startedAt,
+    ready: false,
+  });
+  return child;
 }
 
-async function stopChild(child: ReturnType<typeof Bun.spawn>, paths: ReturnType<typeof childPaths>): Promise<void> {
+async function childDiagnostic(child: StartupChild): Promise<string> {
+  const output = childOutputs.get(child)!;
+  const [stdout, stderr] = await Promise.all([output.stdout, output.stderr]);
+  return `stdout=${stdout.slice(-8192)}\nstderr=${stderr.slice(-8192)}`;
+}
+
+async function stopChild(child: StartupChild, paths: ReturnType<typeof childPaths>): Promise<void> {
   writeFileSync(paths.release, "release");
   writeFileSync(paths.stop, "stop");
-  const exit = await Promise.race([child.exited, Bun.sleep(10_000).then(() => null)]);
-  if (exit === null) {
-    child.kill();
-    await child.exited;
-    throw new Error("startup child did not stop");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const exit = await Promise.race([
+      child.exited,
+      new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 10_000); }),
+    ]);
+    if (exit === null) {
+      child.kill();
+      await child.exited;
+      throw new Error(`startup child did not stop; killed and joined\n${await childDiagnostic(child)}`);
+    }
+    const diagnostic = await childDiagnostic(child);
+    if (!childOutputs.get(child)!.ready) console.error(`[native-startup] stopped before readiness, exit=${exit}\n${diagnostic}`);
+    if (exit !== 0) throw new Error(`startup child exited ${exit}\n${diagnostic}`);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  if (exit !== 0) throw new Error(await new Response(child.stderr).text());
+}
+
+async function withStartupChild(
+  f: Fixture,
+  verify: (port: number, paths: ReturnType<typeof childPaths>) => Promise<void>,
+): Promise<void> {
+  const paths = childPaths(f);
+  const child = spawnChild(f, paths);
+  const errors: unknown[] = [];
+  try {
+    await verify(await waitForPort(paths.port, child), paths);
+  } catch (error) {
+    errors.push(error);
+  } finally {
+    try { await stopChild(child, paths); } catch (error) { errors.push(error); }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) {
+    throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join("; "));
+  }
 }
 
 async function mainRequest(port: number): Promise<Response> {
@@ -580,79 +644,60 @@ describe("native-main startup journal gate", () => {
     expect(isNativeMainTrafficBlocked()).toBe(false);
   });
 
-  test("fresh processes gate first admission and converge every recoverable phase/observation", async () => {
-    for (const scenario of recoverable) {
-      const f = await fixture(scenario.phase, scenario.observation);
-      const paths = childPaths(f);
-      const child = spawnChild(f, paths);
-      try {
-        const port = await waitForPort(paths.port);
-        const blocked = await mainRequest(port);
-        expect(blocked.status).toBeGreaterThanOrEqual(400);
-        expect(existsSync(paths.upstream)).toBe(false);
+  test.each(recoverable)("fresh processes gate first admission and converge $phase/$observation", async (scenario) => {
+    const f = await fixture(scenario.phase, scenario.observation);
+    await withStartupChild(f, async (port, paths) => {
+      const blocked = await mainRequest(port);
+      expect(blocked.status).toBeGreaterThanOrEqual(400);
+      expect(existsSync(paths.upstream)).toBe(false);
 
-        writeFileSync(paths.release, "release");
-        await waitForPath(paths.settled);
-        expect(JSON.parse(readFileSync(paths.settled, "utf8"))).toMatchObject({ gate: { status: "ready" } });
-        const allowed = await mainRequest(port);
-        if (allowed.status !== 200) {
-          throw new Error(`${scenario.phase}/${scenario.observation}: ${allowed.status} ${await allowed.text()} settled=${readFileSync(paths.settled, "utf8")}`);
-        }
-        expect(existsSync(paths.upstream)).toBe(true);
-        const active = (await f.manager.list()).activeProfileId;
-        expect(active).toBe(scenario.active === "target" ? f.targetProfileId : f.sourceProfileId);
-      } finally {
-        await stopChild(child, paths);
+      writeFileSync(paths.release, "release");
+      await waitForPath(paths.settled);
+      expect(JSON.parse(readFileSync(paths.settled, "utf8"))).toMatchObject({ gate: { status: "ready" } });
+      const allowed = await mainRequest(port);
+      if (allowed.status !== 200) {
+        throw new Error(`${scenario.phase}/${scenario.observation}: ${allowed.status} ${await allowed.text()} settled=${readFileSync(paths.settled, "utf8")}`);
       }
-    }
-  }, 120_000);
+      expect(existsSync(paths.upstream)).toBe(true);
+      const active = (await f.manager.list()).activeProfileId;
+      expect(active).toBe(scenario.active === "target" ? f.targetProfileId : f.sourceProfileId);
+    });
+  }, CHILD_CASE_BUDGET_MS);
 
-  test("manual observations keep main closed while health and explicit recovery remain available", async () => {
-    for (const observation of ["unreadable", "third"] as const) {
-      const f = await fixture("prepared", observation);
-      const paths = childPaths(f);
-      const child = spawnChild(f, paths);
-      try {
-        const port = await waitForPort(paths.port);
-        expect((await mainRequest(port)).status).toBeGreaterThanOrEqual(400);
-        expect(existsSync(paths.upstream)).toBe(false);
-        expect((await fetch(`http://127.0.0.1:${port}/healthz`)).status).toBe(200);
+  test.each(["unreadable", "third"] as const)("manual observation %s keeps main closed while health and explicit recovery remain available", async (observation) => {
+    const f = await fixture("prepared", observation);
+    await withStartupChild(f, async (port, paths) => {
+      expect((await mainRequest(port)).status).toBeGreaterThanOrEqual(400);
+      expect(existsSync(paths.upstream)).toBe(false);
+      expect((await fetch(`http://127.0.0.1:${port}/healthz`)).status).toBe(200);
 
-        writeFileSync(paths.release, "release");
-        await waitForPath(paths.settled);
-        expect(JSON.parse(readFileSync(paths.settled, "utf8"))).toMatchObject({ gate: { status: "blocked", reason: "manual-recovery" } });
-        expect((await mainRequest(port)).status).toBeGreaterThanOrEqual(400);
-        expect(existsSync(paths.upstream)).toBe(false);
+      writeFileSync(paths.release, "release");
+      await waitForPath(paths.settled);
+      expect(JSON.parse(readFileSync(paths.settled, "utf8"))).toMatchObject({ gate: { status: "blocked", reason: "manual-recovery" } });
+      expect((await mainRequest(port)).status).toBeGreaterThanOrEqual(400);
+      expect(existsSync(paths.upstream)).toBe(false);
 
-        writeFileSync(join(f.codexHome, "auth.json"), f.target);
-        const recovered = await fetch(`http://127.0.0.1:${port}/api/native-main-profiles/recover`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-opencodex-api-key": "startup-test-admin" },
-          body: JSON.stringify({ rollback: false }),
-        });
-        expect(recovered.status).toBe(200);
-        expect((await mainRequest(port)).status).toBe(200);
-        expect(existsSync(paths.upstream)).toBe(true);
-      } finally {
-        await stopChild(child, paths);
-      }
-    }
-  }, 45_000);
+      writeFileSync(join(f.codexHome, "auth.json"), f.target);
+      const recovered = await fetch(`http://127.0.0.1:${port}/api/native-main-profiles/recover`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-opencodex-api-key": "startup-test-admin" },
+        body: JSON.stringify({ rollback: false }),
+      });
+      expect(recovered.status).toBe(200);
+      expect((await mainRequest(port)).status).toBe(200);
+      expect(existsSync(paths.upstream)).toBe(true);
+    });
+  }, CHILD_CASE_BUDGET_MS);
 
   test("a pending native-main journal does not block an ordinary Pool account", async () => {
     const f = await fixture("prepared", "unreadable", true);
-    const paths = childPaths(f);
-    const child = spawnChild(f, paths);
-    try {
-      const port = await waitForPort(paths.port);
+    await withStartupChild(f, async (port, paths) => {
       expect((await mainRequest(port)).status).toBe(200);
       await waitForPath(paths.upstream);
       const receipt = JSON.parse(readFileSync(paths.upstream, "utf8").trim());
       expect(receipt.authorization).toBe("Bearer pool-access");
-    } finally {
-      await stopChild(child, paths);
-    }
-  }, 20_000);
+    });
+  }, CHILD_CASE_BUDGET_MS);
 });
 
 /*

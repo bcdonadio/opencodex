@@ -307,6 +307,21 @@ describe("enablement", () => {
 });
 
 describe("config integration", () => {
+  test("private-network opt-in does not permit a cleartext webhook URL", () => {
+    const result = validateConfigCandidate({
+      port: 10100,
+      defaultProvider: "openai",
+      providers: { openai: { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1" } },
+      quotaResetNotify: {
+        enabled: true,
+        webhookUrl: "http://127.0.0.1:9999/hook",
+        allowPrivateNetwork: true,
+      },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("webhookUrl");
+  });
+
   test("an invalid notify section is rejected by the write path", () => {
     // Live writes stay strict, so an operator is told rather than silently ignored.
     const result = validateConfigCandidate({
@@ -562,6 +577,10 @@ describe("activation is the single switch", () => {
       expect(payload["percentBefore"]).toBe(96);
       expect(payload["percentAfter"]).toBe(2);
       expect(bodies[0]).not.toContain("operator@example.com");
+      expect(bodies[0]).not.toContain("@");
+      expect(bodies[0]).not.toContain("/Users/");
+      expect(payload).not.toHaveProperty("accountId");
+      expect(payload).not.toHaveProperty("key");
     } finally {
       if (receiveTimeout !== undefined) clearTimeout(receiveTimeout);
       globalThis.fetch = realFetch;

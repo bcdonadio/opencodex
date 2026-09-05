@@ -101,6 +101,22 @@ Cost values in **Logs** and **Usage** are API list-price equivalents calculated 
 They are not billing receipts or evidence of an actual charge; subscription usage or provider credits
 may apply instead.
 
+Provider model rows may include **unresolved requested model usage**: the saved route sent the
+requested name unchanged to the default provider. These tokens belong to that serving provider,
+not necessarily the vendor named in the request. The dashboard preserves the original name and
+usage rather than guessing which model ran. For slash-containing unresolved names, a different
+vendor's model price alone is not enough to estimate cost; an exact provider or configured price
+still applies. Model shares are calculated within the selected provider. Requests for an unknown
+reserved `policy/` name now fail before reaching an upstream provider; historical usage is retained.
+
+The selected provider's **Overview** and **Usage** tabs show **Current account usage** below the
+usage statistics. **Accounts** and **API keys** show each supported credential's own quota,
+including credit balances. The provider-wide overview still shows pooled capacity where available;
+it is not substituted for a missing current-account reading. Unsupported lookup, no passive
+observation yet, loading, failed lookup with last-known values, and measured zero are separate
+states. **Quota check completed** means the read settled—not that a passive observation became
+new or that every upstream measurement was refreshed.
+
 ## Model visibility
 
 The **Models** switches show final Codex visibility: a routed model is on only when its provider allowlist includes it (or no allowlist is set) and it is not disabled. Turning a model on reconciles both filters atomically; **All on** clears the provider allowlist so newly discovered models are also on.
@@ -248,6 +264,7 @@ The GUI is a thin client over the proxy's JSON management API. Useful endpoints 
 | `GET /api/models` · `PUT /api/disabled-models` | List native/routed model rows and update the shared disabled-model set. |
 | `GET /api/selected-models` · `PUT /api/model-visibility` | Read provider allowlists and atomically change the final visibility of one model or provider group. |
 | `GET /api/key-providers` · `GET /api/oauth/providers` | Read the API-key and OAuth provider catalogs. |
+| `GET /api/oauth/accounts?provider=...&quota=1` · `GET /api/providers/keys?name=...&quota=1` | Read each account or key's quota where supported, without changing the active credential. Add `refresh=1` to bypass settled quota cache; an in-flight same-credential read can be shared. Omit `quota=1` for a cheap local list with each row's `quotaMode`: `probe`, `passive`, or `unsupported`. Passive reads return existing observations without a network probe. No reading is not the same as 0% used, and quotas for multiple keys are not summed. |
 | `POST /api/oauth/login` · `GET /api/oauth/status` | Start a provider OAuth flow and poll for completion. |
 | `GET /api/codex-auth/accounts?refresh=1` | List main and pool accounts, force quota refresh, and report main-account `hasCredential` / terminal `needsReauth` state. |
 | `PUT /api/codex-auth/active` · `PUT /api/codex-auth/auto-switch` · `PUT /api/codex-auth/failover` | Select the account for the next request and configure pool routing. |

@@ -52,6 +52,26 @@ function readConfig(dir: string) {
 }
 
 describe("ocx provider", () => {
+  test("new provider registration initializes model selection but force overwrite preserves it", () => {
+    const { dir } = freshConfig();
+    try {
+      const args = ["provider", "add", "model-fixture", "--adapter", "openai-chat", "--base-url", "https://models.example.test/v1", "--json"];
+      const added = runCli(args, { OPENCODEX_HOME: dir });
+      expect(added.status).toBe(0);
+      expect(JSON.parse(added.stdout).modelSelection.commands.list).toBe("ocx models live --provider model-fixture");
+      const first = readConfig(dir);
+      expect(first.providers["model-fixture"].initialModelSelection.status).toBe("pending");
+      const registrationId = first.providers["model-fixture"].initialModelSelection.registrationId;
+      first.providers["model-fixture"].selectedModels = ["chosen"];
+      writeFileSync(join(dir, "config.json"), JSON.stringify(first));
+      expect(runCli([...args, "--force"], { OPENCODEX_HOME: dir }).status).toBe(0);
+      const next = readConfig(dir).providers["model-fixture"];
+      expect(next.selectedModels).toEqual(["chosen"]);
+      expect(next.initialModelSelection.registrationId).toBe(registrationId);
+      expect(next.disabled).not.toBe(true);
+    } finally { removeTreeWithRetry(dir); }
+  });
+
   test("provider --help prints usage", () => {
     const result = runCli(["provider", "--help"]);
     expect(result.status).toBe(0);

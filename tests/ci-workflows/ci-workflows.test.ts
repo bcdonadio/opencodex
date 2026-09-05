@@ -712,6 +712,93 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
   });
 
+  test("dev version bump is a default-ref pre-move opener with one normalized target", async () => {
+    const text = await readText(".github/workflows/dev-version-bump.yml");
+    const workflow = Bun.YAML.parse(text) as {
+      on?: {
+        workflow_dispatch?: {
+          inputs?: Record<string, {
+            required?: boolean;
+            default?: string;
+            type?: string;
+            options?: string[];
+          }>;
+        };
+        workflow_call?: unknown;
+      };
+      jobs?: {
+        "open-bump-pr"?: {
+          steps?: Array<{
+            name?: string;
+            id?: string;
+            if?: string;
+            env?: Record<string, string>;
+            run?: string;
+          }>;
+        };
+      };
+    };
+
+    expect(workflow.on?.workflow_call).toBeUndefined();
+    expect(Object.keys(workflow.on ?? {})).toEqual(["workflow_dispatch"]);
+    const inputs = workflow.on?.workflow_dispatch?.inputs ?? {};
+    expect(inputs["intended-version"]).toMatchObject({ required: true, type: "string" });
+    expect(inputs.mode).toMatchObject({
+      required: false,
+      default: "pre-move",
+      type: "choice",
+      options: ["pre-move", "repair"],
+    });
+
+    const steps = workflow.jobs?.["open-bump-pr"]?.steps ?? [];
+    const refGuard = steps.find(step => step.name === "Refuse a dispatch from a non-default ref");
+    expect(refGuard?.run).toContain(
+      'test "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}"',
+    );
+
+    const target = steps.find(step => step.name === "Resolve the target version");
+    const decision = steps.find(step => step.name === "Decide the version dev should carry");
+    const targetFreeness = steps.find(
+      step => step.name === "Prove the intended version is not already released",
+    );
+    const chosenFreeness = steps.find(step => step.name === "Prove the chosen version is unused");
+    const openPr = steps.find(step => step.name === "Open the bump pull request");
+
+    expect(target?.id).toBe("target");
+    expect(target?.env).toEqual({
+      INTENDED: "${{ inputs.intended-version }}",
+      MODE: "${{ inputs.mode }}",
+    });
+    expect(target?.run).toContain('echo "version=${target}" >> "$GITHUB_OUTPUT"');
+    expect(target?.run).toContain('echo "mode=repair" >> "$GITHUB_OUTPUT"');
+    expect(target?.run).toContain('echo "mode=pre-move" >> "$GITHUB_OUTPUT"');
+    expect(text.indexOf("- name: Resolve the target version")).toBeLessThan(
+      text.indexOf("- name: Decide the version dev should carry"),
+    );
+
+    expect(decision?.env?.RELEASED_VERSION).toBe("${{ steps.target.outputs.version }}");
+    expect(targetFreeness?.if).toBe("${{ steps.target.outputs.mode == 'pre-move' }}");
+    expect(targetFreeness?.env?.INTENDED).toBe("${{ steps.target.outputs.version }}");
+    expect(targetFreeness?.run).toContain("git fetch --force --tags origin");
+    expect(targetFreeness?.run).toContain('npm view "@bitkyc08/opencodex@${INTENDED#v}" version');
+    expect(chosenFreeness?.run).toBe("bun test tests/ci-workflows/release-version-line.test.ts");
+    expect(openPr?.env).toMatchObject({
+      MODE: "${{ steps.target.outputs.mode }}",
+      TARGET_VERSION: "${{ steps.target.outputs.version }}",
+    });
+    expect(openPr?.run).toContain(
+      'chore(release): open dev at ${NEXT_VERSION} before releasing ${TARGET_VERSION}',
+    );
+    expect(openPr?.run).toContain(
+      'fix(release): move dev to ${NEXT_VERSION} after ${TARGET_VERSION}',
+    );
+
+    // The resolver is the sole raw-input boundary. Every consumer after it reads the
+    // normalized output, so a future input rename cannot split the decision from its PR.
+    expect(count(text, "${{ inputs.intended-version }}")).toBe(1);
+    expect(count(text, "${{ inputs.mode }}")).toBe(1);
+  });
+
   test("release workflow gates the exact SHA, channel, and service surface without injection", async () => {
     const workflow = await readText(".github/workflows/release.yml");
     const release = Bun.YAML.parse(workflow) as {
@@ -746,6 +833,8 @@ describe("GitHub Actions hardening", () => {
       "pull-requests": "read",
       "id-token": "write",
     });
+    expect(workflow).not.toContain("bump-dev-version:");
+    expect(workflow).not.toContain("uses: ./.github/workflows/dev-version-bump.yml");
     expect(workflow).toContain("actions: read");
     expect(workflow).toContain("pull-requests: read");
     expect(workflow).toContain("id-token: write");
@@ -859,6 +948,44 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).toContain("Release must run from main or preview");
     expect(workflow).toContain("main releases must use a stable semver version");
     expect(workflow).toContain("preview releases must use a preview prerelease version");
+
+    const readinessStep = workflow
+      .split("- name: Require dev to be ready for this release")[1]
+      ?.split(/\n {6}- name:/)[0];
+    expect(readinessStep).toBeDefined();
+    expect(readinessStep).toContain(
+      "git fetch --force --tags origin +refs/heads/dev:refs/remotes/origin/dev",
+    );
+    expect(readinessStep).toContain("git show origin/dev:package.json");
+    expect(readinessStep).toContain(
+      'bun scripts/version-line.ts assert-ahead "$dev_version" "$RELEASE_VERSION"',
+    );
+
+    const orderingStep = workflow
+      .split("- name: Refuse a release the current tag set already outranks")[1]
+      ?.split(/\n {6}- name:/)[0];
+    expect(orderingStep).toBeDefined();
+    expect(orderingStep).toContain(
+      'git tag --list \'v*\' | bun scripts/version-line.ts assert-releasable "$RELEASE_VERSION" $allow',
+    );
+    expect(orderingStep).toContain('existing_tag_sha="$(git rev-parse');
+    expect(orderingStep).toContain('[ "$DRY_RUN" = "true" ]');
+    expect(orderingStep).toContain('[ "$existing_tag_sha" = "$GITHUB_SHA" ]');
+
+    // This is an ordering gate, not an existence pin. It must consume the freshly
+    // fetched tag set and must run before either dry-run packing or publication.
+    const preflightIndex = workflow.indexOf("- name: Preflight release metadata");
+    const preflightFetchIndex = workflow.indexOf(
+      "git fetch --force --tags origin",
+      preflightIndex,
+    );
+    const orderingGateIndex = workflow.indexOf(
+      "- name: Refuse a release the current tag set already outranks",
+    );
+    const publishBoundaryIndex = workflow.indexOf("- name: Publish (or dry-run)");
+    expect(preflightFetchIndex).toBeGreaterThan(preflightIndex);
+    expect(orderingGateIndex).toBeGreaterThan(preflightFetchIndex);
+    expect(publishBoundaryIndex).toBeGreaterThan(orderingGateIndex);
 
     // Release notes are built and coverage-validated before npm publish. The
     // builder owns Git-history/PR coverage; the workflow only wires the validated

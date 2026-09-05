@@ -6,39 +6,8 @@ import { isThirtyDayOnlyCodexPlan } from "./plan";
 import { MAIN_CODEX_ACCOUNT_ID } from "./account-id";
 import { getObservedMainQuotaIdentityKey, isMainQuotaWriterLive, type MainQuotaWriter } from "./main-account-cache";
 
-export type StoredAccountQuota = {
-  weeklyPercent?: number;
-  monthlyPercent?: number;
-  weeklyResetAt?: number;
-  monthlyResetAt?: number;
-  /**
-   * A sub-day burst window, when upstream declares one (#1791).
-   *
-   * K12 and similar plans enforce a rolling 5-hour limit ALONGSIDE the weekly one.
-   * Not folding it into `weeklyPercent` stopped the mislabeling, but dropping it
-   * entirely hides a limit that genuinely blocks the account: a 429 at 100% here is
-   * real even while the weekly quota is untouched.
-   *
-   * `shortWindowSeconds` is retained because the duration is the only thing that makes
-   * this window self-describing; the slot it arrived in is not stable across plans.
-   */
-  shortPercent?: number;
-  shortResetAt?: number;
-  /** Local observation time of shortPercent; unrelated quota/credit updates never refresh it. */
-  shortObservedAt?: number;
-  shortWindowSeconds?: number;
-  customWindows?: Array<{ label: string; percent: number; resetAt?: number }>;
-  resetCredits?: number;
-  /**
-   * True when `monthlyPercent` came from an explicitly-monthly PRIMARY window —
-   * i.e. it is the account's governing quota reading, not a supplementary
-   * tertiary window. Tertiary-only monthly data lands in the same field but says
-   * nothing about the weekly quota that actually gates a non-Go/Free account,
-   * so recovery must be able to tell the two apart (#967 audit).
-   */
-  monthlyIsPrimaryWindow?: boolean;
-  updatedAt: number;
-};
+import type { StoredAccountQuota, WhamUsageResponse, WhamUsageWindow } from "./quota-types";
+export type { StoredAccountQuota, WhamUsageResponse } from "./quota-types";
 
 /** Disk snapshot under OPENCODEX_HOME — quota and policy identity only, never credential tags. */
 const QUOTA_CACHE_FILENAME = "codex-quota-cache.json";
@@ -56,36 +25,6 @@ type MainPolicyQuota = { identityKey: string; quota: StoredAccountQuota };
 let mainPolicyQuota: MainPolicyQuota | null = null;
 let diskHydrated = false;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
-
-export type WhamUsageResponse = {
-  email?: string | null;
-  plan_type?: unknown;
-  rate_limit?: {
-    // Live WHAM payloads send explicit nulls for absent windows (issue #315 repro).
-    primary_window?: WhamUsageWindow | null;
-    secondary_window?: WhamUsageWindow | null;
-    tertiary_window?: WhamUsageWindow | null;
-  };
-  rate_limit_reset_credits?: {
-    available_count: number;
-  } | null;
-  additional_rate_limits?: WhamAdditionalRateLimit[] | null;
-};
-
-type WhamAdditionalRateLimit = {
-  limit_name?: unknown;
-  metered_feature?: unknown;
-  rate_limit?: {
-    primary_window?: WhamUsageWindow | null;
-    secondary_window?: WhamUsageWindow | null;
-  } | null;
-};
-
-type WhamUsageWindow = {
-  used_percent?: number;
-  reset_at?: number;
-  limit_window_seconds?: number;
-};
 
 const MONTHLY_WINDOW_MIN_SECONDS = 28 * 24 * 60 * 60;
 /**

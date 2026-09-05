@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { buildResponseJSON } from "../../src/bridge";
 import { parseRequest } from "../../src/responses/parser";
+import { buildTools } from "../../src/responses/parser-tools";
+import { parseTextFormat } from "../../src/responses/parser-text-format";
 import { buildToolBridgeMaps } from "../../src/server/responses";
+import { repoPath } from "../helpers/repo-root";
 
 describe("Responses parser", () => {
   test("normalizes function tool schemas to an object root without corrupting valid schemas (#745)", () => {
@@ -638,6 +642,86 @@ describe("codex-rs compat surface (260707)", () => {
     ]);
   });
 
+  for (const outputType of ["function_call_output", "custom_tool_call_output"]) {
+    test.each([
+      {
+        name: "file-only image becomes a text marker",
+        output: [{ type: "input_image", file_id: "file-only" }],
+        expected: "[image: file-only]",
+      },
+      {
+        name: "empty URL falls back to file_id",
+        output: [{ type: "input_image", image_url: "", file_id: "file-fallback" }],
+        expected: "[image: file-fallback]",
+      },
+      {
+        name: "non-string URLs fall back to usable file_ids",
+        output: [null, false, 42, {}, []].map(image_url => ({ type: "input_image", image_url, file_id: "file-valid" })),
+        expected: "[image: file-valid]".repeat(5),
+      },
+      {
+        name: "nonempty URL wins over file_id and normalizes original detail",
+        output: [{ type: "input_image", image_url: "https://example.com/winner.png", file_id: "file-loser", detail: "original" }],
+        expected: [{ type: "image", imageUrl: "https://example.com/winner.png", detail: "high" }],
+      },
+      {
+        name: "valid URL survives a malformed file_id",
+        output: [{ type: "input_image", image_url: "data:image/png;base64,aGVsbG8=", file_id: 42 }],
+        expected: [{ type: "image", imageUrl: "data:image/png;base64,aGVsbG8=" }],
+      },
+      {
+        name: "empty arrays stay empty text",
+        output: [],
+        expected: "",
+      },
+      {
+        name: "malformed blocks and unusable image references are omitted",
+        output: [
+          null, false, 42, "", [], {},
+          { type: "input_image" },
+          { type: "input_image", image_url: "", file_id: "" },
+          ...[null, false, 42, {}, []].flatMap(value => [
+            { type: "input_image", image_url: value, file_id: "" },
+            { type: "input_image", image_url: "", file_id: value },
+          ]),
+        ],
+        expected: "",
+      },
+    ])(`${outputType}: $name`, ({ output, expected }) => {
+      const parsed = parseRequest({ ...base, input: [{ type: outputType, call_id: "image-call", output }] });
+      const result = parsed.context.messages.find(m => m.role === "toolResult");
+      expect(result?.content).toEqual(expected);
+    });
+
+    test(`${outputType}: mixed image output preserves order, caller input and raw body`, () => {
+      const output = Object.freeze([
+        { type: "input_text", text: "before" },
+        { type: "input_image", image_url: "", file_id: "file-marker" },
+        { type: "input_image", image_url: "https://example.com/kept.png", file_id: "file-ignored", detail: "original" },
+        { type: "input_image", image_url: "", file_id: "" },
+        { type: "input_text", text: "after" },
+      ].map(block => Object.freeze(block)));
+      const item = Object.freeze({ type: outputType, call_id: "image-call", output });
+      const body = Object.freeze({ ...base, input: Object.freeze([item]) });
+      const before = JSON.stringify(body);
+      const parsed = parseRequest(body);
+      expect(parsed.context.messages).toHaveLength(1);
+      const result = parsed.context.messages[0];
+      expect(result.role).toBe("toolResult");
+      expect(result.content).toEqual([
+        { type: "text", text: "before" },
+        { type: "text", text: "[image: file-marker]" },
+        { type: "image", imageUrl: "https://example.com/kept.png", detail: "high" },
+        { type: "text", text: "after" },
+      ]);
+      expect(parsed._rawBody).toBe(body);
+      expect(body.input[0]).toBe(item);
+      expect(item.output).toBe(output);
+      expect(JSON.stringify(body)).toBe(before);
+      expect(JSON.stringify(parsed._rawBody)).toBe(before);
+    });
+  }
+
   test("context_compaction with ocx1 payload replays the stored summary", () => {
     const summary = "previous work summary";
     const encrypted = "ocx1:" + Buffer.from(summary, "utf-8").toString("base64");
@@ -887,4 +971,13 @@ describe("unpaired tool result boundary (#3259)", () => {
       type: "brand_new_item_2027", foo: 1,
     }))).not.toThrow();
   });
+});
+
+test("parser leaf seams preserve tool and format contracts without importing the request parser", () => {
+  const tools = buildTools([{ type: "function", name: "missing_parameters" }]);
+  expect(tools?.[0]?.name).toBe("missing_parameters");
+  expect(parseTextFormat(undefined)).toBeUndefined();
+  for (const leaf of ["parser-content.ts", "parser-tools.ts", "parser-text-format.ts"]) {
+    expect(readFileSync(repoPath("src", "responses", leaf), "utf8")).not.toMatch(/from\s+["\x27]\.\/parser["\x27]/);
+  }
 });

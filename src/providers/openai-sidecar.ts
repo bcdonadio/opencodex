@@ -8,6 +8,7 @@ import {
   resolveCodexAuthContext,
   type CodexAccountSelectionAdmission,
   type CodexAuthContext,
+  type CodexAuthPolicyConfig,
 } from "../codex/auth-context";
 import { recordCodexUpstreamOutcome, type CodexUpstreamOutcome } from "../codex/routing";
 import { extractAccountId } from "../oauth/chatgpt";
@@ -15,6 +16,7 @@ import {
   ForwardAdmissionCredentialError,
   hasForwardableCodexBearer,
   validateForwardAdmissionCredential,
+  type DataPlaneAdmission,
 } from "../server/auth-cors";
 import type { CodexAccountMode, OcxConfig, OcxProviderConfig } from "../types";
 import {
@@ -83,7 +85,8 @@ export function listOpenAiForwardSidecarCandidates(config: OcxConfig): OpenAiFor
 
 function directSidecarHeaders(
   incomingHeaders: Headers,
-  config: OcxConfig,
+  config: CodexAuthPolicyConfig,
+  admission?: Pick<DataPlaneAdmission, "source">,
 ): Headers | undefined {
   const bearer = incomingHeaders.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
   if (!bearer) return undefined;
@@ -95,7 +98,7 @@ function directSidecarHeaders(
   // intentional ChatGPT-auth operation instead of silently reclassifying any JWT-shaped
   // provider credential as a Codex bearer.
   if (!requestedAccountId || requestedAccountId !== derivedAccountId) return undefined;
-  const selected = headersForCodexAuthContext(incomingHeaders, { kind: "main", accountId: null }, config);
+  const selected = headersForCodexAuthContext(incomingHeaders, { kind: "main", accountId: null }, config, undefined, admission);
   return selected;
 }
 
@@ -106,10 +109,13 @@ export async function resolveFirstUsableOpenAiSidecar(
   options: {
     exactAccount?: ExactOpenAiSidecarAccount;
     modelId?: string;
+    admission?: Pick<DataPlaneAdmission, "source">;
+    codexAuthPolicy?: CodexAuthPolicyConfig;
     beginCodexAccountSelection?: () => CodexAccountSelectionAdmission | undefined;
   } = {},
 ): Promise<ResolvedOpenAiForwardSidecar | undefined> {
   const { exactAccount } = options;
+  const policy = options.codexAuthPolicy ?? config;
   let callerBearerMayBeForwarded = true;
   try {
     validateForwardAdmissionCredential(incomingHeaders, config);
@@ -123,11 +129,13 @@ export async function resolveFirstUsableOpenAiSidecar(
       // credential directly even when the provider is globally Direct, and never
       // consult Pool active state, affinity, probes, or alternates.
       const authContext = await resolveCodexAuthContext(incomingHeaders, config, "pool", {
+        codexAuthPolicy: policy,
         accountId: exactAccount.accountId,
         modelId: exactAccount.modelId,
+        admission: options.admission,
         beginCodexAccountSelection: options.beginCodexAccountSelection,
       });
-      const selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, config);
+      const selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, policy, exactAccount.modelId, options.admission);
       if ((authContext.kind !== "pool" && authContext.kind !== "main-pool")
         || !isCodexAuthContextUsable(authContext, config)) {
         // Exact selection is fail-closed. A generation/runtime-state race must not fall through
@@ -157,9 +165,11 @@ export async function resolveFirstUsableOpenAiSidecar(
     }
     if (candidate.accountMode === "direct") {
       if (!callerBearerMayBeForwarded || !hasCallerCodexBearer(incomingHeaders)) continue;
-      const headers = directSidecarHeaders(incomingHeaders, config);
+      const headers = directSidecarHeaders(incomingHeaders, policy, options.admission);
       if (!headers) continue;
       const authContext = await resolveCodexAuthContext(incomingHeaders, config, "direct", {
+        codexAuthPolicy: policy,
+        admission: options.admission,
         modelId: options.modelId,
       });
       return {
@@ -169,12 +179,14 @@ export async function resolveFirstUsableOpenAiSidecar(
       };
     }
     const authContext = await resolveCodexAuthContext(incomingHeaders, config, candidate.accountMode, {
+      codexAuthPolicy: policy,
+      admission: options.admission,
       modelId: options.modelId,
       requestScopedMainCredential: callerBearerMayBeForwarded
         && hasForwardableCodexBearer(incomingHeaders, config),
       beginCodexAccountSelection: options.beginCodexAccountSelection,
     });
-    const selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, config);
+    const selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, policy, undefined, options.admission);
     if (!isCodexAuthContextUsable(authContext, config)) continue;
     return {
       ...candidate,

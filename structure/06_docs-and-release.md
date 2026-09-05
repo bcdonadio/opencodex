@@ -80,7 +80,8 @@ Those controls still have no owner, so there is no image-publish workflow or off
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
 | `.github/workflows/ci.yml` | `pull_request` to `main`/`dev`, `push` to `main`/`preview`/`dev`, or manual dispatch when runtime/package paths change | Cross-platform runtime/package quality gate. Linux runs the suite as four parallel shards (`test 1/4`–`4/4`) plus a consolidated `gates` job; macOS runs the full suite. Windows runs the full suite only on a `push` to `main`/`preview` or a manual dispatch — it is the shipping boundary, not the pull-request lane, because it was last to finish in every sampled run at roughly three times the Linux median. The aggregate `ci` job asserts `platform-windows` actually succeeded on those boundary events rather than accepting a skip. `npm-global-smoke` always remains GitHub-hosted because it mutates the global package prefix. |
-| `.github/workflows/release.yml` | Manual dispatch only | npm publish/dry-run workflow. It requires the exact `GITHUB_SHA` to have a successful Cross-platform CI run before publish or dry-run. |
+| `.github/workflows/dev-version-bump.yml` | Manual dispatch with an intended version and `pre-move` or `repair` mode | Opens the reviewed pull request that moves `dev` past a release target. The default `pre-move` mode runs before promotion and publication; explicit `repair` mode retains the post-publish catch-up path. It is neither called by `release.yml` nor triggered by publication. |
+| `.github/workflows/release.yml` | Manual dispatch only | npm publish/dry-run workflow. It requires successful Cross-platform CI for the exact `GITHUB_SHA`, requires `dev` to outrank the target, then checks the target against the freshly fetched global tag set before publish or dry-run. |
 | `.github/workflows/deploy-docs.yml` | `push` to `main` touching `docs-site/**` or the workflow, or manual dispatch | Build and publish the Astro/Starlight docs site to GitHub Pages. |
 | `.github/workflows/service-lifecycle.yml` | `pull_request` to `main`/`dev` and `push`, both filtered on the service path set (`src/service.ts`, `src/cli.ts`, `src/cli/index.ts`, `src/lib/bun-runtime.ts`, `package.json`, `bun.lock`, the workflow), or manual dispatch | Service-lifecycle smoke on three platforms: Linux systemd, macOS launchd, and Windows Scheduled Tasks. Each installs, verifies, stops via `ocx stop`, and uninstalls. The path list is kept in sync with the `release.yml` service-gate regex. |
 | `.github/workflows/enforce-pr-target.yml` | `pull_request_target` (opened, reopened, edited, labeled, unlabeled, ready_for_review, synchronize) plus default-branch `status` events filtered to successful `CodeRabbit` statuses | The `enforce-target` gate: rejects pull requests whose head ancestry sits on the `main` tip while far behind `dev`, rejects empty or malformed descriptions, requires a GUI screenshot when the title/body mentions `gui` (immediately waivable with the maintainer-controlled `gui-screenshot-waived` label; legacy maintainer comments remain compatibility evidence on later PR events), keeps contributor PRs in draft until a four-box readiness checklist is complete, verifies the CI / latest-dev / Codex+CodeRabbit-findings claims (review threads plus current-head CodeRabbit review-body findings outside the diff range), and adds a `review-ready` status label at the ready moment. CodeRabbit status SHAs must resolve to exactly one open current-head PR before writes. Stacked child PRs targeting another open PR's head skip the wrong-base gate. |
@@ -189,9 +190,26 @@ Invariants:
 ## Release workflow
 
 Package release is npm-focused. `package.json` exposes `opencodex` and `ocx`, `prepublishOnly` runs
-typecheck and GUI build, and `scripts/release.ts` now runs local typecheck, `bun test --isolate tests`, and
+typecheck and GUI build. `scripts/release.ts` accepts either an explicit version or
+`--bump patch|minor|major`; the stable and preview channels use separate resolvers in
+`scripts/version-line.ts`. It runs local typecheck, `bun test --isolate tests`, and
 `bun run privacy:scan` before the version bump, commit/push, Cross-platform CI wait, and GitHub
 Release workflow dispatch. Docs publishing is separate from npm release publishing.
+
+Opening a release starts with the `dev` pre-move. Dispatch
+`.github/workflows/dev-version-bump.yml` with the intended version, merge the pull request it opens,
+then promote and release. A no-op is valid when `dev` already outranks the target. `release.yml`
+independently enforces that readiness condition and refuses publication if the pre-move is missing.
+The design and repair history live in `devlog/_plan/260904_release_version_line/`.
+
+Opening a preview for the next core ends the current patch line. After
+`vX.Y.0-preview.*` is tagged, a fix ships as part of `X.Y.0`, not as
+`X.(Y-1).(Z+1)`. `nextStableRelease` refuses such a patch bump, and the release workflow's global
+ordering gate prevents an explicit lower version from bypassing the resolver. This is a deliberate
+policy restriction, not preservation of an unused capability: at the design audit, 103 of 143 stable
+tags had `patch > 0`, and history includes `v2.6.24-preview.20260705` followed by `v2.6.23` and
+`v2.7.39-preview.20260724` followed by `v2.7.37`. Reopening parallel patch lines would require a
+separate channel-aware invariant and release-note baseline design.
 
 ### Release notes
 
@@ -234,6 +252,11 @@ The release must fail before `npm publish` if npm, the Git tag, or the GitHub Re
 requested version. This prevents partial releases where npm is published but GitHub Release creation
 fails afterward.
 
+Two ordering checks run before publication. The version on `origin/dev` must strictly outrank the
+release target, proving the pre-move has landed. After a fresh tag fetch, the release target must also
+outrank the global release-tag set. The only equality exception is a dry run whose existing tag points
+at the exact `GITHUB_SHA`; a real publish never receives that exception.
+
 Do not force-move public version tags by default. If release metadata is already inconsistent, treat
 the version as consumed and publish the next unused patch version instead. Only rewrite a public tag
 after an explicit human decision that the public history rewrite is acceptable.
@@ -247,8 +270,9 @@ gh release view v<version>
 ```
 
 If any of these commands reports an existing artifact for the requested version, stop before
-publishing. For a non-destructive recovery, choose the next unused patch version and release that
-version through `scripts/release.ts`.
+publishing. For a non-destructive recovery, choose the next unused version that also outranks the
+global tag set and release it through `scripts/release.ts`. A patch is not available once a higher-core
+preview has closed that stable patch line.
 
 ## Cross-platform CI
 
@@ -280,9 +304,10 @@ The CI intentionally does not build docs, run coverage, or perform remote Ubuntu
 Those stay outside the default gate until a concrete regression justifies the extra runtime.
 
 The Release workflow remains manual and publish-focused. Before any dry-run or publish step, it
-checks that the exact release commit (`GITHUB_SHA`) already has a successful Cross-platform CI run.
-This keeps release runs short and makes release a deployment of a verified commit rather than a
-second CI pipeline.
+checks that the exact release commit (`GITHUB_SHA`) already has a successful Cross-platform CI run,
+that `dev` already outranks the target, and that the target passes the fresh global tag-ordering gate.
+This keeps release runs short and makes release a deployment of a verified commit after the required
+`dev` pre-move rather than a second CI pipeline.
 
 ## Remote Hub locale and release gate
 

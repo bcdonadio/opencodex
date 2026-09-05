@@ -24,7 +24,6 @@ import {
 import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
-import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
 
 const repoRoot = resolveRepoRoot();
 const CHILD = join(repoRoot, "tests", "helpers", "codex-inject-race-child.ts");
@@ -32,12 +31,12 @@ const LOCK_CHILD = join(repoRoot, "tests", "helpers", "codex-write-lock-child.ts
 // Leave teardown and assertion headroom inside the surrounding test budget. A real
 // Bun child can take several seconds to start and settle on a loaded Windows runner.
 const SPAWN_TIMEOUT_MS = SPAWN_BUDGET_MS - 5_000;
-// The contender uses a much shorter bound because production contention is
-// fail-fast (lockTimeoutMs=0). Keep the holder alive well beyond that bound so a
-// slow child launch cannot turn an intended busy result into a post-release apply.
-const CONTENTION_CHILD_TIMEOUT_MS = 10_000;
-const CONTENTION_HOLDER_MARGIN_MS = 5_000;
-const CONTENTION_HOLD_MS = SPAWN_TIMEOUT_MS - CONTENTION_HOLDER_MARGIN_MS;
+// Lock acquisition is fail-fast, not cold module loading. The holder must outlive
+// marker observation plus the entire contender, and all three boots need a budget.
+const CONTENTION_READY_MS = SPAWN_TIMEOUT_MS;
+const CONTENTION_REAP_MS = 5_000;
+const CONTENTION_HOLD_MS = CONTENTION_READY_MS + SPAWN_TIMEOUT_MS + CONTENTION_REAP_MS;
+const CONTENTION_TEST_MS = 3 * SPAWN_TIMEOUT_MS + 3 * CONTENTION_REAP_MS;
 
 setDefaultTimeout(SPAWN_BUDGET_MS);
 
@@ -309,6 +308,7 @@ describe("the lock is on the production path", () => {
    * must not have written its candidate bytes.
    */
   test("a held lock makes real injection report busy and write nothing", async () => {
+    const fixtureRoot = root;
     seedNative();
     // Establish the coordinator first: a clean home has no row, and the holder
     // needs one to contend over.
@@ -327,31 +327,46 @@ describe("the lock is on the production path", () => {
           timeoutMs: 5_000,
           holdMarker,
           releaseMarker,
-          // Keep a slow Windows contender from outliving the hold, while staying
-          // below the 40s child bound and the 45s test budget.
+          // Explicit release is normal; the ceiling also covers a delayed observer
+          // and cold contender without releasing the lock underneath its assertion.
           holdMs: CONTENTION_HOLD_MS,
         }),
       },
       stdout: "pipe",
       stderr: "pipe",
     });
+    const holderDone = Promise.all([
+      holder.exited,
+      new Response(holder.stdout).text(),
+      new Response(holder.stderr).text(),
+    ]).then(([exitCode, stdout, stderr]) => ({ exitCode, stdout, stderr }));
+    const waitForHolder = async (timeoutMs: number) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          holderDone,
+          new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    };
 
     let primaryFailed = false;
     let primaryError: unknown;
     let cleanupFailed = false;
     let cleanupError: unknown;
     try {
-      // Each poll iteration spawns a real child; the hold marker comes from another one.
-      // 8-19 s per boot on windows-latest (run 33930757649).
-      const deadline = Date.now() + INTERNAL_DEADLINE_MS;
+      const deadline = Date.now() + CONTENTION_READY_MS;
       while (!existsSync(holdMarker) && Date.now() < deadline) {
-        requireChildSuccess(runChild(["--eval", "Bun.sleepSync(20)"], process.env), "hold-marker wait child");
+        if (holder.exitCode !== null) throw new Error(`lock holder exited before readiness: ${JSON.stringify(await holderDone)}`);
+        await Bun.sleep(20);
       }
-      expect(existsSync(holdMarker)).toBeTrue();
+      if (!existsSync(holdMarker)) throw new Error("lock holder did not publish its ready marker");
 
       // PROCESS-UNIQUE bytes: a different port means different candidate bytes, so
       // the loser's work is identifiable rather than assumed.
-      const contender = runInject(20200, 0, CONTENTION_CHILD_TIMEOUT_MS);
+      const contender = runInject(20200, 0);
 
       expect(contender.success).toBeFalse();
       expect(contender.retryable).toBeTrue();
@@ -374,7 +389,18 @@ describe("the lock is on the production path", () => {
         // Always release and reap the holder, including when marker wait,
         // contender startup, or an assertion fails. Otherwise teardown races a
         // live child that still owns the coordinator database on Windows.
-        await holder.exited;
+        const ended = await waitForHolder(CONTENTION_REAP_MS);
+        if (ended === null) {
+          holder.kill("SIGKILL");
+          const killed = await waitForHolder(CONTENTION_REAP_MS);
+          if (killed === null) {
+            const index = cleanup.indexOf(fixtureRoot);
+            if (index >= 0) cleanup.splice(index, 1);
+            throw new Error(`lock holder could not be joined; retained fixture ${fixtureRoot}`);
+          }
+          throw new Error(`lock holder required forced termination: ${JSON.stringify(killed)}`);
+        }
+        if (ended.exitCode !== 0) throw new Error(`lock holder failed: ${JSON.stringify(ended)}`);
       } catch (error) {
         if (!cleanupFailed) {
           cleanupFailed = true;
@@ -382,9 +408,10 @@ describe("the lock is on the production path", () => {
         }
       }
     }
+    if (primaryFailed && cleanupFailed) throw new AggregateError([primaryError, cleanupError], "contention and holder cleanup failed");
     if (primaryFailed) throw primaryError;
     if (cleanupFailed) throw cleanupError;
-  }, SPAWN_BUDGET_MS);
+  }, CONTENTION_TEST_MS);
 });
 
 describe("pre-substrate home adoption", () => {

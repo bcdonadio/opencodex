@@ -55,6 +55,7 @@
 import { existsSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 
 import { compareReleaseTags } from "./release-notes";
+import { nextDevelopmentVersion } from "./version-line";
 
 /**
  * `compareReleaseTags` wants a tag. The workflow supplies `github.event.release.tag_name`
@@ -103,9 +104,7 @@ export function decideDevVersion(released: string, current: string): BumpDecisio
   if (!rel) throw new Error(`released version is not parseable: ${JSON.stringify(released)}`);
   if (!parseVersion(current)) throw new Error(`current version is not parseable: ${JSON.stringify(current)}`);
 
-  const candidate = rel.prerelease === null
-    ? `${rel.major}.${rel.minor + 1}.0`
-    : `${rel.major}.${rel.minor}.${rel.patch}`;
+  const candidate = nextDevelopmentVersion(released);
 
   // Nothing to do when dev is already clear of the RELEASED version. That is the real
   // question — the detector in tests/ci-workflows/release-version-line.test.ts compares dev against

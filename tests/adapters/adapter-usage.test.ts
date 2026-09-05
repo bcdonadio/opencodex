@@ -4,6 +4,7 @@ import { createAnthropicAdapter as createAnthropicAdapterProduction } from "../.
 import { createGoogleAdapter as createGoogleAdapterProduction } from "../../src/adapters/google";
 import { createOpenAIChatAdapter as createOpenAIChatAdapterProduction } from "../../src/adapters/openai-chat";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
+import type { OcxAssistantMessage, OcxContentPart, OcxToolResultMessage } from "../../src/types";
 
 const createAnthropicAdapter = (...args: Parameters<typeof createAnthropicAdapterProduction>) =>
   withTestTranslatorBudget(createAnthropicAdapterProduction(...args));
@@ -709,6 +710,85 @@ describe("anthropic tool result history repair", () => {
         { type: "tool_result", tool_use_id: "call_1", content: "first" },
         { type: "text", text: "[tool_result without adjacent tool_use: read_file (call_1)]\nduplicate", cache_control: { type: "ephemeral" } },
       ],
+    });
+  });
+
+  describe("orphan image carriers", () => {
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const httpsUrl = "https://example.test/image.png";
+    const call: OcxAssistantMessage = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_1", name: "view_image", arguments: {} }],
+      model: "claude-sonnet",
+      timestamp: 0,
+    };
+    const paired: OcxToolResultMessage = {
+      role: "toolResult", toolCallId: "call_1", toolName: "view_image",
+      content: "first", isError: false, timestamp: 0,
+    };
+    const validResult = { type: "tool_result", tool_use_id: "call_1", content: "first" };
+    const missingResult = {
+      type: "tool_result", tool_use_id: "call_1",
+      content: "[missing tool_result for this tool_use in history]", is_error: true,
+    };
+
+    for (const source of [
+      { name: "data", imageUrl: `data:image/png;base64,${png}`, wire: { type: "base64", media_type: "image/png", data: png } },
+      { name: "HTTPS", imageUrl: httpsUrl, wire: { type: "url", url: httpsUrl } },
+    ]) {
+      for (const mixed of [false, true]) {
+        const image: OcxContentPart = { type: "image", imageUrl: source.imageUrl };
+        const content: OcxContentPart[] = mixed
+          ? [{ type: "text", text: "" }, { type: "text", text: "before" }, image, { type: "text", text: "" }, { type: "text", text: "after" }]
+          : [image];
+        const orphan: OcxToolResultMessage = { ...paired, toolCallId: "orphan_call", content };
+        const expectedParts = mixed
+          ? [{ type: "text", text: "before" }, { type: "image", source: source.wire }, { type: "text", text: "after" }]
+          : [{ type: "image", source: source.wire }];
+
+        for (const scenario of [
+          { name: "standalone", history: [orphan], carrierIndex: 0, resultPrefix: [], orphanId: "orphan_call", pairedResults: [] },
+          { name: "duplicate adjacent", history: [call, paired, { ...orphan, toolCallId: "call_1" }], carrierIndex: 1, resultPrefix: [validResult], orphanId: "call_1", pairedResults: [validResult] },
+          // Orphan arrives BEFORE the valid result: tool_result blocks must still lead.
+          { name: "unmatched adjacent", history: [call, orphan, paired], carrierIndex: 1, resultPrefix: [validResult], orphanId: "orphan_call", pairedResults: [validResult] },
+          { name: "outstanding other call", history: [call, orphan], carrierIndex: 1, resultPrefix: [missingResult], orphanId: "orphan_call", pairedResults: [missingResult] },
+          { name: "user barrier", history: [call, { role: "user", content: "barrier", timestamp: 0 }, { ...orphan, toolCallId: "call_1" }], carrierIndex: 3, resultPrefix: [], orphanId: "call_1", pairedResults: [missingResult] },
+        ]) {
+          test(`${scenario.name} preserves ${source.name} ${mixed ? "mixed/empty text" : "image-only"} content without pairing it`, async () => {
+            const body = await replay(scenario.history);
+            expect(body.messages).toHaveLength(scenario.carrierIndex + 1);
+            const carrier = body.messages[scenario.carrierIndex];
+            expect(carrier.role).toBe("user");
+            expect(carrier.content).toMatchObject([
+              ...scenario.resultPrefix,
+              { type: "text", text: `[tool_result without adjacent tool_use: view_image (${scenario.orphanId})]` },
+              ...expectedParts,
+            ]);
+            const blocks = body.messages.flatMap(message =>
+              Array.isArray(message.content) ? message.content as Record<string, unknown>[] : []);
+            const results = blocks.filter(block => block.type === "tool_result");
+            expect(results).toHaveLength(scenario.pairedResults.length);
+            expect(results).toMatchObject(scenario.pairedResults);
+            const uses = blocks.filter(block => block.type === "tool_use");
+            expect(uses.map(block => block.id)).toEqual(scenario.name === "standalone" ? [] : ["call_1"]);
+            const text = blocks.filter(block => block.type === "text").map(block => block.text);
+            expect(text).not.toContain("");
+            expect(JSON.stringify(text)).not.toContain(png);
+            expect(JSON.stringify(text)).not.toContain(source.imageUrl);
+            if (scenario.name === "user barrier") {
+              expect(body.messages[2]).toMatchObject({ role: "user", content: [{ type: "text", text: "barrier" }] });
+            }
+          });
+        }
+      }
+    }
+
+    test("image-free arrays keep the exact legacy orphan text", async () => {
+      const body = await replay([{ ...paired, content: [{ type: "text", text: "" }, { type: "text", text: "plain" }] }]);
+      expect(body.messages).toMatchObject([{
+        role: "user",
+        content: [{ type: "text", text: '[tool_result without adjacent tool_use: view_image (call_1)]\n[{"type":"text","text":""},{"type":"text","text":"plain"}]' }],
+      }]);
     });
   });
 

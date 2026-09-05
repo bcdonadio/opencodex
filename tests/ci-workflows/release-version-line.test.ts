@@ -23,6 +23,8 @@ const repoRoot = resolveRepoRoot();
  * Commit 32529c2b2 repaired precisely this by hand once, and nothing has enforced it
  * since. The assertion reads the local tag set rather than the npm registry, so it needs
  * no network and no edit at each release.
+ * The durable repair now moves `dev` forward before the release instead of catching it
+ * up afterward.
  *
  * compareReleaseTags comes from scripts/release-notes and not from scripts/release: the
  * latter parses process.argv and calls process.exit at module scope, so importing it from

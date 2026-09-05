@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { OcxConfig } from "../src/types";
-import { handleResponses } from "../src/server/responses";
+import type { OcxConfig } from "../../src/types";
+import { handleResponses } from "../../src/server/responses";
 import {
   codexHeaders,
   originalFetch,
   providerResponse,
-} from "./helpers/agent-task-recovery";
+} from "../helpers/agent-task-recovery";
 
 const reservedCollaborationTools = [
   {

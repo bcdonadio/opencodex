@@ -71,7 +71,7 @@ describe("loopback listener policy view", () => {
       "await handleClaudeCountTokens(req, config, policy)",
     );
     expect(source.slice(messagesStart, chatStart)).toContain(
-      "await handleClaudeMessages(req, config, logCtx, { requestId, start, turnAdmissionLease }, policy)",
+      "await handleClaudeMessages(req, config, logCtx, { requestId, start, turnAdmissionLease, admission }, policy)",
     );
     for (const branch of [
       source.slice(countTokensStart, messagesStart),

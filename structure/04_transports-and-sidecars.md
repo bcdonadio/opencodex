@@ -297,19 +297,38 @@ different custom destination does not inherit its upstream assumptions. Object-f
 also narrow the decision by inbound protocol and authentication mode; an auth-scoped default must
 not leak from a subscription transport into an API-key or forwarded-credential route.
 
-xAI keeps `openai-chat` as both its provider-wide compatibility wire and the default for Grok 4.5
-and 4.6 subscription traffic. The official Grok CLI catalog declares those models as Responses
-backends, but the current gateway rejects opaque reasoning continuation and compaction state on
-later turns. Operators may still select `openai-responses` with an explicit model adapter override
-while that compatibility work continues. The OAuth route drops caller-owned `service_tier` even
-when an override selects Responses, and native Responses OAuth 401 replay remains available to
-explicit opt-ins. API-key requests, translated Chat/Anthropic callers, and other Grok models retain
-their existing wire and tier policy.
+xAI keeps `openai-chat` as its provider-wide compatibility wire, but Grok 4.5/4.6 subscription
+Responses requests default to native `openai-responses`. Existing namespace, hosted-search and
+reasoning-replay normalization remains in force. The reserved `xai` OAuth transport is name-pinned
+to the Grok CLI gateway even if its saved base URL differs; custom provider IDs do not inherit this
+default. API-key requests, translated Chat/Anthropic defaults and other Grok models retain their
+existing wire and tier policy. OAuth still drops caller-owned `service_tier` on either wire.
 
-The dashboard's xAI Responses opt-in switch is the GUI surface of this same `modelAdapters` lane,
-not a separate tier policy. One write sets or clears the Grok 4.5 and 4.6 entries together while
-preserving unrelated overrides; a pre-existing one-entry state is reported as mixed until the next
-switch write normalizes both.
+Native Responses participates in the same pre-stream OAuth HTTP-429 account rotation as the Chat
+bridge. It uses the existing account quorum, cooldown and three-rotation request cap, refreshes
+the complete credential/transport/replay identity, and attributes usage to the serving account.
+Single-account installs do not retry; a missing alternate credential preserves the original error.
+
+Startup removes legacy Grok 4.5/4.6 Chat overrides once and persists the provider-owned
+`xaiResponsesDefaultVersion` marker. Later explicit Chat choices survive restarts. The migration
+rebases under the config mutation lock; unavailable persistence warns and uses an isolated in-memory
+projection without overwriting invalid disk state. Read-only config loading does not migrate.
+
+The dashboard's Chat Completions switch and `ocx provider edit xai --xai-chat on|off` share the
+existing `modelAdapters` lane. On writes Chat for both models; off writes Responses. Unrelated
+overrides remain intact. The legacy PATCH field `xaiResponsesOptIn` retains its direction:
+true selects Responses, false now writes explicit Chat rather than deleting entries. Its derived
+`xaiResponsesOptInState` reflects effective Responses-inbound routing, including registry defaults;
+only genuinely different effective wires report mixed. A switch write also records the migration
+version (without lowering a future version), and provider-form overwrites retain omitted choices.
+
+Native routed Responses code-mode turns also receive the shared result-emission contract in both
+instructions and the lowered exec input description: a bare awaited helper return is discarded by
+the host, so visible results need `text(...)` or `notify(...)` in that first call. Paired exec outputs
+containing only an empty completion/failure wrapper use the shared explanatory annotation. The
+whole result is examined; populated text, image/file parts, unpaired results, shell-only catalogs,
+compaction and OpenAI-operated destinations are untouched. This does not rewrite valid JavaScript
+or reconstruct output that the code-mode host never emitted.
 
 [Decision Log]
 - 목적과 의도: Keep Codex hosted web search usable on xAI's public Responses endpoint without forwarding private OpenAI-only fields that xAI rejects.
@@ -396,6 +415,39 @@ at 4 MiB and the WS producer queue at 8 MiB. Overflow closes the upstream and
 the downstream relay emits its terminal `response.failed` event plus `[DONE]`.
 Pre-open HTTP fallback remains unmarked and follows the ordinary configured
 stream path.
+
+At the canonical ChatGPT destination, HTTP Responses Lite intent is copied into
+the native per-frame WS metadata key, and the routing hint is derived from the
+final outgoing model/tier. No caller identity is synthesized. Noncanonical
+opt-in gateways keep their own metadata policy. Oversized/unsupported-runtime
+HTTP fallback preserves the original HTTP body and Lite header.
+
+Canonical WS quota and response metadata preceding the first Responses event
+are projected into bounded, allowlisted HTTP headers before the response is
+committed. Later quota observations update only the captured serving account;
+they cannot retroactively change HTTP headers already sent to the client.
+Control frames remain bounded, and provider credential/cookie headers are not
+forwarded. Once a WS create may have been sent, a missing prelude, overflow or
+disconnect settles as an errored SSE body rather than a retryable fetch failure,
+so HTTP fallback cannot duplicate that inference. A standalone no-response
+exchange has a 30-second prelude deadline in addition to the upgrade deadline.
+These are transport-fidelity guarantees, not a provider-billing guarantee.
+
+Eligible complete-input creates can retain a canonical upstream socket within
+one selected account, credential, thread and turn. Model/tier and immutable
+handshake headers must also match. Turn-state and turn-metadata headers are
+projected into their same-name per-frame metadata slots; explicit body values win.
+The pool retains at most 32 sockets, expires idle sockets after 30 seconds, and
+retires a socket after five minutes or 32 successful exchanges (after active work
+finishes). Cancellation, errors, idle unsolicited frames and shutdown dispose it.
+A busy key uses a separate one-shot connection rather than interleaving requests.
+
+This is connection reuse, not native incremental-input synthesis: complete HTTP
+inputs are never trimmed and no previous response id is invented. Explicit
+continuation IDs, named lanes, warmup and background requests remain outside this
+pool. A fresh credential-dispatch guard runs before every warm send. Per-exchange
+listeners, response/item correlation and metadata ownership detach before release.
+No pool timer or shutdown registration exists before eligible traffic activates it.
 
 Translated response request-log tracking and the heartbeat relay also reuse
 `createSseInspector`. This keeps every client-facing SSE observation path on
@@ -1427,7 +1479,7 @@ surface is listed here so a maintainer can find the owner without grepping:
 | Adapter execution support | `src/adapters/run-turn-queue.ts`, `src/adapters/tool-catalog-nudge.ts`, `src/adapters/identity.ts`, `src/adapters/image.ts`, `src/adapters/upstream-http-error.ts` | Shared machinery: turn ordering, tool-catalog nudging, client fingerprinting, image conversion, upstream error normalization. |
 | Cursor (beyond the sections above) | `src/adapters/cursor/live-transport.ts`, `src/adapters/cursor/http1-bidi.ts`, `src/adapters/cursor/live-models.ts`, `src/adapters/cursor/transport-retry.ts`, `src/adapters/cursor/mcp-manager.ts`, `src/adapters/cursor/thread-continuity.ts`, `src/adapters/cursor/checkpoint-store.ts` | Thread continuity is the point: a retry must not start a new Cursor thread, and a validated checkpoint must not rebuild the full root history. HTTP/2 remains the default; an explicit `http1.1`/`h1` pin maps the bidi run onto Cursor's `RunSSE` receive stream plus sequenced `BidiAppend` sends, and applies to live discovery too. |
 | Claude Messages | `src/server/claude-messages.ts` | Routed translation, a native Anthropic passthrough branch, and `count_tokens`. |
-| Chat Completions inbound | `src/server/chat-completions.ts`, `src/chat/` | Inbound translation onto the same routing pipeline. |
+| Chat Completions inbound | `src/server/chat-completions.ts`, `src/chat/` | Inbound translation onto the same routing pipeline. The content mapper preserves image URLs and supported detail, including screenshot-bearing tool results; target adapters own image placement on their wire. Image-free tool results stay strings. |
 | Hosted search relay | `src/server/search.ts` | Direct relay; distinct from the web-search sidecar loop below. |
 | Image/video generation loop | `src/images/loop.ts`, `src/images/plan.ts`, `src/images/fulfill.ts`, `src/images/xai-client.ts`, `src/images/xai-video-client.ts`, `src/images/artifacts.ts` | A provider-returned image URL is downloaded into a local artifact once, then served locally; warnings stay URL-free because provider CDN URLs may embed credentials. |
 | GitHub Copilot | `src/providers/xai-transport.ts` (`resolveProviderTransport`), `src/providers/github-copilot-transport.ts` | `resolveProviderTransport` selects the Copilot transport when the routed provider name is `github-copilot`; the Copilot module then resolves its headers and base URL, and the registry seeds the provider row and model fallback. |
@@ -1443,6 +1495,12 @@ surface is listed here so a maintainer can find the owner without grepping:
 - 선택한 방식: Keep presence-driven reactive recovery, apply proactive precedence only before dispatch, and use quota ordering for disabled-pool Anthropic recovery.
 - 다른 대안 대신 이 방식을 선택한 이유: This preserves the merged product decision without letting disabled proactive settings influence a retry, and it restores the published narrow-over-broad precedence in both directions.
 - 장점, 단점 및 영향: 429 recovery stays automatic for operators with multiple eligible accounts; operators who require no automatic account switch must keep one eligible account, which the GUI and public docs state explicitly.
+
+Cursor external-model continuations attach data-URL screenshots from the contiguous active
+tool-result batch through the existing image preparation and selected-context owners. The batch
+shares the 12-image active cap. Bounded source labels are emitted in active user-action text so
+root pruning cannot erase attachment provenance; the same text participates in token estimation.
+Native Composer/MCP behavior and text-only historical replay remain unchanged.
 
 ## Sidecars
 

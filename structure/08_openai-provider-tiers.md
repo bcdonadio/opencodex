@@ -84,6 +84,43 @@ completion markers nor retry delay; quota reads remain available. Main refresh c
 shared credential ownership, then prepared credentials and restrictions are rechecked. Lifecycle
 cleanup uses the dependency-free quota-auto-refresh state leaf, avoiding a reconciliation cycle.
 
+The account-pool dashboard exposes one bulk control under Advanced settings, not per-card
+rows. It applies both reported 5-hour and weekly windows to every current main/added account;
+new accounts do not inherit opt-in. The existing granular settings API remains authoritative.
+UI writes are serialized, followed by a settings read; partial failures preserve the intended
+ON/OFF action for explicit retry. OFF also clears unavailable windows with stale enabled flags.
+
+Exact `gpt-reserve` has a separate process-local quota scope. Only global/default and shared
+ordinary scopes can receive a generic quota-recovery claim; ordinary success cannot clear Reserve.
+Effective Desktop authless compatibility adds only configured main-selector Reserve catalog rows,
+never global/native/API-key or added-account discovery. Prefer observed Reserve metadata; a
+Luna-derived fallback is explicitly marked and never becomes an observed native source on resync.
+Loopback injection and catalog eligibility share the pure `loopback-target` predicates.
+Runtime eligibility is separate: only trusted receiving-listener admission with source loopback,
+the opt-in flag and non-client role activates compatibility. A secondary listener's existence does
+not affect public ingress. Admission flows through Responses, compact, WS handshake/turns,
+translated replay and helper planning; missing admission is not inferred from a URL or Host header.
+Claude's replay keeps its existing sidecar/routing overrides but passes the original live policy
+reference separately. Policy flags/role/pause remain current through materialization and dispatch;
+the replay snapshot must not hide a policy change while a send waits for pacing.
+
+Reserve availability belongs to `reserve-availability`, not the catalog. An already-owned main
+token/writer makes a capability-aware fixed WHAM GET, bounded to8s/64KiB. Ordinary disallowed,
+Luna Reserve banner and exactly one allowed Reserve bucket are all required. Optional account/user
+echoes must match. The max60s grant and single-flight are bound privately to the exact credential,
+identity generation and a WeakMap-backed proof; refresh, revocation or identity replacement cannot
+reuse a spread/copied proof. Passive usage only revokes. Ordinary quota publication uses an injected
+callback to the existing validated parser/store; no runtime import of the quota/config facade is
+introduced into this leaf. Quota types live in `quota-types` to avoid a cache/facade type cycle.
+Final materializers require proof based on the exact model plus transport-scoped live config,
+including custom-named canonical-forward routes that synthesize a main context. The injected
+transport guard rechecks actual headers after pacing, at every HTTP attempt and WebSocket create;
+expiry/revocation fails closed without renewal inside a send. Nested retry evidence preserves local
+policy errors instead of recording a network failure. A missing proof does not fall through to
+ordinary Luna or another account. Native vision/search helpers and standalone search refuse Reserve
+under this compatibility opt-in; ordinary helper/default behavior is unchanged.
+Upstream remains the entitlement authority.
+
 `codexMainAccountHardLock` is a separate opt-in local admission policy, off by default.
 It blocks newly admitted identity-matched main-account requests at 99% of the 5h/short window
 when present, otherwise the weekly window (monthly for monthly-only accounts). It does not take

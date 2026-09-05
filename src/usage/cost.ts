@@ -35,6 +35,13 @@ import {
 /** Published long-context pricing band (#908). */
 export type ContextTierName = "long";
 
+export interface PriceResolutionOptions {
+  /** False for unresolved slash selectors; exact provider/user rates still apply. */
+  allowModelLevelFallback?: boolean;
+}
+
+type AttemptCostInput = Pick<PersistedUsageAttempt, "ordinal" | "provider" | "model" | "usage" | "usageStatus" | "tierOutcome"> & PriceResolutionOptions;
+
 /**
  * Service-tier provenance. `effectiveServiceTier()` collapses these with `??`,
  * but provider-specific long-context rules need to know WHICH source supplied Fast.
@@ -178,6 +185,7 @@ export function resolveMatchedPrice(
   modelId: string,
   overlays: readonly ExpectedPriceOverlay[] = EXPECTED_PRICE_OVERLAYS,
   userOverlays: readonly ExpectedPriceOverlay[] = activeUserCostOverlays(),
+  options: PriceResolutionOptions = {},
 ): MatchedPrice | null {
   // User-configured overlays are keyed by the EXACT configured provider name.
   // A provider that literally exists in config.providers keeps its own pricing
@@ -201,14 +209,14 @@ export function resolveMatchedPrice(
   // user overlays get a NEW array identity + version bump on every config refresh,
   // so memoized rows never go stale.
   if (overlays === EXPECTED_PRICE_OVERLAYS && userOverlays === activeUserCostOverlays()) {
-    const cacheKey = `${userCostOverlayVersion()} ${provider} ${modelId}`;
+    const cacheKey = `${userCostOverlayVersion()} ${options.allowModelLevelFallback !== false} ${provider} ${modelId}`;
     if (!priceMemo.has(cacheKey)) {
       if (priceMemo.size >= 512) priceMemo.clear();
-      priceMemo.set(cacheKey, resolveMatchedPriceInner(provider, modelId, overlays, userOverlays));
+      priceMemo.set(cacheKey, resolveMatchedPriceInner(provider, modelId, overlays, userOverlays, options));
     }
     return priceMemo.get(cacheKey)!;
   }
-  return resolveMatchedPriceInner(provider, modelId, overlays, userOverlays);
+  return resolveMatchedPriceInner(provider, modelId, overlays, userOverlays, options);
 }
 
 const priceMemo = new Map<string, MatchedPrice | null>();
@@ -223,14 +231,15 @@ function resolveMatchedPriceInner(
   modelId: string,
   overlays: readonly ExpectedPriceOverlay[],
   userOverlays: readonly ExpectedPriceOverlay[],
+  options: PriceResolutionOptions,
 ): MatchedPrice | null {
-  const direct = resolveMatchedPriceExact(provider, modelId, overlays, userOverlays);
+  const direct = resolveMatchedPriceExact(provider, modelId, overlays, userOverlays, options);
   if (direct) return direct;
   // Antigravity historical/wire ids often lack an exact overlay; fall back to the
   // picker/call base model so collapsed usage rows still get a price.
   if (provider === "google-antigravity" || provider.startsWith("google-antigravity")) {
     const base = canonicalAntigravityUsageModel(modelId);
-    if (base !== modelId) return resolveMatchedPriceExact(provider, base, overlays, userOverlays);
+    if (base !== modelId) return resolveMatchedPriceExact(provider, base, overlays, userOverlays, options);
   }
   return null;
 }
@@ -245,6 +254,7 @@ function resolveMatchedPriceExact(
   modelId: string,
   overlays: readonly ExpectedPriceOverlay[],
   userOverlays: readonly ExpectedPriceOverlay[],
+  options: PriceResolutionOptions,
 ): MatchedPrice | null {
   // User-configured provider overlay wins over every compiled catalog: the
   // operator's explicit price is authoritative for the ~$ estimate.
@@ -280,7 +290,7 @@ function resolveMatchedPriceExact(
   }
   const overlay = findExpectedPriceOverlay(provider, modelId, overlays);
   if (!overlay || !validCost4(overlay.cost4) || !hasNonZeroCost(overlay.cost4)) {
-    return resolveModelLevelPrice(provider, modelId);
+    return options.allowModelLevelFallback === false ? null : resolveModelLevelPrice(provider, modelId);
   }
   if (overlay.status === "unverified") return null;
   return {
@@ -526,7 +536,7 @@ function isOpenRouterPriorityLowerBound(
  * missing so combos can fail closed.
  */
 export function estimateAttemptCost(
-  attempt: Pick<PersistedUsageAttempt, "ordinal" | "provider" | "model" | "usage" | "usageStatus" | "tierOutcome">,
+  attempt: AttemptCostInput,
   overlays: readonly ExpectedPriceOverlay[] = EXPECTED_PRICE_OVERLAYS,
   serviceTier?: ServiceTierInput,
   userOverlays: readonly ExpectedPriceOverlay[] = activeUserCostOverlays(),
@@ -534,7 +544,7 @@ export function estimateAttemptCost(
   if (!attempt.usage) return null;
   const tokens = normalizeCostTokens(attempt.usage);
   if (!tokens) return null;
-  const price = resolveMatchedPrice(attempt.provider, attempt.model, overlays, userOverlays);
+  const price = resolveMatchedPrice(attempt.provider, attempt.model, overlays, userOverlays, attempt);
   if (!price) return null;
   const attemptServiceTier = attempt.tierOutcome
     ? serviceTierContextFromOutcome(attempt.tierOutcome)
@@ -566,7 +576,7 @@ export function estimateAttemptCost(
  * attempt is unpriced or unnormalizable, return null rather than a partial sum.
  */
 export function estimateComboCost(
-  attempts: readonly Pick<PersistedUsageAttempt, "ordinal" | "provider" | "model" | "usage" | "usageStatus" | "tierOutcome">[],
+  attempts: readonly AttemptCostInput[],
   overlays: readonly ExpectedPriceOverlay[] = EXPECTED_PRICE_OVERLAYS,
   serviceTier?: ServiceTierInput,
   userOverlays: readonly ExpectedPriceOverlay[] = activeUserCostOverlays(),
@@ -614,6 +624,7 @@ export function estimateRequestCost(
     usage?: OcxUsage;
     usageStatus: UsageStatus;
     serviceTier?: ServiceTierInput;
+    allowModelLevelFallback?: boolean;
   },
   overlays: readonly ExpectedPriceOverlay[] = EXPECTED_PRICE_OVERLAYS,
   userOverlays: readonly ExpectedPriceOverlay[] = activeUserCostOverlays(),
@@ -621,7 +632,7 @@ export function estimateRequestCost(
   if (!input.usage) return null;
   const tokens = normalizeCostTokens(input.usage);
   if (!tokens) return null;
-  const price = resolveMatchedPrice(input.provider, input.model, overlays, userOverlays);
+  const price = resolveMatchedPrice(input.provider, input.model, overlays, userOverlays, input);
   if (!price) return null;
   const [tieredCost4, contextTier, contextPriorityLowerBound] = applyContextTier(
     price.cost4, input.provider, input.model, input.usage.inputTokens, input.serviceTier,

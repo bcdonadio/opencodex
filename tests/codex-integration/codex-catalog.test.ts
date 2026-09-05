@@ -3032,6 +3032,17 @@ function mergeObservedForTest(
 }
 
 describe("Codex catalog routed normalization", () => {
+  test("pending re-registration cannot recover ON rows from a degraded old catalog", () => {
+    const old = { ...nativeTemplate(), slug: "vendor/model-0", owned_by: "vendor", opencodex_catalog_kind: CODEX_PROVIDER_MODEL_CATALOG_KIND };
+    const input = {
+      catalogModels: [old], routedEntries: [],
+      gatheredProviderNames: new Set(["vendor"]), degradedProviderNames: new Set(["vendor"]),
+    };
+    expect(mergeObservedForTest(input).some(entry => entry.slug === "vendor/model-0")).toBe(true);
+    expect(mergeObservedForTest({ ...input, pendingProviderNames: new Set(["vendor"]) })
+      .some(entry => entry.slug === "vendor/model-0")).toBe(false);
+  });
+
   test("does not reuse a routed native alias as the native catalog template", () => {
     const routedAlias = {
       ...nativeTemplate(),

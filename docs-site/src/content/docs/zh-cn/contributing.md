@@ -70,11 +70,22 @@ GitHub Actions 有意只保留必要步骤：
 
 发布请使用 helper：
 
+
+运行 helper 前，先确定目标发布版本，并从默认分支运行
+`.github/workflows/dev-version-bump.yml`，设置 `intended-version=<version>` 和
+`mode=pre-move`。审核生成的 PR 并合并到 `dev`，再提升到 `main` 或 `preview`，
+最后运行 helper。如果 `dev` 的版本已经高于目标版本，工作流会返回
+`changed=false`，无需创建版本更新 PR。发布仍要求对应发布提交的 CI 全部通过。
+
 ```bash
 bun run release <version>           # commit/push 版本 bump；publish workflow 默认 dry-run
+bun run release --bump minor        # 根据 tag 与 npm channel 推导下一个 patch、minor 或 major 版本
 bun run release <version> --publish # 确认 CI-gated dry-run 后真正 publish
 bun run release:watch               # 观察最新的 Release workflow run
 ```
+
+可用 `--bump patch|minor|major` 代替显式版本。较高 core 的 preview tag 建立后，`--bump patch`
+会拒绝继续旧的 stable patch 版本线；请将修复包含在已开启的 preview core 中发布。
 
 ## 分支
 

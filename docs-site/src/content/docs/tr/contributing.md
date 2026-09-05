@@ -106,11 +106,24 @@ GitHub Actions iş akışları kasıtlı olarak yalın tutulur:
 
 Sürümler için yardımcıyı kullanın:
 
+
+Helper’ı çalıştırmadan önce hedef sürümü belirleyin ve varsayılan daldan
+`.github/workflows/dev-version-bump.yml` iş akışını `intended-version=<version>`
+ve `mode=pre-move` ile başlatın. Açılan PR’ı inceleyip `dev` dalına birleştirin;
+ardından `main` veya `preview` dalına yükseltip helper’ı çalıştırın. `dev` sürümü
+zaten hedef sürümden ilerideyse iş akışı `changed=false` döndürür ve sürüm PR’ı
+gerekmez. Yayın için tam sürüm commit’inin CI kontrollerinden geçmesi hâlâ zorunludur.
+
 ```bash
 bun run release <version>           # sürüm artışını commit/push eder; yayınlama iş akışı varsayılan olarak kuru çalıştırmadır (dry-run)
+bun run release --bump minor        # tag'ler ve npm kanallarından sonraki patch, minor veya major sürümü türetir
 bun run release <version> --publish # CI onaylı kuru çalıştırma anlaşıldıktan sonra yayınlayın
 bun run release:watch               # en yeni Sürüm iş akışı çalıştırmasını izleyin
 ```
+
+Açık bir sürüm yerine `--bump patch|minor|major` kullanılabilir. Daha yüksek bir core için preview
+tag'i açıldıktan sonra `--bump patch`, eski stable patch hattını sürdürmeyi reddeder; düzeltmeyi açık
+preview core içinde yayınlayın.
 
 ## Dallar
 
@@ -254,4 +267,3 @@ Değişikliğinizi kanıtlayan en dar komutu çalıştırın — tipler için `b
 typecheck`, davranış için odaklanmış bir `bun test tests/<ad>.test.ts` veya
 çalışma zamanı probu, ardından etkilenen yüzeye uygun daha geniş kapılar.
 opencodex büyük partiler yerine küçük, doğrulanabilir commit'leri tercih eder.
-

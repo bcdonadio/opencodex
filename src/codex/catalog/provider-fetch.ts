@@ -1,4 +1,5 @@
 import { effectiveProviderAlias, effectiveProviderAliasDecision } from "../../providers/default-aliases";
+import { initialModelSelectionPending } from "../../providers/initial-model-selection";
 import { execFileSync } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
@@ -2016,6 +2017,7 @@ export function filterCatalogVisibleModels(
     }
   }
   return models.filter(m => {
+    if (initialModelSelectionPending(config.providers[m.provider])) return false;
     const nativeAlias = m.provider === COMBO_NAMESPACE && m.nativeAlias === true;
     // disabledModels may be stored raw (canonical) or encoded (legacy UI writes).
     for (const stored of disabled) {

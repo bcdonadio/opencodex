@@ -6,6 +6,21 @@ description: Sağlayıcı girdileri, kimlik doğrulama, uç noktalar, model kata
 Bir sağlayıcı, opencodex'e bir modelin nerede yaşadığını, hangi hat adaptörünü
 konuştuğunu ve isteklerin nasıl doğrulandığını söyler.
 
+## İlk kayıtta model seçimi
+
+Yeni OAuth dışı bağlantılar, modelleri göstermeden önce güvenilir bir model listesini bekler. Models sekmesinde en az 20 benzersiz model satırı varsa tüm model anahtarları başlangıçta OFF olur; sağlayıcının kendisi ACTIVE kalır. Gerçekte OAuth veya ChatGPT girişi kullanan bağlantılar varsayılanlarını korur.
+
+Bu kural yalnızca yeni sağlayıcı kaydında uygulanır. Güncellemeler, yeniden giriş ve anahtar değişimi mevcut seçimleri sıfırlamaz. İlk ayardan sonra gerekli modelleri Models üzerinden veya aşağıdaki CLI komutlarıyla açın. Sonradan gelen yeni modellerin ayrı politikası değişmez. `<model-id>` yerine listedeki bir ID yazın.
+
+```sh
+ocx models live --provider openrouter
+ocx models enable '<model-id>'
+ocx models disable '<model-id>'
+ocx models provider openrouter on
+```
+
+Arayüzde kayıt veya OAuth girişi tamamlanınca Models sayfasını açan bir bilgilendirme penceresi gösterilir. CLI model yönetimi komutlarını yazdırır; JSON sonraki adımları içerir. `--no-wait` tamamlanmış değil, bekleyen girişi bildirir. Canlı model komutlarından önce proxy’yi `ocx start` ile başlatın.
+
 ## Sağlayıcı ile ilgili üst düzey alanlar
 
 | Alan | Tip | Varsayılan | Anlamı |

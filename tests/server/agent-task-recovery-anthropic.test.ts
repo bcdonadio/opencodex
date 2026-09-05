@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { OcxConfig } from "../src/types";
-import { resetAgentTaskRecoveryState } from "../src/server/responses/agent-task-recovery";
+import type { OcxConfig } from "../../src/types";
+import { resetAgentTaskRecoveryState } from "../../src/server/responses/agent-task-recovery";
 import {
   codexHeaders,
   encryptedInput,
   originalFetch,
   post,
   recoverySse,
-} from "./helpers/agent-task-recovery";
+} from "../helpers/agent-task-recovery";
 
 function anthropicRecoveryConfig(): OcxConfig {
   return {
@@ -145,8 +145,12 @@ describe("payload-only encrypted agent recovery on Anthropic", () => {
     expect(response.status).toBe(200);
     expect(recoveryFetches).toBe(1);
     expect(anthropicBodies).toHaveLength(1);
-    expect(anthropicBodies[0]).toContain(bootstrap);
-    expect(anthropicBodies[0]).toContain(assignment);
+    const forwarded = JSON.parse(anthropicBodies[0]!);
+    expect(forwarded.messages[0]).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: bootstrap }],
+    });
+    expect(forwarded.messages.at(-1)).toMatchObject({ role: "user", content: assignment });
     expect(anthropicBodies[0]).not.toContain("tool_result without adjacent tool_use");
     expect(anthropicBodies[0]).not.toContain("gAAAA");
   });

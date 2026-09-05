@@ -36,6 +36,7 @@ type ModelRow = {
   namespaced?: string;
   native?: boolean;
   disabled?: boolean;
+  initialSelectionPending?: boolean;
   custom?: boolean;
   customId?: string;
   displayName?: string;
@@ -49,7 +50,7 @@ async function live(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   const rows = await runtimeRequest<ModelRow[]>("/api/models", {}, deps);
   const filtered = provider ? rows.filter(row => row.provider === provider) : rows;
   printData(filtered, wantsJson, filtered.map(row => {
-    const flags = [row.native ? "native" : "routed", row.custom ? "custom" : "", row.disabled ? "disabled" : "enabled"].filter(Boolean);
+    const flags = [row.native ? "native" : "routed", row.custom ? "custom" : "", row.initialSelectionPending ? "initial discovery pending" : row.disabled ? "disabled" : "enabled"].filter(Boolean);
     return `${row.namespaced ?? `${row.provider}/${row.id}`}  [${flags.join(", ")}]`;
   }));
 }

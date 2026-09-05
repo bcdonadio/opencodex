@@ -112,8 +112,8 @@ describe("surfaces that never parsed an effort row", () => {
   });
 });
 
-describe("the flag stays off by default at the request path", () => {
-  test("a --fast selector is an ordinary unknown model when the flag is unset", () => {
+describe("explicit opt-out at the request path", () => {
+  test("a --fast selector is an ordinary unknown model when the flag is false", () => {
     const config = configWith({ fixture: provider({ models: ["m"], supportsServiceTier: true }) }, { fastRows: false });
     const rows = parseSyntheticRowId("m--fast", config);
     expect(rows.fastRow).toBeNull();
@@ -121,4 +121,13 @@ describe("the flag stays off by default at the request path", () => {
     // rather than being silently reinterpreted.
     expect(rows.effortRow).toBeNull();
   });
+});
+
+
+
+test("omitted Fast flag resolves selectors on ordinary and Fast-only ingress", () => {
+  const config = configWith({ fixture: provider({ models: ["m"], supportsServiceTier: true }) });
+  delete config.fastRows;
+  expect(parseSyntheticRowId("fixture/m--fast", config).fastRow).toEqual({ baseId: "fixture/m" });
+  expect(parseFastOnlyRowId(config, () => "fixture/m--fast")).toEqual({ baseId: "fixture/m" });
 });

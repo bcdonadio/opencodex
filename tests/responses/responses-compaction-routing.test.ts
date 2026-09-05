@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses, handleResponsesCompact } from "../../src/server/responses";
 import * as adapterResolveModule from "../../src/server/adapter-resolve";
+import * as visionModule from "../../src/vision";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import {
   CODEX_QUOTA_PROBE_INTERVAL_MS,
@@ -1535,6 +1536,101 @@ test("a no-eligible policy compact request persists the evaluation trace", async
  * passthrough / routed compaction build from _rawBody, never reading context.messages — they
  * already degrade an unpaired output to "[tool output for unknown call]" on their own.
  */
+describe("computer screenshot output translation boundary", () => {
+  const screenshot = {
+    type: "computer_call_output", call_id: "call_screen",
+    output: { type: "computer_screenshot", image_url: "https://example.com/screen.png" },
+  };
+  const ordinaryImage = {
+    type: "message", role: "user",
+    content: [{ type: "input_image", image_url: "https://example.com/ordinary.png" }],
+  };
+
+  test("rejects before an otherwise active vision description", async () => {
+    const config = keyProviderConfig({ adapter: "openai-chat", noVisionModels: ["model"] });
+    config.visionSidecar = { enabled: true, backend: "routed", model: "vision/seeing" };
+    config.providers.vision = { adapter: "openai-chat", baseUrl: "https://vision.example/v1", apiKey: "test-key" };
+    // Routed vision needs no live OpenAI account for this controlled description dependency.
+    const resolveAuth = spyOn(visionModule, "shouldResolveOpenAiVisionSidecar").mockReturnValue(false);
+    const describe = spyOn(visionModule, "describeImagesInPlace").mockImplementation(async () => {});
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches++;
+      return jsonResponse({ id: "chat_vision_control", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    }) as typeof fetch;
+    try {
+      const control = await handleResponses(compactionRequest({
+        model: "gw/model", stream: false, input: [ordinaryImage],
+      }), config, { model: "", provider: "" });
+      expect(control.status).toBe(200);
+      await control.text();
+      expect(describe).toHaveBeenCalledTimes(1);
+      expect(fetches).toBe(1);
+      describe.mockClear();
+      fetches = 0;
+      const rejected = await handleResponses(compactionRequest({
+        model: "gw/model", stream: false, input: [screenshot, ordinaryImage],
+      }), config, { model: "", provider: "" });
+      expect(rejected.status).toBe(400);
+      await rejected.text();
+      expect(describe).not.toHaveBeenCalled();
+      expect(fetches).toBe(0);
+    } finally {
+      describe.mockRestore();
+      resolveAuth.mockRestore();
+    }
+  });
+
+  test("rejects translated computer outputs before upstream or vision work", async () => {
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches++;
+      throw new Error("unsupported computer output must not reach upstream");
+    }) as typeof fetch;
+    const res = await handleResponses(compactionRequest({
+      model: "gw/model", stream: false, input: [screenshot, ordinaryImage],
+    }), keyProviderConfig({ adapter: "openai-chat" }), { model: "", provider: "" });
+    expect(res.status).toBe(400);
+    const json = await res.json() as { error: { type: string; message: string } };
+    expect(json.error.type).toBe("invalid_request_error");
+    expect(json.error.message).toBe("computer_call_output requires a Responses passthrough route; send screenshots as user input_image content on translated routes.");
+    expect(JSON.stringify(json)).not.toContain("example.com");
+    expect(fetches).toBe(0);
+  });
+
+  test("keeps the exact screenshot output on a Responses passthrough route", async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      captured.push(JSON.parse(String(init?.body)));
+      return jsonResponse(completedPayload("ok"));
+    }) as typeof fetch;
+    const res = await handleResponses(compactionRequest({
+      model: "gw/model", stream: false, input: [screenshot, ordinaryImage],
+    }), keyProviderConfig(), { model: "", provider: "" });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.input).toEqual([screenshot, ordinaryImage]);
+  });
+
+  test("ordinary user image input remains accepted by translated routes", async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      captured.push(JSON.parse(String(init?.body)));
+      return jsonResponse({ id: "chat_probe", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    }) as typeof fetch;
+    const res = await handleResponses(compactionRequest({
+      model: "gw/model", stream: false, input: [ordinaryImage],
+    }), keyProviderConfig({ adapter: "openai-chat" }), { model: "", provider: "" });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.messages).toEqual([{ role: "user", content: [
+      { type: "image_url", image_url: { url: "https://example.com/ordinary.png" } },
+    ] }]);
+  });
+});
+
 describe("unpaired tool result boundary (#3259)", () => {
   function unpairedBody(item: Record<string, unknown>): Record<string, unknown> {
     return {

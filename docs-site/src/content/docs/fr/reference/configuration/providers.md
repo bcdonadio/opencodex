@@ -6,6 +6,21 @@ description: Entrées du fournisseur, authentification, points de terminaison, c
 Un fournisseur indique à opencodex où se trouve un modèle, quel adaptateur de protocole il utilise et comment les requêtes sont
 authentifiées.
 
+## Sélection des modèles à l’inscription
+
+Une nouvelle connexion sans OAuth attend une liste de modèles fiable avant de les exposer. Si l’onglet Models contient au moins 20 lignes distinctes, tous les interrupteurs de modèles sont initialement OFF ; le fournisseur reste ACTIVE. Les connexions utilisant effectivement OAuth ou la connexion ChatGPT conservent leurs valeurs par défaut.
+
+Cette règle ne s’applique qu’à l’inscription d’un nouveau fournisseur. Les mises à jour, reconnexions et remplacements de clé préservent les choix existants. Après l’initialisation, activez les modèles souhaités dans Models ou avec les commandes ci-dessous. La politique distincte concernant les nouveaux modèles reste inchangée. Remplacez `<model-id>` par un ID de la liste.
+
+```sh
+ocx models live --provider openrouter
+ocx models enable '<model-id>'
+ocx models disable '<model-id>'
+ocx models provider openrouter on
+```
+
+Après une inscription ou une connexion OAuth dans l’interface, une boîte de dialogue permet d’ouvrir Models. La CLI affiche les commandes de gestion des modèles, aussi présentes dans les étapes suivantes du JSON. `--no-wait` indique une connexion en attente, pas terminée. Lancez le proxy avec `ocx start` avant les commandes de modèles en direct.
+
 ## Champs de premier niveau liés aux fournisseurs
 
 | Champ | Type | Par défaut | Signification |

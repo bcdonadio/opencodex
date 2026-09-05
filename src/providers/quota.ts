@@ -48,6 +48,7 @@ import {
   type CodexCapacityQuota,
 } from "./codex-capacity";
 import type {
+  AccountQuotaMode,
   ProviderQuota,
   ProviderQuotaCreditsUsd,
   ProviderQuotaWindow,
@@ -65,6 +66,7 @@ import {
   readPersistedAccountQuotas,
   schedulePersistAccountQuotas,
 } from "./account-quota-disk";
+import { clearProviderApiKeyQuotaCache, mapQuotaRoster, readProviderApiKeyQuotas, type ProviderApiKeyQuota } from "./quota-key-accounts";
 
 export type { ProviderQuota, ProviderQuotaCreditsUsd, ProviderQuotaWindow } from "./quota-types";
 
@@ -100,6 +102,7 @@ const XAI_CREDITS_URL = `${XAI_BILLING_URL}?format=credits`;
 /** Keep a failed probe's previous row at most this long before dropping it. */
 const LAST_GOOD_MAX_AGE_MS = CODEX_CAPACITY_MAX_QUOTA_AGE_MS;
 const nativeMainReportGenerations = new WeakMap<ProviderQuotaReport, number>();
+const accountReportCurrent = new WeakMap<ProviderQuotaReport, () => boolean>();
 let providerQuotaBeforePublishForTests: (() => void | Promise<void>) | null = null;
 
 /** Test-only seam for identity/config invalidation after probes but before publication. */
@@ -163,6 +166,7 @@ let invalidationEpoch = 0;
 export function clearProviderQuotaCache(): void {
   cache = null;
   clearCachedProviderQuotas();
+  clearProviderApiKeyQuotaCache();
   invalidationEpoch += 1;
 }
 
@@ -1182,7 +1186,8 @@ function tagNativeMainReport(
 
 function isProviderQuotaReportCurrent(value: ProviderQuotaReport): boolean {
   const generation = nativeMainReportGenerations.get(value);
-  return generation === undefined || isMainAccountIdentityGenerationLive(generation);
+  return (generation === undefined || isMainAccountIdentityGenerationLive(generation))
+    && (accountReportCurrent.get(value)?.() ?? true);
 }
 
 async function fetchChatGptForwardQuota(
@@ -1303,6 +1308,7 @@ export function parseXaiCreditsResponse(value: unknown): { percent: number; rese
 async function fetchXaiWeeklyCredits(accessToken: string, userId: string): Promise<ProviderQuota | null> {
   try {
     const response = await fetch(XAI_CREDITS_URL, {
+      redirect: "error",
       headers: {
         Accept: "application/json",
         Authorization: `Bearer ${accessToken}`,
@@ -1326,16 +1332,11 @@ async function fetchXaiWeeklyCredits(accessToken: string, userId: string): Promi
   }
 }
 
-async function fetchXaiQuota(provider: string): Promise<ProviderQuotaReport | null> {
-  let accessToken: string;
-  try {
-    accessToken = await getValidAccessToken("xai");
-  } catch {
-    return null;
-  }
+async function fetchXaiQuota(provider: string, context: { accessToken: string; upstreamAccountId?: string }): Promise<ProviderQuotaReport | null> {
+  const { accessToken } = context;
 
   // Prefer the SuperGrok weekly credits window that actually gates prompting (#1283).
-  const userId = getCredential("xai")?.accountId?.trim() || xaiUserIdFromAccessToken(accessToken);
+  const userId = context.upstreamAccountId?.trim() || xaiUserIdFromAccessToken(accessToken);
   if (userId) {
     const weekly = await fetchXaiWeeklyCredits(accessToken, userId);
     if (weekly) return report(provider, "xai:grok-billing-credits", weekly);
@@ -1344,6 +1345,7 @@ async function fetchXaiQuota(provider: string): Promise<ProviderQuotaReport | nu
   // Legacy monthly dollar pool — retained when weekly is unavailable.
   try {
     const response = await fetch(XAI_BILLING_URL, {
+      redirect: "error",
       headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
@@ -1546,8 +1548,12 @@ type AccountQuotaCacheEntry = {
   quota: ProviderQuota | null;
   /** Last probe failed (429 / network / expired login); still may hold last-good quota. */
   unavailable?: true;
+  /** Private new-reader identity; never persisted or serialized. */
+  identity?: string;
+  isCurrent?: () => boolean;
 };
 const accountQuotaCache = new Map<string, AccountQuotaCacheEntry>();
+let explicitAccountEpoch = 0;
 
 /**
  * Seed the cache from the last run, once.
@@ -1591,11 +1597,21 @@ export interface ProviderAccountQuota {
   quota: ProviderQuota | null;
   /** Set when the probe could not reach upstream (expired login, 429, network). */
   unavailable?: true;
+  isCurrent?: () => boolean;
 }
 
 /** Providers whose per-account quota can be probed. Extend as other OAuth APIs are covered. */
 export function supportsPerAccountQuota(provider: string): boolean {
-  return provider === "anthropic" || provider === "kiro" || provider === "google-antigravity";
+  return provider === "anthropic" || provider === "kiro" || provider === "google-antigravity"
+    || explicitAccountReader(provider);
+}
+
+function explicitAccountReader(provider: string): boolean {
+  return provider === "xai" || provider === "cursor" || provider === "kimi" || provider === "command-code";
+}
+
+export function providerOAuthAccountQuotaMode(provider: string): AccountQuotaMode {
+  return hasPassiveAccountQuota(provider) ? "passive" : supportsPerAccountQuota(provider) ? "probe" : "unsupported";
 }
 
 function accountCacheKey(provider: string, accountId: string): string {
@@ -1608,6 +1624,7 @@ function accountCacheKey(provider: string, accountId: string): string {
  */
 export function getCachedProviderAccountQuota(provider: string, accountId: string): ProviderQuota | null {
   const entry = accountQuotaCache.get(accountCacheKey(provider, accountId));
+  if (entry?.isCurrent && !entry.isCurrent()) return null;
   return entry?.quota ?? null;
 }
 
@@ -1629,11 +1646,8 @@ export function setCachedProviderAccountQuotaForTests(
  * Providers whose per-account quota is OBSERVED in-band, never probed.
  *
  * Deliberately separate from `supportsPerAccountQuota` rather than folded into it. That
- * predicate gates `fetchAccountQuota`, whose fallback branch sends any
- * non-Kiro/non-Antigravity bearer to Anthropic's usage endpoint — so adding `meta-muse`
- * there without a dedicated branch would ship a Meta credential to Anthropic. And even
- * with a branch it would be the wrong predicate: it means "this provider can be probed",
- * and Meta publishes no quota endpoint to probe.
+ * predicate gates explicit upstream readers. Meta publishes no quota endpoint, so it
+ * remains a cache-only observation even when every probe reader is account-scoped.
  */
 export function hasPassiveAccountQuota(provider: string): boolean {
   return provider === "meta-muse";
@@ -1739,6 +1753,7 @@ export function resetProviderQuotaReconcileStateForTests(): void {
 
 /** Drop cached per-account rows (all, or just one provider's). */
 export function clearAccountQuotaCache(provider?: string): void {
+  explicitAccountEpoch += 1;
   if (!provider) {
     accountQuotaCache.clear();
     accountQuotaInflight.clear();
@@ -1783,11 +1798,115 @@ async function getTokenForAccountQuotaProbe(provider: string, accountId: string)
   return getValidAccessTokenForAccount(provider, accountId);
 }
 
+function explicitQuotaConfig(provider: string, configured?: OcxProviderConfig): OcxProviderConfig | undefined {
+  if (configured) return configured;
+  const entry = getProviderRegistryEntry(provider);
+  return entry ? { adapter: entry.adapter, baseUrl: entry.baseUrl, authMode: "oauth" } : undefined;
+}
+
+function explicitQuotaIdentity(provider: string, accountId: string, configured?: OcxProviderConfig): string | undefined {
+  const credential = getAccountCredential(provider, accountId);
+  const target = explicitQuotaConfig(provider, configured);
+  if (!credential || !target) return undefined;
+  return createHash("sha256").update(JSON.stringify([
+    provider, accountId, credential.access, credential.refresh, credential.expires,
+    credential.accountId, credential.projectId, credential.source,
+    target.adapter, target.baseUrl, target.authMode, target.disabled === true,
+  ])).digest("hex");
+}
+
+function explicitQuotaDestination(provider: string, config: OcxProviderConfig): boolean {
+  if (config.disabled === true || config.authMode !== "oauth") return false;
+  if (provider === "kimi") return isCanonicalKimiCodeBaseUrl(config.baseUrl);
+  if (provider === "command-code") return isCanonicalCommandCodeBaseUrl(config.baseUrl);
+  // These readers use fixed canonical billing origins, never config.baseUrl.
+  return provider === "xai" || provider === "cursor";
+}
+
+async function readExplicitAccountQuota(provider: string, accountId: string, configured?: OcxProviderConfig): Promise<{
+  result: ProviderQuotaProbeResult;
+  identity: string | undefined;
+  isCurrent: () => boolean;
+} | null> {
+  const target = explicitQuotaConfig(provider, configured);
+  if (!target || !explicitQuotaDestination(provider, target)) return null;
+  const config = { ...target };
+  const epoch = explicitAccountEpoch;
+  const accessToken = await getTokenForAccountQuotaProbe(provider, accountId);
+  const credential = getAccountCredential(provider, accountId);
+  if (!credential || credential.access !== accessToken) return null;
+  // Pair the post-renewal credential with the destination captured before renewal.
+  const identity = explicitQuotaIdentity(provider, accountId, config);
+  const isCurrent = () => epoch === explicitAccountEpoch
+    && identity === explicitQuotaIdentity(provider, accountId, configured);
+  if (!isCurrent()) return null;
+  let result: ProviderQuotaProbeResult;
+  switch (provider) {
+    case "xai": result = await fetchXaiQuota(provider, { accessToken, upstreamAccountId: credential.accountId }); break;
+    case "cursor": result = await fetchCursorQuota(provider, accessToken); break;
+    case "kimi": result = await fetchKimiQuota(provider, config, accessToken); break;
+    case "command-code": result = await fetchCommandCodeQuota(provider, config, accessToken); break;
+    default: return null;
+  }
+  return { result, identity, isCurrent };
+}
+
+async function fetchExplicitAccountQuota(provider: string, accountId: string, force: boolean, configured?: OcxProviderConfig): Promise<AccountQuotaCacheEntry> {
+  const key = accountCacheKey(provider, accountId);
+  const identity = explicitQuotaIdentity(provider, accountId, configured);
+  const previous = accountQuotaCache.get(key);
+  const cached = identity && previous?.identity === identity && previous.isCurrent?.() ? previous : undefined;
+  if (!force && cached && Date.now() - cached.ts < ACCOUNT_QUOTA_TTL_MS
+    && (!cached.quota || Date.now() - cached.quota.updatedAt < LAST_GOOD_MAX_AGE_MS)) return cached;
+  const flightKey = `${key}\u0000${identity ?? "missing"}`;
+  const running = accountQuotaInflight.get(flightKey);
+  if (running) return running;
+  const epoch = explicitAccountEpoch;
+  const lastGood = cached?.quota && Date.now() - cached.quota.updatedAt < LAST_GOOD_MAX_AGE_MS ? cached.quota : null;
+  const flight = (async (): Promise<AccountQuotaCacheEntry> => {
+    let read: Awaited<ReturnType<typeof readExplicitAccountQuota>> = null;
+    try { read = await readExplicitAccountQuota(provider, accountId, configured); } catch { /* unavailable */ }
+    const isCurrent = read?.isCurrent ?? (() => epoch === explicitAccountEpoch && !!identity
+      && identity === explicitQuotaIdentity(provider, accountId, configured));
+    const result = read?.result;
+    const current = epoch === explicitAccountEpoch && isCurrent();
+    const quota = current && result && typeof result !== "symbol" ? result.quota : null;
+    const empty = result === AUTHORITATIVE_EMPTY_QUOTA;
+    const entry: AccountQuotaCacheEntry = {
+      ts: Date.now(),
+      quota: quota ?? (current && result !== TERMINAL_QUOTA_FAILURE && !empty
+        && lastGood && Date.now() - lastGood.updatedAt < LAST_GOOD_MAX_AGE_MS ? lastGood : null),
+      ...(!current || (!quota && !empty) ? { unavailable: true as const } : {}),
+      identity: read?.identity ?? identity,
+      isCurrent: () => epoch === explicitAccountEpoch && isCurrent(),
+    };
+    if (entry.isCurrent?.()) accountQuotaCache.set(key, entry);
+    return entry;
+  })().finally(() => { if (accountQuotaInflight.get(flightKey) === flight) accountQuotaInflight.delete(flightKey); });
+  accountQuotaInflight.set(flightKey, flight);
+  return flight;
+}
+
+async function fetchExplicitCurrentQuota(provider: string, config: OcxProviderConfig, liveConfig: OcxConfig): Promise<ProviderQuotaProbeResult> {
+  const id = getAccountSet(provider)?.activeAccountId;
+  if (!id) return null;
+  const read = await readExplicitAccountQuota(provider, id, config);
+  if (!read) return null;
+  const isCurrent = () => liveConfig.providers[provider] === config
+    && read.isCurrent() && getAccountSet(provider)?.activeAccountId === id;
+  if (!isCurrent()) return TERMINAL_QUOTA_FAILURE;
+  if (read.result && typeof read.result !== "symbol") accountReportCurrent.set(read.result, isCurrent);
+  return read.result;
+}
+
 async function fetchAccountQuota(
   provider: string,
   accountId: string,
   forceRefresh: boolean,
+  providerConfig?: OcxProviderConfig,
 ): Promise<AccountQuotaCacheEntry> {
+  if (!supportsPerAccountQuota(provider)) return { ts: Date.now(), quota: null, unavailable: true };
+  if (explicitAccountReader(provider)) return fetchExplicitAccountQuota(provider, accountId, forceRefresh, providerConfig);
   const key = accountCacheKey(provider, accountId);
   const writerGeneration = captureConfigGeneration();
   const cached = accountQuotaCache.get(key);
@@ -1817,8 +1936,10 @@ async function fetchAccountQuota(
           const projectId = getAccountCredential(provider, accountId)?.projectId;
           if (!projectId) throw new Error("antigravity account has no project id");
           quota = await fetchAntigravityUsageQuota(token, projectId);
-        } else {
+        } else if (provider === "anthropic") {
           quota = await fetchAnthropicUsageQuota(token);
+        } else {
+          return { ts: Date.now(), quota: null, unavailable: true };
         }
       }
       if (!quota) {
@@ -1871,18 +1992,27 @@ async function fetchAccountQuota(
 export async function fetchProviderAccountQuotas(
   provider: string,
   forceRefresh = false,
+  providerConfig?: OcxProviderConfig,
 ): Promise<ProviderAccountQuota[]> {
   if (!supportsPerAccountQuota(provider)) return [];
   const set = getAccountSet(provider);
   if (!set) return [];
-  return await Promise.all(set.accounts.map(async account => {
-    const entry = await fetchAccountQuota(provider, account.id, forceRefresh);
-    return {
+  return mapQuotaRoster(set.accounts, async account => {
+    const entry = await fetchAccountQuota(provider, account.id, forceRefresh, providerConfig);
+    const result: ProviderAccountQuota = {
       accountId: account.id,
       quota: entry.quota,
       ...(entry.unavailable ? { unavailable: true as const } : {}),
     };
-  }));
+    if (!explicitAccountReader(provider)) return result;
+    const identity = entry.identity;
+    Object.defineProperty(result, "isCurrent", { value: () => {
+      if (entry.isCurrent) return entry.isCurrent();
+      const credential = getAccountCredential(provider, account.id);
+      return !!credential && (!identity || explicitQuotaIdentity(provider, account.id, providerConfig) === identity);
+    } });
+    return result;
+  });
 }
 
 function normalizedBaseUrl(value: string): string | null {
@@ -2001,10 +2131,10 @@ function parseKimiQuotaPayload(value: unknown): ProviderQuota | null {
   return hasQuotaRows(quota) ? quota : null;
 }
 
-async function resolveKimiQuotaBearer(config: OcxProviderConfig): Promise<string | null> {
+async function resolveKimiQuotaBearer(config: OcxProviderConfig, accountId?: string): Promise<string | null> {
   if (config.authMode === "oauth") {
     try {
-      return await getValidAccessToken("kimi");
+      return accountId ? await getTokenForAccountQuotaProbe("kimi", accountId) : null;
     } catch {
       return null;
     }
@@ -2016,13 +2146,13 @@ async function resolveKimiQuotaBearer(config: OcxProviderConfig): Promise<string
   return primary || null;
 }
 
-async function fetchKimiQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
+async function fetchKimiQuota(provider: string, config: OcxProviderConfig, accessToken: string): Promise<ProviderQuotaReport | null> {
   // Never release credentials to a user-edited or lookalike provider host.
   if (!isCanonicalKimiCodeBaseUrl(config.baseUrl)) return null;
-  const accessToken = await resolveKimiQuotaBearer(config);
   if (!accessToken) return null;
   const response = await fetch(KIMI_CODE_USAGE_URL, {
     headers: { Accept: "application/json", Authorization: `Bearer ${accessToken}` },
+    redirect: "error",
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
@@ -2109,10 +2239,10 @@ async function fetchCommandCodeSpend(
 }
 
 /** OAuth access token or ACTIVE Provider-API key for the Command Code quota probe. */
-async function resolveCommandCodeQuotaBearer(config: OcxProviderConfig): Promise<string | null> {
+async function resolveCommandCodeQuotaBearer(config: OcxProviderConfig, accountId?: string): Promise<string | null> {
   if (config.authMode === "oauth") {
     try {
-      return await getValidAccessToken("command-code");
+      return accountId ? await getTokenForAccountQuotaProbe("command-code", accountId) : null;
     } catch {
       return null;
     }
@@ -2127,10 +2257,9 @@ async function resolveCommandCodeQuotaBearer(config: OcxProviderConfig): Promise
  * usage view uses (windowLimits.fiveHour / windowLimits.weekly), plus soft
  * whoami (team orgId scoping) and subscription-scoped spend for creditsUsd.
  */
-async function fetchCommandCodeQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
+async function fetchCommandCodeQuota(provider: string, config: OcxProviderConfig, bearer: string): Promise<ProviderQuotaProbeResult> {
   // Never release credentials to a user-edited or lookalike provider host.
   if (!isCanonicalCommandCodeBaseUrl(config.baseUrl)) return null;
-  const bearer = await resolveCommandCodeQuotaBearer(config);
   if (!bearer) return null;
   const whoamiBody = await fetchCommandCodeJson(COMMAND_CODE_WHOAMI_URL, bearer);
   const whoami = asRecord(whoamiBody?.data) ?? whoamiBody;
@@ -2170,13 +2299,7 @@ async function fetchCommandCodeQuota(provider: string, config: OcxProviderConfig
 }
 
 /** Cursor included usage via api2.cursor.sh (Bearer from OAuth) — unofficial, may change. */
-async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport | null> {
-  let accessToken: string;
-  try {
-    accessToken = await getValidAccessToken("cursor");
-  } catch {
-    return null;
-  }
+async function fetchCursorQuota(provider: string, accessToken: string): Promise<ProviderQuotaReport | null> {
 
   const authHeaders = {
     Accept: "application/json",
@@ -2189,6 +2312,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
   try {
     const periodRes = await fetch("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage", {
       method: "POST",
+      redirect: "error",
       headers: {
         ...authHeaders,
         "Content-Type": "application/json",
@@ -2257,6 +2381,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
   try {
     const summaryRes = await fetch("https://api2.cursor.sh/api/usage/summary", {
       headers: authHeaders,
+      redirect: "error",
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (summaryRes.ok) {
@@ -2286,6 +2411,7 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
 
   const response = await fetch("https://api2.cursor.sh/auth/usage", {
     headers: authHeaders,
+    redirect: "error",
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) return null;
@@ -2595,6 +2721,54 @@ async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig
   });
 }
 
+type KeyQuotaReader = (name: string, provider: OcxProviderConfig) => Promise<ProviderQuotaProbeResult>;
+
+/** Same selector drives cheap capabilities and uncached reads; never resolves credentials. */
+function keyQuotaReaderForProvider(name: string, provider: OcxProviderConfig): KeyQuotaReader | null {
+  if (provider.disabled === true || (provider.authMode ?? "key") !== "key") return null;
+  if (isCanonicalKimiCodeBaseUrl(provider.baseUrl)) {
+    return async (id, config) => {
+      const bearer = await resolveKimiQuotaBearer(config);
+      return bearer ? fetchKimiQuota(id, config, bearer) : null;
+    };
+  }
+  if (name === "commandcode" && isCanonicalCommandCodeBaseUrl(provider.baseUrl)) {
+    return async (id, config) => {
+      const bearer = await resolveCommandCodeQuotaBearer(config);
+      return bearer ? fetchCommandCodeQuota(id, config, bearer) : null;
+    };
+  }
+  if (registryEntryForProviderDestination(provider)?.id === "opencode-go") return fetchOpenCodeGoQuota;
+  if (isCanonicalA6apiBaseUrl(provider.baseUrl)) return fetchA6apiQuota;
+  if (name === "openrouter" && isCanonicalOpenRouterBaseUrl(provider.baseUrl)) return fetchOpenRouterQuota;
+  if (name === "deepseek" && isCanonicalDeepSeekBaseUrl(provider.baseUrl)) return fetchDeepSeekQuota;
+  if (name === "cline-pass" && isCanonicalClineBaseUrl(provider.baseUrl)) return fetchClineQuota;
+  if (isCanonicalOllamaCloudBaseUrl(provider.baseUrl ?? getProviderRegistryEntry(name)?.baseUrl)) return fetchOllamaCloudQuota;
+  if (["zai", "glm", "glm-cn", "zhipu-bigmodel-coding"].includes(name) && isCanonicalZaiBaseUrl(provider.baseUrl)) return fetchZaiQuota;
+  if (["minimax", "minimax-cn"].includes(name) && isCanonicalMinimaxBaseUrl(provider.baseUrl)) return fetchMinimaxQuota;
+  if (name === "moonshot" && isCanonicalMoonshotBaseUrl(provider.baseUrl)) return fetchMoonshotQuota;
+  if (name === "venice" && isCanonicalVeniceBaseUrl(provider.baseUrl)) return fetchVeniceQuota;
+  if (name === "synthetic" && isCanonicalSyntheticBaseUrl(provider.baseUrl)) return fetchSyntheticQuota;
+  if (name === "deepinfra" && isCanonicalDeepInfraBaseUrl(provider.baseUrl)) return fetchDeepInfraQuota;
+  if (name === "neuralwatt" && isCanonicalNeuralwattBaseUrl(provider.baseUrl)) return fetchNeuralwattQuota;
+  return null;
+}
+
+export function providerApiKeyQuotaMode(name: string, provider: OcxProviderConfig): AccountQuotaMode {
+  return keyQuotaReaderForProvider(name, provider) ? "probe" : "unsupported";
+}
+
+export async function fetchProviderApiKeyQuotas(config: OcxConfig, name: string, forceRefresh = false): Promise<ProviderApiKeyQuota[]> {
+  const provider = config.providers[name];
+  if (!provider || !keyQuotaReaderForProvider(name, provider)) return [];
+  return readProviderApiKeyQuotas(config, name, forceRefresh, async (isolatedProvider, isolatedConfig) => {
+    const result = await maybeFetchProviderQuota(name, isolatedProvider, isolatedConfig, false);
+    if (result === TERMINAL_QUOTA_FAILURE) return { kind: "terminal" };
+    if (result === AUTHORITATIVE_EMPTY_QUOTA) return { kind: "empty" };
+    return result ? { kind: "quota", quota: result.quota } : { kind: "unavailable" };
+  });
+}
+
 async function maybeFetchProviderQuota(
   name: string,
   provider: OcxProviderConfig,
@@ -2607,78 +2781,15 @@ async function maybeFetchProviderQuota(
     if (isBuiltInChatGptForwardProvider(name, provider)) {
       return fetchChatGptForwardQuota(config, name, provider, forceRefresh, prefetchedCodexSnapshot);
     }
-    if (provider.authMode === "oauth" && name === "xai") return fetchXaiQuota(name);
+    if (provider.authMode === "oauth" && explicitAccountReader(name)) return await fetchExplicitCurrentQuota(name, provider, config);
     if (provider.authMode === "oauth" && name === "anthropic") return fetchAnthropicQuota(name);
-    if (provider.authMode === "oauth" && name === "cursor") return fetchCursorQuota(name);
     if (provider.authMode === "oauth" && name === "google-antigravity") return fetchAntigravityQuota(name, provider);
     if (provider.authMode === "oauth" && name === "kiro") return fetchKiroQuota(name);
     // Passive providers (meta-muse): Meta publishes no quota endpoint, so there is no
     // probe to run — the row is the active account's last in-band observation.
     if (provider.authMode === "oauth" && hasPassiveAccountQuota(name)) return fetchPassiveProviderQuota(name);
-    // Kimi Code `/usages` accepts OAuth or coding-plan API keys, but only on the canonical
-    // host and only for real key auth — forward/local modes carry no credential of ours.
-    if (provider.authMode === "oauth" && name === "kimi") return fetchKimiQuota(name, provider);
-    if (provider.authMode === "key" && isCanonicalKimiCodeBaseUrl(provider.baseUrl)) {
-      return fetchKimiQuota(name, provider);
-    }
-    // OAuth account login or Provider-API key only; forward/local modes carry no
-    // credential of ours on the canonical host.
-    if (provider.authMode === "oauth" && name === "command-code") {
-      return fetchCommandCodeQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "commandcode"
-      && isCanonicalCommandCodeBaseUrl(provider.baseUrl)) {
-      return fetchCommandCodeQuota(name, provider);
-    }
-    // Identify OpenCode Go by where it routes, not by what the row is called. Multi-account
-    // setups keep the same destination under names like `opencode-go-2` (#1924), and those rows
-    // silently had no quota panel and no `ocx provider quota --json` report while the literal
-    // name was the gate. `registryEntryForProviderDestination` is the existing predicate for
-    // exactly this question: normalized endpoint + adapter + key auth, so a canonical URL behind
-    // a different adapter is still not OpenCode Go. The defensive URL check inside
-    // `fetchOpenCodeGoQuota` stays — sending a key anywhere must not depend on this gate.
-    if ((provider.authMode ?? "key") === "key" && registryEntryForProviderDestination(provider)?.id === "opencode-go") {
-      return fetchOpenCodeGoQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && isCanonicalA6apiBaseUrl(provider.baseUrl)) {
-      return fetchA6apiQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "openrouter") {
-      return fetchOpenRouterQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "deepseek") {
-      return fetchDeepSeekQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "cline-pass") {
-      return fetchClineQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key"
-      && (name === "ollama-cloud" || isCanonicalOllamaCloudBaseUrl(provider.baseUrl))) {
-      return fetchOllamaCloudQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key"
-      && (name === "zai" || name === "glm" || name === "glm-cn" || name === "zhipu-bigmodel-coding")) {
-      return fetchZaiQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && (name === "minimax" || name === "minimax-cn")) {
-      return fetchMinimaxQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "moonshot") {
-      return fetchMoonshotQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "venice") {
-      return fetchVeniceQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "synthetic") {
-      return fetchSyntheticQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "deepinfra") {
-      return fetchDeepInfraQuota(name, provider);
-    }
-    if ((provider.authMode ?? "key") === "key" && name === "neuralwatt") {
-      return fetchNeuralwattQuota(name, provider);
-    }
-    return null;
+    const reader = keyQuotaReaderForProvider(name, provider);
+    return reader ? reader(name, provider) : null;
   } catch {
     return null;
   }

@@ -213,7 +213,14 @@ describe("atomic provider editor batch", () => {
       headers: { "x-beta-private": "keep-me" },
       project: "private-beta-project",
     });
-    expect(persisted.providers.gamma).toEqual(next.providers.gamma);
+    expect(persisted.providers.gamma).toEqual({
+      ...next.providers.gamma,
+      initialModelSelection: {
+        version: 1,
+        registrationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        status: "pending",
+      },
+    });
     expect(liveConfig.defaultProvider).toBe("beta");
     expect(liveConfig.providers).toEqual(persisted.providers);
     expect(catalogRefreshes).toBe(1);

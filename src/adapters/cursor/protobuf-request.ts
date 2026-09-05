@@ -1388,11 +1388,21 @@ function buildPreparedCursorRunRequest(
   )
     ? "userMessageAction"
     : "resumeAction";
-  const actionText = externalToolContinuation
+  let actionText = externalToolContinuation
     ? (request.echoRetryContinuationText ?? CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT)
     : request.echoRetryContinuationText
       ? `${text}\n\n[correction] ${request.echoRetryContinuationText}`
       : text;
+  if (lastRawIsToolResult && isCursorExternalWireModel(request.modelId)) {
+    // Image preparation bounds these labels and keeps them in attachment order. The
+    // active action survives root pruning/checkpoint fallback, including echo retries.
+    const sources = selectedImages.flatMap((image, index) => image.sourceLabel
+      ? [`${index + 1}. ${image.sourceLabel}`]
+      : []);
+    if (sources.length > 0) {
+      actionText += `\n\n[Client-supplied tool screenshot sources (attachment order)]\n${sources.join("\n")}`;
+    }
+  }
   const action = create(ConversationActionSchema, {
     action: actionCase === "userMessageAction"
       ? {

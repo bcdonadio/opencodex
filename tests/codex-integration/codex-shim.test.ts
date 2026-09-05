@@ -498,8 +498,51 @@ exit 126
       const installed = installCodexShim();
 
       expect(installed.installed).toBe(false);
+      expect(installed.message).not.toContain(binDir);
+      expect(installed.message).not.toContain(home);
       expect(readFileSync(codexPath, "utf8")).toBe(original);
       expect(existsSync(`${codexPath}.opencodex-real`)).toBe(false);
+    } finally {
+      setCodexShimProbeShellForTests(null);
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      if (oldHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = oldHome;
+      removeTreeWithRetry(binDir);
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("Unix install reports a closed metadata phase without echoing probe content", () => {
+    if (process.platform === "win32") return;
+    const binDir = mkdtempSync(join(tmpdir(), "ocx-shim-diagnostic-bin-"));
+    const home = mkdtempSync(join(tmpdir(), "ocx-shim-diagnostic-home-"));
+    const oldPath = process.env.PATH;
+    const oldHome = process.env.OPENCODEX_HOME;
+    const codexPath = join(binDir, "codex");
+    const shellPath = join(binDir, "synthetic-sensitive-shell-path");
+    const original = successfulLauncher("diagnostic-original");
+    const rejectedDetail = "synthetic-sensitive-probe-detail".repeat(4);
+    try {
+      process.env.PATH = prependPath(binDir, oldPath);
+      process.env.OPENCODEX_HOME = home;
+      writeFileSync(codexPath, original, "utf8");
+      chmodSync(codexPath, 0o755);
+      // No descendants: only invalidate bounded probe metadata, then exit.
+      writeFileSync(shellPath, `#!/bin/sh\nprintf '%s' '${rejectedDetail}' > "$OCX_SHIM_PROBE_REENTRY_PATH"\n`, "utf8");
+      chmodSync(shellPath, 0o755);
+      setCodexShimProbeShellForTests(shellPath);
+
+      const installed = installCodexShim();
+      expect(installed.installed).toBe(false);
+      expect(installed.message).toContain("probe process group could not be terminated cleanly");
+      expect(installed.message).toContain("[phase=reentry; code=none;");
+      expect(installed.message).not.toContain(rejectedDetail);
+      expect(installed.message).not.toContain(shellPath);
+      expect(installed.message).not.toContain(home);
+      expect(readFileSync(codexPath, "utf8")).toBe(original);
+      expect(existsSync(`${codexPath}.opencodex-real`)).toBe(false);
+      expect(existsSync(join(home, "codex-shim.json"))).toBe(false);
     } finally {
       setCodexShimProbeShellForTests(null);
       if (oldPath === undefined) delete process.env.PATH;
