@@ -1559,6 +1559,54 @@ describe("unpaired tool result boundary (#3259)", () => {
     },
   } as unknown as OcxConfig);
 
+  const delegationPayload = [
+    "<codex_delegation>",
+    "  <source_thread_id>01a06e20-7fc2-7582-9dde-2a85c61faaf2</source_thread_id>",
+    "  <input>Review the implementation plan.</input>",
+    "</codex_delegation>",
+  ].join("\n");
+
+  test.each(["create_thread", "send_message_to_thread"])(
+    "a call-id-less app-server %s delegation carrier reaches Anthropic as user text",
+    async (name) => {
+      const bodies: string[] = [];
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        bodies.push(String(init?.body ?? ""));
+        return jsonResponse({
+          id: "msg_delegation",
+          type: "message",
+          role: "assistant",
+          model: "claude",
+          content: [{ type: "text", text: "reviewed" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      }) as typeof fetch;
+
+      const res = await handleResponses(
+        compactionRequest(unpairedBody({
+          type: "function_call_output",
+          id: "fco_01a06e23-f880-7bc0-977c-e041fd7c5536",
+          name,
+          namespace: "codex_app",
+          output: delegationPayload,
+        })),
+        anthropicConfig(),
+        { model: "", provider: "" },
+      );
+
+      expect(res.status).toBe(200);
+      expect(bodies).toHaveLength(1);
+      const body = JSON.parse(bodies[0]!) as { messages?: Array<{ role?: string; content?: unknown }> };
+      expect(body.messages).toContainEqual(expect.objectContaining({
+        role: "user",
+        content: delegationPayload,
+      }));
+      expect(bodies[0]).not.toContain("tool_result without adjacent tool_use");
+      expect(bodies[0]).not.toContain("undefined");
+    },
+  );
+
   test("a translating adapter rejects a call_id-less tool result with 400 and sends nothing upstream", async () => {
     let fetches = 0;
     globalThis.fetch = (async () => {

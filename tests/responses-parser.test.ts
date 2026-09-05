@@ -813,6 +813,32 @@ describe("unpaired tool result boundary (#3259)", () => {
       | { toolCallId?: unknown; content?: unknown }
       | undefined;
 
+  const delegationPayload = [
+    "<codex_delegation>",
+    "  <source_thread_id>01a06e20-7fc2-7582-9dde-2a85c61faaf2</source_thread_id>",
+    "  <input>Review the implementation plan.</input>",
+    "</codex_delegation>",
+  ].join("\n");
+
+  test.each(["create_thread", "send_message_to_thread"])(
+    "an app-server %s delegation carrier becomes a user message without inventing call_id",
+    (name) => {
+      const parsed = parseRequest(delegationHistory({
+        type: "function_call_output",
+        id: "fco_01a06e23-f880-7bc0-977c-e041fd7c5536",
+        name,
+        namespace: "codex_app",
+        output: delegationPayload,
+      }));
+
+      expect(parsed.context.messages.some(message => message.role === "toolResult")).toBe(false);
+      expect(parsed.context.messages).toContainEqual(expect.objectContaining({
+        role: "user",
+        content: delegationPayload,
+      }));
+    },
+  );
+
   test("a function_call_output with no call_id still parses, and yields an unusable toolCallId", () => {
     // This is the state src/server/responses/core.ts guards on. `toolCallId` is declared
     // `string` (src/types/request.ts:168) but is undefined here — the schema catch-all
@@ -827,6 +853,17 @@ describe("unpaired tool result boundary (#3259)", () => {
     // must treat it exactly like undefined.
     const result = toolResultOf({ type: "function_call_output", call_id: "", output: "x" });
     expect(result?.toolCallId).toBe("");
+  });
+
+  test.each([
+    { label: "wrong id prefix", id: "fc_wrong", name: "create_thread", namespace: "codex_app" },
+    { label: "wrong namespace", id: "fco_valid", name: "create_thread", namespace: "collaboration" },
+    { label: "wrong tool", id: "fco_valid", name: "read_thread", namespace: "codex_app" },
+    { label: "empty call id", id: "fco_valid", name: "create_thread", namespace: "codex_app", call_id: "" },
+  ])("a delegation-shaped near miss remains an unusable tool result: $label", (fields) => {
+    const result = toolResultOf({ type: "function_call_output", ...fields, output: delegationPayload });
+    expect(result).toBeDefined();
+    expect(typeof result?.toolCallId !== "string" || result.toolCallId.length === 0).toBe(true);
   });
 
   test("a well-formed tool result on the same history pairs normally", () => {

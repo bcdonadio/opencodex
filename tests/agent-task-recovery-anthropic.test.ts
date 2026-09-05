@@ -96,4 +96,58 @@ describe("payload-only encrypted agent recovery on Anthropic", () => {
     expect(JSON.stringify(anthropicBodies[0])).not.toContain("Payload:");
     expect(JSON.stringify(anthropicBodies[0])).not.toContain("gAAAA");
   });
+
+  test("keeps inherited app-server delegation history readable before recovered NEW_TASK", async () => {
+    const bootstrap = [
+      "<codex_delegation>",
+      "  <source_thread_id>01a048af-40e4-7c43-9647-f3d25787dba7</source_thread_id>",
+      "  <input>Coordinate the issue-scoped lane.</input>",
+      "</codex_delegation>",
+    ].join("\n");
+    const assignment = "Review the exact plan and return a verdict.";
+    let recoveryFetches = 0;
+    const anthropicBodies: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (url.includes("chatgpt.com")) {
+        recoveryFetches += 1;
+        return new Response(recoverySse(assignment), { status: 200 });
+      }
+      anthropicBodies.push(body);
+      return Response.json({
+        id: "msg_recovery_history",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "reviewed" }],
+        model: "claude-opus-5",
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      });
+    }) as typeof fetch;
+
+    const response = await post(
+      anthropicRecoveryConfig(),
+      "anthropic-test/claude-opus-5",
+      [
+        {
+          type: "function_call_output",
+          id: "fco_01a06e20-9108-7ef2-a9d2-a4f3a4c92030",
+          name: "create_thread",
+          namespace: "codex_app",
+          output: bootstrap,
+        },
+        ...encryptedInput(),
+      ],
+      codexHeaders(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(recoveryFetches).toBe(1);
+    expect(anthropicBodies).toHaveLength(1);
+    expect(anthropicBodies[0]).toContain(bootstrap);
+    expect(anthropicBodies[0]).toContain(assignment);
+    expect(anthropicBodies[0]).not.toContain("tool_result without adjacent tool_use");
+    expect(anthropicBodies[0]).not.toContain("gAAAA");
+  });
 });

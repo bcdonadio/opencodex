@@ -317,6 +317,29 @@ function toolOutputContainsEncryptedContent(output: string | unknown[] | undefin
   return Array.isArray(output) && output.some(raw => isObj(raw) && raw.type === "encrypted_content");
 }
 
+const CODEX_APP_DELEGATION_TOOLS = new Set(["create_thread", "send_message_to_thread"]);
+const CODEX_OUTPUT_ITEM_ID = /^fco_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Codex app-server represents a GUI-created task (and a later message to it) as a synthetic
+ * `function_call_output` carrying the delegation body but no originating function call or
+ * `call_id`. Native ChatGPT understands that private history shape. Translating adapters cannot:
+ * they would treat it as an unpaired tool result. Recognize only the exact app-owned carrier and
+ * expose its body as user text; arbitrary call-id-less tool outputs still reach the strict guard.
+ */
+function codexAppDelegationCarrierText(item: Record<string, unknown>): string | undefined {
+  if (Object.hasOwn(item, "call_id")) return undefined;
+  if (item.namespace !== "codex_app" || !CODEX_APP_DELEGATION_TOOLS.has(String(item.name))) {
+    return undefined;
+  }
+  if (typeof item.id !== "string" || !CODEX_OUTPUT_ITEM_ID.test(item.id)) return undefined;
+  if (typeof item.output !== "string") return undefined;
+  const match = /^<codex_delegation>\r?\n\s*<source_thread_id>([^<]+)<\/source_thread_id>\r?\n\s*<input>[\s\S]*<\/input>\r?\n<\/codex_delegation>$/.exec(item.output);
+  if (!match || !CODEX_THREAD_ID.test(match[1]!)) return undefined;
+  return item.output;
+}
+
 /**
  * codex-rs ImageDetail allows "original", but chat-completions providers only accept
  * auto|low|high on image_url.detail — degrade "original" to "high" (the codex default).
@@ -730,6 +753,12 @@ export function parseRequest(
       }
 
       if (effectiveType === "function_call_output") {
+        const delegation = codexAppDelegationCarrierText(item);
+        if (delegation !== undefined) {
+          pendingReasoning.length = 0;
+          messages.push({ role: "user", content: delegation, timestamp: now });
+          continue;
+        }
         const output = item as { call_id: string; output?: string | unknown[] };
         attachPendingReasoningToCallOwner(messages, output.call_id, pendingReasoning);
         pendingReasoning.length = 0;
