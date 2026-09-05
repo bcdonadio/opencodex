@@ -14,9 +14,11 @@ supervised proxy, verify the effective immutable release, then commit and push.
 **The OpenCodex proxy being replaced may be carrying this exact Codex session.**
 
 `global-node-tools` publishes immutable releases and moves its managed
-`current` link. The systemd unit does not follow that link dynamically:
-`ExecStart` contains the immutable release path selected when
-`ocx service install` last wrote the unit.
+`current` link. Current OpenCodex writes the absolute stable launcher
+`current/bin/ocx` into systemd's `ExecStart`; older units may instead contain
+baked immutable Bun and CLI paths. Moving `current` does not replace the
+already-running process in either case. `ocx service install` must run in the
+same shell handoff to reconcile the unit and activate the effective release.
 
 If package installation is terminal/tool call A and service repair is terminal/
 tool call B, the session can disappear after A and before B is ever dispatched.
@@ -76,7 +78,7 @@ path before dispatching the whole line in one terminal/tool call.
    - current branch, `HEAD`, and its `origin` destination;
    - `global-node-tools status`, managed `current`, and managed `previous`;
    - `ocx --version` and `readlink -f "$(command -v ocx)"`;
-   - systemd `ActiveState`, `SubState`, `MainPID`, and `ExecStart`;
+   - systemd `ActiveState`, `SubState`, `MainPID`, `ExecStart`, and `ControlGroup`;
    - `ocx service status` and the live `/readyz` body and port.
 6. Require the proxy to be active and ready before a session-preserving update.
 
@@ -116,7 +118,10 @@ pre_merge_head="$(git rev-parse HEAD)"
 git merge --no-ff --no-edit --signoff --gpg-sign upstream/main
 ```
 
-Resolve conflicts semantically. Preserve intentional local behavior and never
+Resolve conflicts semantically. Preserve the intent of downstream overrides and
+fixes; supersede a downstream implementation when upstream provides a superior,
+semantically equivalent counterpart. Check moved helpers and changed model
+policies before retaining duplicate code or outdated test expectations. Never
 use a blanket ours/theirs resolution. If the merge stopped for conflicts,
 stage only resolved paths and finish it with:
 
@@ -203,10 +208,13 @@ Star lidge-jun/opencodex? Yes / No
 
 Inspect before retrying. Read back the managed `current` and `previous` links,
 release metadata, transaction status, `ocx --version`, resolved executable,
-service state, PID, `ExecStart`, process command line, and `/readyz`.
+service state, PID, `ExecStart`, its resolved launcher target, service cgroup,
+live runtime command line, and `/readyz`.
 
-- If the target release was published but the service still executes an older
-  immutable path, run only `ocx service install`, then verify again.
+- If the target release was published but the live runtime still executes an
+  older immutable path, run only `ocx service install`, then verify again. A
+  stable launcher resolving to the new release does not prove the existing
+  process has switched.
 - If the target is already live and ready, perform no mutation.
 - Retry package installation only when managed release metadata proves the
   target transaction did not complete.
@@ -223,18 +231,33 @@ Require all of the following:
 3. The new `release.json` records operation `install`, `bypass: true`, and the
    expected direct `@bitkyc08/opencodex` version.
 4. The managed `package-lock.json` has lockfile version 3, points at the exact
-   content-addressed artifact, and records SHA-512 integrity.
+   content-addressed artifact, and records matching SHA-512 integrity. Resolve
+   a relative `file:` reference against the immutable release directory before
+   comparing it with the artifact's absolute path.
 5. systemd reports `active/running` with a nonzero PID.
-6. systemd `ExecStart` and `/proc/<MainPID>/cmdline` both contain the new
-   immutable release path.
+6. Inspect the actual `ExecStart` launch mode. For a baked Bun/CLI unit, its
+   executable paths must point into the new immutable release. For a stable
+   launcher unit, the absolute launcher named by `ExecStart` must resolve into
+   that release; do not replace the stable launcher merely to make the unit
+   contain a literal release path. Inspect `/proc/<MainPID>/cmdline` and the
+   live runtime process: the runtime must execute the new release's Bun and
+   OpenCodex entry point and belong to the unit's exact `ControlGroup`. If
+   `MainPID` is a shell or Node supervisor, verify the Bun child in that same
+   cgroup. Redact launch-proof arguments and other credentials from recorded
+   command lines.
 7. `/readyz` reports service `opencodex`, the expected version, the configured
-   port, and status `ready`.
+   port, and status `ready`. Its reported PID must be the verified runtime PID
+   in the service cgroup. Version equality alone is insufficient when an update
+   packages new source under the same version.
 8. The installed collaboration source is byte-identical to the checkout.
+   Compare every packaged `gui/dist` file with both the tarball and checkout;
+   use the tarball inventory so intentionally excluded build files are not
+   mistaken for missing installed assets.
 9. Unrelated worktree state matches the preflight inventory and any explicit
    user-selected worktree override.
 
-Symlink readback or a CLI version alone is not completion. The live process path
-and readiness response are the effective-behavior proof.
+Symlink readback or a CLI version alone is not completion. The resolved unit
+launcher, live runtime path, cgroup membership, and readiness PID must agree.
 
 ## 8. Commit and push every successful update
 
@@ -264,6 +287,7 @@ to the scope the user named.
 | Shell Bun differs from `package.json` | Use the bundled Bun from the active immutable release. |
 | `.tmp` tarball passed to the controller | Copy it to the SHA-512 artifact store first. |
 | Package manifest looks plausible | Also compare the locally modified packaged source byte-for-byte. |
-| Service command reports success | Prove systemd, `/proc`, and `/readyz` agree on the new release. |
+| Service command reports success | Prove the unit's resolved launcher, live runtime, cgroup, and `/readyz` PID agree on the new release. |
+| `ExecStart` names `current/bin/ocx` | This is the supported stable launcher. Resolve it and verify the running immutable runtime; do not rewrite it to an old baked-path design. |
 | Connection drops during handoff | Reconnect and inspect; do not blindly rerun. |
 | Existing tracked changes are present | Refuse by default or follow only the user's explicit scoped override. |
