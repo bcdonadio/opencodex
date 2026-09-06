@@ -1,4 +1,4 @@
-import { transportObserver, recordRequestShape } from "../transaction-capture";
+import { transportObserver, recordRequestShape, recordContextTransformation, recordCompletedCompaction } from "../transaction-capture";
 import type { Server } from "bun";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import {
@@ -1063,7 +1063,21 @@ export async function handleResponsesCompact(
     // request log; the routed branch gets the same through handleResponses. The
     // synthetic buffer errors are not upstream bodies and stay uninspected.
     if (buffered.ok) {
-      inspectResponseLogJson(logCtx, await buffered.clone().text());
+      const compactResponseText = await buffered.clone().text();
+      inspectResponseLogJson(logCtx, compactResponseText);
+      // Compact JSON has no response.completed event. The actual successful
+      // compact output is the owner of this completion observation.
+      try {
+        if (compactResponseText.length <= 1024 * 1024) {
+          const compactResponseJson = JSON.parse(compactResponseText) as { output?: unknown[]; error?: unknown; status?: unknown };
+          if (!compactResponseJson.error && (compactResponseJson.status === undefined || compactResponseJson.status === "completed")
+            && Array.isArray(compactResponseJson.output)
+            && compactResponseJson.output.slice(0, 1024).some(item => !!item && typeof item === "object"
+              && (item as { type?: unknown }).type === "compaction")) {
+            recordCompletedCompaction(logCtx, "upstream");
+          }
+        }
+      } catch { /* optional shape observation cannot change compact response delivery */ }
       forgetCompactHandoffRoute(req);
     } else if (quotaFailure && !storedPool401ReplayAttempted) {
       const fallbackModel = compactHandoffRoute(req, raw.model);
@@ -1111,6 +1125,7 @@ export async function handleResponsesCompact(
     stream: accountGatedCompactWireModel || route.combo ? true : false,
     input: [...inputItems, { type: "compaction_trigger" }],
   };
+  recordContextTransformation(logCtx, { kind: "synthetic_compaction", injected: { compaction_trigger: 1 } });
   const internalHeaders = new Headers({ "content-type": "application/json" });
   for (const name of FORWARD_HEADERS) {
     const value = req.headers.get(name);
@@ -1192,6 +1207,7 @@ export async function handleResponsesCompact(
       headers: { "Content-Type": "application/json" },
     });
     rememberCompactHandoffRoute(req, raw.model);
+    recordCompletedCompaction(logCtx, "upstream");
     return result;
   }
   const encrypted = compactionItems[0]!.encrypted_content;
@@ -1203,5 +1219,6 @@ export async function handleResponsesCompact(
   const summary = decoded;
   const output = buildCompactV1Output(extractCompactUserMessages(inputItems), summary);
   rememberCompactHandoffRoute(req, raw.model);
+  recordCompletedCompaction(logCtx);
   return new Response(JSON.stringify({ output }), { headers: { "Content-Type": "application/json" } });
 }

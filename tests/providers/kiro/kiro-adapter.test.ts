@@ -3,7 +3,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createKiroAdapter } from "../../../src/adapters/kiro";
+import { buildKiroPayload, createKiroAdapter } from "../../../src/adapters/kiro";
+import type { AdapterContextTransformation } from "../../../src/adapters/base";
 import {
   KIRO_ANSWER_DELIVERED_MESSAGE,
   KIRO_COMPLETION_INSTRUCTIONS,
@@ -89,6 +90,29 @@ function seedKiroCliMetadata(profileArn: string, region: string): void {
 }
 
 describe("kiro adapter — buildRequest", () => {
+  test("context diagnostics keep simultaneous message insertion and omission distinct", async () => {
+    const parsed = parsedWith([
+      { role: "assistant", content: [{ type: "thinking", thinking: "private reasoning" }] },
+    ]);
+    const built = buildKiroPayload(parsed, undefined);
+    expect(built.contextLog).toEqual([{
+      kind: "adapter_normalization", injected: { message: 1 }, dropped: { message: 1 },
+    }]);
+    const request = await createKiroAdapter(provider).buildRequest(parsed);
+    expect(request.contextLog).toEqual(built.contextLog);
+    expect(request.body).not.toContain("contextLog");
+    expect(JSON.stringify(request.contextLog)).not.toContain("private reasoning");
+  });
+
+  test("context diagnostics count inserted completion tool and instruction fragments", () => {
+    const built = buildKiroPayload(parsedWith([{ role: "user", content: "hi" }], [bashTool]), undefined);
+    expect(built.contextLog).toEqual([
+      { kind: "instruction_injection", injected: { instruction: 2 }, dropped: {}, truncated: {} },
+      { kind: "adapter_normalization", injected: { tool: 1 }, dropped: {} },
+    ]);
+    expect(buildKiroPayload(parsedWith([{ role: "user", content: "hi" }]), undefined).contextLog).toEqual([]);
+  });
+
   test("rejects missing and blank Kiro tokens before building a request", async () => {
     for (const apiKey of [undefined, "", "   "]) {
       const keyless = { ...provider, apiKey } as unknown as OcxProviderConfig;
@@ -1516,6 +1540,22 @@ describe("the completion contract survives a hostile tool catalog intact", () =>
 });
 
 describe("boundedInjectedInstruction surrogate safety", () => {
+  test("diagnostics distinguish retained, truncated and fully omitted fragments", async () => {
+    const { boundedInjectedInstructionForTests } = await import("../../../src/adapters/kiro");
+    const { MAX_KIRO_INJECTED_INSTRUCTION_CHARS } = await import("../../../src/adapters/kiro-constants");
+    const observation: AdapterContextTransformation = {
+      kind: "instruction_injection", injected: {}, dropped: {}, truncated: {},
+    };
+    const used = { value: MAX_KIRO_INJECTED_INSTRUCTION_CHARS - 2 };
+    expect(boundedInjectedInstructionForTests("abcd", used, observation)).toBe("ab");
+    expect(boundedInjectedInstructionForTests("secret", used, observation)).toBeUndefined();
+    expect(boundedInjectedInstructionForTests("", used, observation)).toBeUndefined();
+    expect(observation).toEqual({
+      kind: "instruction_injection", injected: { instruction: 1 },
+      dropped: { instruction: 1 }, truncated: { instruction: 1 },
+    });
+  });
+
   test("a budget cut never ends on a lone high surrogate", async () => {
     const { boundedInjectedInstructionForTests } = await import("../../../src/adapters/kiro");
     const { MAX_KIRO_INJECTED_INSTRUCTION_CHARS } = await import("../../../src/adapters/kiro-constants");

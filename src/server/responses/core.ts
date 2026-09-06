@@ -1,4 +1,4 @@
-import { transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext } from "../transaction-capture";
+import { transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput } from "../transaction-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -2269,7 +2269,11 @@ async function applyFinalRouteRequestNormalization(args: {
       injectionPrompt: config.injectionPrompt,
     });
     if (guidance) {
+      const messagesBeforeGuidance = parsed.context.messages.length;
       injectDeveloperMessage(parsed, guidance);
+      if (parsed.context.messages.length > messagesBeforeGuidance) {
+        recordContextTransformation(logCtx, { kind: "developer_guidance", injected: { developer: 1 } });
+      }
       if (isInjectionDebugEnabled()) {
         injectionDebugLog(`[opencodex] ${route.modelId}: multi-agent guidance injected (surface=${collabSurface(parsed)}, guidanceEnabled=${multiAgentGuidanceEnabled(config)}, ${guidance.length} chars)`);
       }
@@ -2955,6 +2959,7 @@ async function handleResponsesInner(
     const rewritten = sanitizeEncryptedContentInPlace(
       (body as { input?: unknown } | undefined)?.input,
     );
+    if (rewritten > 0) recordContextTransformation(logCtx, { kind: "plaintext_encrypted_rewrite" });
     if (rewritten > 0)
       console.warn(
         `[opencodex] rewrote ${rewritten} plaintext encrypted_content part(s) to input_text (spawn-message compatibility)`,
@@ -3910,6 +3915,8 @@ async function handleResponsesInner(
     commitReasoningReplayServingIdentity(parsed._reasoningReplayScope);
   };
   if (routedCompaction) {
+    recordContextTransformation(logCtx, { kind: "synthetic_compaction",
+      dropped: { tool_definition: parsed.context.tools?.length ?? 0 }, injected: { message: 1 } });
     delete parsed.context.tools;
     delete parsed._webSearch;
     delete parsed.options.toolChoice;
@@ -5621,10 +5628,15 @@ async function handleResponsesInner(
       if (vidPlan && !t.namespace && vidPlan.toolNames.has(t.name)) return false;
       return true;
     })];
+    const removedBridgeTools = priorTools.length - bridgeTools.length;
     const existingNames = new Set(bridgeTools.map(t => t.name));
+    const retainedBridgeTools = bridgeTools.length;
     if (imgPlan && !existingNames.has(IMAGE_GEN_TOOL_NAME)) bridgeTools.push(buildImageTool());
     if (vidPlan && !existingNames.has(VIDEO_GEN_TOOL_NAME)) bridgeTools.push(buildVideoTool());
     parsed.context.tools = bridgeTools;
+    recordContextTransformation(logCtx, { kind: "media_tool_bridge",
+      dropped: { tool_definition: removedBridgeTools },
+      injected: { tool_definition: bridgeTools.length - retainedBridgeTools } });
     // Hosted image_generation tool_choice / allowed_tools must target the synthetic function name.
     // Gate on imgPlan — in a video-only turn buildImageTool() was never injected, so rewriting
     // image_generation/image_gen aliases would add an undeclared tool that strict upstreams reject.
@@ -5714,6 +5726,7 @@ async function handleResponsesInner(
   // through web-search instead of being swallowed. runTurn adapters never enter this branch.
   if (canRunWebSearch && wsPlan) {
     parsed.context.tools = [...(parsed.context.tools ?? []), buildWebSearchTool()];
+    recordContextTransformation(logCtx, { kind: "web_search_tool_bridge", injected: { tool_definition: 1 } });
     // Resolve the mutable route at send time: a 429 rotation replaces route.provider, so retaining
     // one pre-rotation providerFetch would keep the old credential and transport pin.
     const routedProviderFetch = ((input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
@@ -6013,6 +6026,7 @@ async function handleResponsesInner(
             }
           },
           onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+            recordCompactionOutput(logCtx, response);
             commitReasoningReplayServingRoute();
             rememberKiroDeliveredFinalAnswer(adapter.name, response);
             if (!routedCompaction) {
@@ -6083,6 +6097,7 @@ async function handleResponsesInner(
         }
       },
     });
+    recordCompactionOutput(logCtx, json);
     if (!routedCompaction) {
       rememberKiroDeliveredFinalAnswer(adapter.name, json);
       rememberResponseState(
@@ -7174,6 +7189,7 @@ async function handleResponsesInner(
           }
         },
         onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+          recordCompactionOutput(logCtx, response);
           commitReasoningReplayServingRoute();
           rememberKiroDeliveredFinalAnswer(activeAdapter.name, response);
           // Compaction turns must NOT enter the continuation cache: _rawBody still holds the full
@@ -7251,6 +7267,7 @@ async function handleResponsesInner(
         }
       },
     });
+    recordCompactionOutput(logCtx, json);
     // See the streaming branch: compaction turns skip the continuation cache.
     if (!routedCompaction) {
       rememberKiroDeliveredFinalAnswer(activeAdapter.name, json);

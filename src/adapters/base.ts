@@ -78,7 +78,17 @@ export interface ProviderAdapter {
   tierLogForRunTurn?(parsed: OcxParsedRequest): AdapterTierMetadata | undefined;
 }
 
+/** Owner-observed changes during one request build; never inferred from net item deltas. */
+export interface AdapterContextTransformation {
+  kind: "adapter_normalization" | "instruction_injection" | "context_pruning";
+  injected?: Partial<Record<"message" | "instruction" | "tool" | "reasoning", number>>;
+  dropped?: Partial<Record<"message" | "instruction" | "tool" | "reasoning", number>>;
+  truncated?: Partial<Record<"message" | "instruction" | "tool" | "reasoning", number>>;
+}
+
 export interface AdapterRequest {
+    /** Bounded owner observations, scoped to this build, excluded from the upstream body. */
+    contextLog?: readonly AdapterContextTransformation[];
     url: string;
     method: string;
     headers: Record<string, string>;

@@ -39,7 +39,7 @@ import type {
 } from "../types";
 import { hasRecordedTrailingDeliveredFinalAnswer } from "../responses/turn-termination";
 import type { ProviderAdapter } from "./base";
-import type { AdapterFetchContext, AdapterRequest } from "./base";
+import type { AdapterContextTransformation, AdapterFetchContext, AdapterRequest } from "./base";
 import { extractKiroImages, normalizeKiroImages, type KiroImage } from "./kiro-images";
 import { sniffImageDimensions } from "./anthropic-image-guard";
 import { fetchKiroWithRetry, noteKiroTransientThrottle } from "./kiro-retry";
@@ -527,9 +527,17 @@ function validateKiroConversationState(history: KiroHistoryEntry[], currentMessa
   if (pendingToolUses.size > 0) throw new Error("Kiro conversation contains an unanswered tool use");
 }
 
-function boundedInjectedInstruction(text: string, used: { value: number }): string | undefined {
+function boundedInjectedInstruction(
+  text: string,
+  used: { value: number },
+  observation?: AdapterContextTransformation,
+): string | undefined {
   const remaining = MAX_KIRO_INJECTED_INSTRUCTION_CHARS - used.value;
-  if (remaining <= 0 || !text) return undefined;
+  if (!text) return undefined;
+  if (remaining <= 0) {
+    if (observation?.dropped) observation.dropped.instruction = (observation.dropped.instruction ?? 0) + 1;
+    return undefined;
+  }
   let result = text.length <= remaining ? text : text.slice(0, remaining);
   // Never end the slice on a lone high surrogate: encoding it substitutes
   // U+FFFD into the injected instruction. One step back keeps a valid pair
@@ -539,12 +547,23 @@ function boundedInjectedInstruction(text: string, used: { value: number }): stri
     if (last >= 0xd800 && last <= 0xdbff) result = result.slice(0, -1);
   }
   used.value += result.length;
+  if (observation) {
+    if (result.length > 0 && observation.injected) {
+      observation.injected.instruction = (observation.injected.instruction ?? 0) + 1;
+    }
+    if (result.length > 0 && result.length < text.length && observation.truncated) {
+      observation.truncated.instruction = (observation.truncated.instruction ?? 0) + 1;
+    }
+    if (result.length === 0 && observation.dropped) {
+      observation.dropped.instruction = (observation.dropped.instruction ?? 0) + 1;
+    }
+  }
   return result.length > 0 ? result : undefined;
 }
 
 /** Test-only: exercise the surrogate-safe instruction bound directly. */
-export function boundedInjectedInstructionForTests(text: string, used: { value: number }): string | undefined {
-  return boundedInjectedInstruction(text, used);
+export function boundedInjectedInstructionForTests(text: string, used: { value: number }, observation?: AdapterContextTransformation): string | undefined {
+  return boundedInjectedInstruction(text, used, observation);
 }
 
 function kiroCompletionTool(): Record<string, unknown> {
@@ -589,6 +608,7 @@ export function buildKiroPayload(
   nameMap: Map<string, string>;
   conversationId: string;
   completionMode: KiroCompletionMode;
+  contextLog: readonly AdapterContextTransformation[];
 } {
   validateKiroCapabilities(parsed);
   const modelId = mapModelId(parsed.modelId);
@@ -613,13 +633,21 @@ export function buildKiroPayload(
     : [...ordinaryTools, kiroCompletionTool()];
   const nameMap = toolContext.nameMap;
   const systemParts: string[] = [];
+  // Fixed-size summaries: counts describe this build, including simultaneous insertion/drop.
+  const instructions: AdapterContextTransformation = {
+    kind: "instruction_injection", injected: {}, dropped: {}, truncated: {},
+  };
+  const normalization: AdapterContextTransformation = {
+    kind: "adapter_normalization", injected: {}, dropped: {},
+  };
+  if (completionMode !== "disabled") normalization.injected!.tool = 1;
   const injectedChars = { value: 0 };
   // Name the Kiro model id actually sent on the wire without leaking the proxy identity upstream.
   if (parsed.context.systemPrompt?.length) {
     systemParts.push(identifyRoutedModel(parsed.context.systemPrompt.join("\n\n"), modelId));
   }
   for (const addition of toolContext.systemAdditions) {
-    const boundedAddition = boundedInjectedInstruction(addition, injectedChars);
+    const boundedAddition = boundedInjectedInstruction(addition, injectedChars, instructions);
     if (boundedAddition) systemParts.push(boundedAddition);
   }
   // Kiro renames tools to satisfy its wire constraints, so resolve neighbor names through the
@@ -655,10 +683,10 @@ export function buildKiroPayload(
     name => advertisedAlias.get(name) ?? name,
     codeModeExecName,
   );
-  const boundedNudge = toolCatalogNudge ? boundedInjectedInstruction(toolCatalogNudge, injectedChars) : undefined;
+  const boundedNudge = toolCatalogNudge ? boundedInjectedInstruction(toolCatalogNudge, injectedChars, instructions) : undefined;
   if (boundedNudge) systemParts.push(boundedNudge);
   if (completionMode !== "disabled") {
-    const boundedCompletion = boundedInjectedInstruction(KIRO_COMPLETION_INSTRUCTIONS, injectedChars);
+    const boundedCompletion = boundedInjectedInstruction(KIRO_COMPLETION_INSTRUCTIONS, injectedChars, instructions);
     if (boundedCompletion) systemParts.push(boundedCompletion);
   }
   const systemPrefix = systemParts.length > 0 ? `${systemParts.join("\n\n")}\n\n` : "";
@@ -719,7 +747,10 @@ export function buildKiroPayload(
       });
       if (!text && toolUses.length === 0) {
         const hasReasoning = aMsg.content.some(part => part.type === "thinking" && part.thinking.trim());
-        if (hasReasoning) continue;
+        if (hasReasoning) {
+          normalization.dropped!.message = (normalization.dropped!.message ?? 0) + 1;
+          continue;
+        }
       }
       // `phase` survives the Responses round trip (parser.ts assistant branch), so a replayed
       // final answer is identifiable here rather than guessed from turn position.
@@ -758,6 +789,7 @@ export function buildKiroPayload(
 
   if (turns.length === 0 || turns[0].kind === "assistant") {
     turns.unshift({ kind: "user", content: KIRO_CONTINUATION_MESSAGE, images: [], toolResults: [] });
+    normalization.injected!.message = (normalization.injected!.message ?? 0) + 1;
   }
   // Kiro requires the request to end with a user turn, so a trailing assistant turn always gets
   // one appended (the pop below throws otherwise). What that turn SAYS is the load-bearing part.
@@ -769,6 +801,7 @@ export function buildKiroPayload(
   // structurally valid, but carrying no instruction to resume.
   const trailing = turns.at(-1);
   if (trailing?.kind === "assistant") {
+    normalization.injected!.message = (normalization.injected!.message ?? 0) + 1;
     const resumeText = completionMode === "text_fallback" ? KIRO_COMPLETION_RETRY_MESSAGE : KIRO_CONTINUATION_MESSAGE;
     turns.push({
       kind: "user",
@@ -860,7 +893,10 @@ export function buildKiroPayload(
     payload.additionalModelRequestFields = { [effortField]: { effort } };
   }
   if (profileArn) payload.profileArn = profileArn;
-  return { payload, nameMap, conversationId, completionMode };
+  const contextLog = [instructions, normalization].filter(observation =>
+    [observation.injected, observation.dropped, observation.truncated]
+      .some(counts => counts && Object.values(counts).some(count => count > 0)));
+  return { payload, nameMap, conversationId, completionMode, contextLog };
 }
 
 // Stream parsing (shared by parseStream + parseResponse)
@@ -2085,6 +2121,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
         method: "POST",
         headers,
         body,
+        contextLog: built.contextLog,
         usageLog: { inputTokens: estimateKiroLogInputTokens(parsed), estimated: true },
       },
       nameMap: built.nameMap,

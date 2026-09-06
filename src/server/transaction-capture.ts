@@ -11,12 +11,79 @@ import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
 import type { RequestPacingObserver } from "../providers/request-pacing";
 import { captureUpstreamHeaders, captureUpstreamPayloadFacts } from "./transaction-upstream-facts";
+import { summarizeRequestShape } from "./request-shape";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
 const activeSends = new WeakMap<object, DiagnosticSendV1>();
 const sendState = new WeakMap<DiagnosticSendV1, { responseId?: string; terminalType?: string; terminalObserver?: object; directTypes: Set<string>; syntheticTypes: Set<string> }>();
 const requestShapes = new WeakSet<RequestLogContext>();
+const completedCompactions = new WeakSet<RequestLogContext>();
+
+const transformationKinds = new Set([
+  "previous_response_replay", "developer_guidance", "synthetic_compaction",
+  "media_tool_bridge", "web_search_tool_bridge", "plaintext_encrypted_rewrite",
+  "adapter_context_truncation", "adapter_tool_result_truncation", "adapter_message_injection",
+  "adapter_normalization", "instruction_injection", "context_pruning",
+]);
+const transformationCountKeys = ["message", "developer", "instruction", "tool", "tool_definition", "tool_result", "image", "audio", "file", "reasoning", "input_item", "compaction_trigger"] as const;
+type TransformationCounts = Partial<Record<typeof transformationCountKeys[number], number>>;
+
+/** Counts are supplied by the owner of the operation, never inferred from a net body-size change. */
+export function recordContextTransformation(ctx: RequestLogContext, observation: {
+  kind: string; injected?: TransformationCounts; dropped?: TransformationCounts; truncated?: TransformationCounts;
+}): void {
+  captureSafely(() => {
+    if (!transformationKinds.has(observation.kind)) return;
+    const d = diagnostics(ctx);
+    const source = ["adapter_normalization", "instruction_injection", "context_pruning"].includes(observation.kind) ? "adapter" : "proxy";
+    d.contextTransformationKinds = [...new Set([...(Array.isArray(d.contextTransformationKinds) ? d.contextTransformationKinds as string[] : []), observation.kind])];
+    for (const [key, field] of [["injected", "locallyInjectedItemCounts"], ["dropped", "droppedItemCounts"], ["truncated", "truncatedItemCounts"]] as const) {
+      const input = observation[key];
+      if (!input) continue;
+      const counts = (d[field] ?? {}) as Record<string, number>;
+      for (const name of transformationCountKeys) {
+        const count = input[name];
+        if (typeof count === "number" && Number.isSafeInteger(count) && count > 0) {
+          counts[name] = Math.min(Number.MAX_SAFE_INTEGER, (counts[name] ?? 0) + count);
+        }
+      }
+      if (Object.keys(counts).length) {
+        d[field] = counts;
+        d.fieldAvailability[field] = { status: "observed", source };
+      }
+    }
+    d.fieldAvailability.contextTransformationKinds = { status: "observed", source };
+    clean(ctx);
+  });
+}
+
+/** A completed compact output is one logical compaction, even if observed by both bridge and relay. */
+export function recordCompletedCompaction(ctx: RequestLogContext, source: "proxy" | "upstream" = "proxy"): void {
+  captureSafely(() => {
+    if (completedCompactions.has(ctx)) return;
+    completedCompactions.add(ctx);
+    const d = diagnostics(ctx);
+    d.compactionOccurred = true;
+    d.compactionCount = 1;
+    d.lastCompactionAt = Date.now();
+    recordDiagnosticEvent(d, { type: "context.compacted", at: d.lastCompactionAt as number, source });
+    for (const field of ["compactionOccurred", "compactionCount", "lastCompactionAt"]) {
+      d.fieldAvailability[field] = { status: "observed", source };
+    }
+    clean(ctx);
+  });
+}
+
+/** Bounded observation of an actual completed bridge response, including buffered Responses. */
+export function recordCompactionOutput(ctx: RequestLogContext, response: Record<string, unknown>): void {
+  captureSafely(() => {
+    if (response.status === "completed" && Array.isArray(response.output)
+      && response.output.slice(0, 1024).some(item => !!item && typeof item === "object" && item.type === "compaction")) {
+      recordCompletedCompaction(ctx);
+    }
+  });
+}
 
 /** Diagnostics never share exception handling with dispatch/admission. */
 export function captureSafely(action: () => void): void { try { action(); } catch { /* optional observation */ } }
@@ -69,9 +136,11 @@ export function recordReconstructedContext(ctx: RequestLogContext, body: unknown
     const d = diagnostics(ctx);
     d.reconstructedInputCount = Array.isArray(input) ? input.length : typeof input === "string" ? 1 : 0;
     d.replayedItemCount = replayedItems;
+    d.fieldAvailability.reconstructedInputCount = { status: "observed", source: "proxy" };
+    d.fieldAvailability.replayedItemCount = { status: "observed", source: "proxy" };
     if (replayedItems > 0) {
       d.continuationMode = "local_replay";
-      d.contextTransformationKinds = ["previous_response_replay"];
+      recordContextTransformation(ctx, { kind: "previous_response_replay" });
     }
     clean(ctx);
   });
@@ -80,16 +149,28 @@ export function recordReconstructedContext(ctx: RequestLogContext, body: unknown
 export function recordContextEstimate(ctx: RequestLogContext, contextWindow?: number): void {
   captureSafely(() => {
     const d = diagnostics(ctx);
-    if (contextWindow !== undefined) d.contextWindowTokens = contextWindow;
-    else d.fieldAvailability.contextWindowTokens = { status: "not_observed", source: "adapter" };
+    const knownWindow = typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0;
+    delete d.contextUsageRatioEstimate;
+    if (knownWindow) {
+      d.contextWindowTokens = contextWindow;
+      d.fieldAvailability.contextWindowTokens = { status: "observed", source: "adapter" };
+    } else {
+      delete d.contextWindowTokens;
+      d.fieldAvailability.contextWindowTokens = { status: "not_observed", source: "adapter" };
+    }
     const estimate = ctx.usageLogInputTokens ?? ctx.activeAttempt?.inputTokenEstimate;
     if (typeof estimate === "number" && Number.isFinite(estimate) && estimate >= 0) {
       d.tokenEstimateMethod = "adapter_input_estimate";
-      if (contextWindow && contextWindow > 0) {
+      d.fieldAvailability.tokenEstimateMethod = { status: "observed", source: "adapter" };
+      if (knownWindow) {
         d.contextUsageRatioEstimate = estimate / contextWindow;
         d.fieldAvailability.contextUsageRatioEstimate = { status: "derived", source: "derived" };
       }
+    } else {
+      delete d.tokenEstimateMethod;
+      d.fieldAvailability.tokenEstimateMethod = { status: "not_observed", source: "adapter" };
     }
+    if (d.contextUsageRatioEstimate === undefined) d.fieldAvailability.contextUsageRatioEstimate = { status: "not_observed", source: "derived" };
     clean(ctx);
   });
 }
@@ -170,6 +251,19 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
     if (!forwarded) requestShapes.add(ctx);
     const b = body as Record<string, unknown>;
     const d = diagnostics(ctx);
+    const shape = summarizeRequestShape(b);
+    const shapeField = (name: string) => forwarded ? `forwarded${name[0]!.toUpperCase()}${name.slice(1)}` : name;
+    const source = forwarded ? "adapter" as const : "client" as const;
+    for (const [name, value] of Object.entries(shape.values)) {
+      d[shapeField(name)] = value;
+      delete d.fieldAvailability[shapeField(name)];
+    }
+    for (const name of shape.unavailable) {
+      delete d[shapeField(name)];
+      d.fieldAvailability[shapeField(name)] = { status: "not_observed", source };
+    }
+    for (const name of shape.truncated) d.fieldAvailability[shapeField(name)] = { status: "truncated", source };
+    if (shape.truncated.length) d.captureTruncated = true;
     if (bytes !== undefined) d[forwarded ? "forwardedRequestBytes" : "requestBytes"] = bytes;
     const previous = identifier(d, forwarded ? "forwardedPreviousResponseId" : "previousResponseId", b.previous_response_id, "client");
     if (forwarded) {
@@ -188,55 +282,10 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
           identifier(d, field!, (metadata as Record<string, unknown>)[key!], "client");
         }
       }
-      const items = Array.isArray(b.input) ? b.input : Array.isArray(b.messages) ? b.messages : [];
-      d.inputItemCount = typeof b.input === "string" ? 1 : items.length;
-      d.conversationItemCount = d.inputItemCount;
-      d.deltaInputCount = d.inputItemCount;
+      d.deltaInputCount = typeof b.input === "string" ? 1 : Array.isArray(b.input) ? b.input.length : Array.isArray(b.messages) ? b.messages.length : 0;
       d.continuationMode = previous ? "previous_response" : "explicit_input";
-      d.toolDefinitionCount = Array.isArray(b.tools) ? b.tools.length : 0;
-      let messages = 0, calls = 0, results = 0, reasoning = 0, images = 0, audio = 0, files = 0, encrypted = 0;
-      let remaining = 2048;
-      let toolBytes = 0, largestToolBytes = 0, toolBytesComplete = true;
-      for (const item of items.slice(0, 1024)) {
-        if (!item || typeof item !== "object") continue;
-        if (item.type === "message" || item.role) messages++;
-        if (item.type === "function_call" || item.type === "custom_tool_call") calls++;
-        if (Array.isArray(item.tool_calls)) calls += item.tool_calls.length;
-        if (item.type === "function_call_output" || item.type === "custom_tool_call_output" || item.role === "tool") results++;
-        if (item.type === "function_call_output" || item.type === "custom_tool_call_output" || item.role === "tool") {
-          const value = item.output ?? item.content;
-          if (typeof value === "string" && value.length <= 1024 * 1024 - toolBytes) {
-            const length = Buffer.byteLength(value); toolBytes += length; largestToolBytes = Math.max(largestToolBytes, length);
-          } else toolBytesComplete = false;
-        }
-        if (item.type === "reasoning") reasoning++;
-        if (item.encrypted_content !== undefined) encrypted++;
-        if (Array.isArray(item.content)) for (const part of item.content) {
-          if (--remaining < 0) break;
-          if (!part || typeof part !== "object") continue;
-          if (part.type === "input_image" || part.type === "image_url") images++;
-          if (part.type === "input_audio" || part.type === "audio") audio++;
-          if (part.type === "input_file" || part.type === "file") files++;
-        }
-      }
-      d.messageCount = messages; d.toolCallCount = calls; d.toolResultCount = results; d.reasoningItemCount = reasoning;
-      d.imageCount = images; d.audioCount = audio; d.fileCount = files; d.encryptedItemCount = encrypted;
-      if (toolBytesComplete && items.length <= 1024) {
-        d.toolResultBytes = toolBytes; d.largestToolResultBytes = largestToolBytes;
-      } else {
-        d.fieldAvailability.toolResultBytes = { status: "not_observed", source: "client" };
-        d.fieldAvailability.largestToolResultBytes = { status: "not_observed", source: "client" };
-      }
-      d.fieldAvailability.attachmentBytes = { status: "not_observed", source: "client" };
-      if (remaining < 0) { d.captureTruncated = true; d.fieldAvailability.imageCount = { status: "truncated", source: "client" }; }
-      if (items.length > 1024) {
-        d.captureTruncated = true;
-        for (const field of ["messageCount", "toolCallCount", "toolResultCount", "reasoningItemCount", "imageCount", "audioCount", "fileCount", "encryptedItemCount"]) {
-          d.fieldAvailability[field] = { status: "truncated", source: "client" };
-        }
-      }
       d.streamingRequested = b.stream; d.storeRequested = b.store; d.parallelToolCalls = b.parallel_tool_calls;
-      d.maxOutputTokens = b.max_output_tokens ?? b.max_tokens;
+      d.maxOutputTokens = b.max_output_tokens ?? b.max_completion_tokens ?? b.max_tokens;
       d.truncationMode = b.truncation;
       d.toolChoiceMode = typeof b.tool_choice === "string" ? b.tool_choice : undefined;
     }
@@ -248,6 +297,18 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
   captureSafely(() => {
     recordSelectedRoute(ctx);
     const d = diagnostics(ctx);
+    // Every physical send owns its shape. An opaque/oversized retry body must
+    // never inherit the prior send's counts or model as current wire evidence.
+    for (const suffix of ["InputItemCount", "ConversationItemCount", "MessageCount", "ToolDefinitionCount", "ToolCallCount",
+      "ToolResultCount", "ReasoningItemCount", "EncryptedItemCount", "ImageCount", "AudioCount", "FileCount",
+      "AttachmentBytes", "ToolResultBytes", "LargestToolResultBytes"]) {
+      delete d[`forwarded${suffix}`];
+      delete d.fieldAvailability[`forwarded${suffix}`];
+    }
+    delete d.forwardedModel;
+    delete d.forwardedPreviousResponseId;
+    delete d.previousResponseRewriteApplied;
+    delete d.forwardedRequestBytes;
     const clock = clocks.get(d)!;
     if (clock.lastSend) finishDiagnosticSend(clock.lastSend, { endedAt: clock.lastSend.endedAt ?? Date.now(),
       ...(clock.lastSend.status === undefined && clock.lastSend.httpStatus !== undefined ? { status: clock.lastSend.httpStatus } : {}) });
@@ -388,6 +449,14 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
     const responseId = synthetic ? undefined : identifier(d, "upstreamResponseId",
       p.response ? response.id : (!type || p.object === "response") ? p.id : p.response_id, "upstream", true);
     const eventId = synthetic ? undefined : identifier(d, "upstreamEventId", p.event_id, "upstream");
+    // A caller trigger is a request, never evidence that compaction completed.
+    // Observe only the completed output contract, with bounded inspection and no payload retention.
+    if ((type === "response.completed" && Array.isArray(response.output)
+      && response.output.slice(0, 1024).some((item: unknown) => !!item && typeof item === "object"
+        && (item as { type?: unknown }).type === "compaction"))
+      || (type === "response.output_item.done" && p.item?.type === "compaction" && p.item.status === "completed")) {
+      recordCompletedCompaction(ctx, synthetic ? "proxy" : "upstream");
+    }
     if (responseId && state?.responseId && state.responseId !== responseId) d.responseIdMismatch = true;
     if (responseId && state) state.responseId ??= responseId;
     if (type) {

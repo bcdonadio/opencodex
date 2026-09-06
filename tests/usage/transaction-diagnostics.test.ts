@@ -35,6 +35,93 @@ import {
   type PersistedUsageEntry,
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { recordContextTransformation, recordCompletedCompaction, recordReconstructedContext, recordContextEstimate,
+  recordProtocolEvent, recordRequestShape } from "../../src/server/transaction-capture";
+import type { RequestLogContext } from "../../src/server/request-log";
+import { recordAdapterReasoning } from "../../src/server/request-log";
+import { recordForwardedRequest } from "../../src/server/transaction-capture";
+import type { AdapterRequest } from "../../src/adapters/base";
+
+test("adapter context counts survive log ingestion before reasoning metadata and deduplicate same build", () => {
+  const ctx = {} as RequestLogContext;
+  const request = { url: "https://example.test", headers: {}, body: "{}", contextLog: [
+    { kind: "adapter_normalization", injected: { message: 1 }, dropped: { message: 1 } },
+    { kind: "instruction_injection", truncated: { instruction: 2 } },
+  ] } as AdapterRequest;
+  recordAdapterReasoning(ctx, request);
+  recordAdapterReasoning(ctx, request);
+  expect(ctx.diagnostics?.locallyInjectedItemCounts).toEqual({ message: 1 });
+  expect(ctx.diagnostics?.droppedItemCounts).toEqual({ message: 1 });
+  expect(ctx.diagnostics?.truncatedItemCounts).toEqual({ instruction: 2 });
+  expect(normalizeTransactionDiagnostics(ctx.diagnostics)?.truncatedItemCounts).toEqual({ instruction: 2 });
+});
+
+test("forwarded shape cannot carry counts from a prior send into an oversized retry", () => {
+  const ctx = {} as RequestLogContext;
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "first", input: [{ role: "user", content: "hi" }] }));
+  expect(ctx.diagnostics?.forwardedInputItemCount).toBe(1);
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "second", input: "x".repeat(1024 * 1024) }));
+  expect(ctx.diagnostics?.forwardedInputItemCount).toBeUndefined();
+  expect(ctx.diagnostics?.forwardedModel).toBeUndefined();
+});
+
+test("caller observes supported inline attachments and additional tools without retaining data URIs", () => {
+  const ctx = {} as RequestLogContext;
+  recordRequestShape(ctx, { max_completion_tokens: 10, input: [
+    { type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,YWJj" },
+      { type: "input_file", file_data: "data:application/pdf;base64,YWI=" }] },
+    { type: "additional_tools", tools: [{ type: "function", name: "never-retain-tool-name" }] },
+  ] });
+  expect(ctx.diagnostics?.attachmentBytes).toBe(5);
+  expect(ctx.diagnostics?.toolDefinitionCount).toBe(1);
+  expect(ctx.diagnostics?.maxOutputTokens).toBe(10);
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("data:");
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("never-retain-tool-name");
+});
+
+test("context observations preserve operation provenance and reject arbitrary counter labels", () => {
+  const ctx = {} as RequestLogContext;
+  recordContextTransformation(ctx, { kind: "developer_guidance", injected: { developer: 1, ...{ secret_prompt: 42 } } });
+  recordReconstructedContext(ctx, { input: [{ role: "user" }] }, 3);
+  recordContextTransformation(ctx, { kind: "media_tool_bridge", dropped: { tool_definition: 2 }, injected: { tool_definition: 1 } });
+  recordContextTransformation(ctx, { kind: "raw_prompt_secret", injected: { message: 3 } });
+  expect(ctx.diagnostics?.contextTransformationKinds).toEqual(["developer_guidance", "previous_response_replay", "media_tool_bridge"]);
+  expect(ctx.diagnostics?.locallyInjectedItemCounts).toEqual({ developer: 1, tool_definition: 1 });
+  expect(ctx.diagnostics?.droppedItemCounts).toEqual({ tool_definition: 2 });
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("secret");
+  expect(ctx.diagnostics?.reconstructedInputCount).toBe(1);
+  expect(ctx.diagnostics?.replayedItemCount).toBe(3);
+});
+
+test("compaction telemetry requires completed output and deduplicates bridge and relay", () => {
+  const ctx = {} as RequestLogContext;
+  recordRequestShape(ctx, { input: [{ type: "compaction_trigger" }] });
+  expect(ctx.diagnostics?.compactionOccurred).toBeUndefined();
+  recordProtocolEvent(ctx, { type: "response.failed", response: { output: [{ type: "compaction" }] } });
+  expect(ctx.diagnostics?.compactionOccurred).toBeUndefined();
+  const before = Date.now();
+  recordProtocolEvent(ctx, { type: "response.completed", response: { output: [{ type: "compaction", encrypted_content: "never-retain-this" }] } });
+  recordCompletedCompaction(ctx, "upstream");
+  expect(ctx.diagnostics?.compactionOccurred).toBe(true);
+  expect(ctx.diagnostics?.compactionCount).toBe(1);
+  expect(Number(ctx.diagnostics?.lastCompactionAt)).toBeGreaterThanOrEqual(before);
+  expect(ctx.diagnostics?.events.filter(event => event.type === "context.compacted")).toHaveLength(1);
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("never-retain-this");
+});
+
+test("context estimate provenance clears unavailable window and does not invent billing", () => {
+  const ctx = { usageLogInputTokens: 50 } as RequestLogContext;
+  recordContextEstimate(ctx, 100);
+  expect(ctx.diagnostics?.contextUsageRatioEstimate).toBe(0.5);
+  expect(ctx.diagnostics?.fieldAvailability.contextWindowTokens).toEqual({ status: "observed", source: "adapter" });
+  recordContextEstimate(ctx);
+  expect(ctx.diagnostics?.contextWindowTokens).toBeUndefined();
+  expect(ctx.diagnostics?.contextUsageRatioEstimate).toBeUndefined();
+  delete ctx.usageLogInputTokens;
+  recordContextEstimate(ctx, 100);
+  expect(ctx.diagnostics?.tokenEstimateMethod).toBeUndefined();
+  expect(ctx.diagnostics?.billedUsageSource).toBeUndefined();
+});
 
 let home = "";
 let previousHome: string | undefined;
@@ -805,5 +892,85 @@ describe("transaction diagnostics persistence", () => {
       .toEqual(Array.from({ length: prohibited.length }, () => undefined));
     expect(readUsageEntries().map(entry => entry.upstreamError))
       .toEqual(Array.from({ length: prohibited.length }, () => undefined));
+  });
+});
+describe("bounded caller and forwarded request shape", () => {
+  test("keeps Messages blocks and structured UTF-8 results distinct from forwarded Responses", async () => {
+    const { recordRequestShape } = await import("../../src/server/transaction-capture");
+    const ctx = {} as import("../../src/server/request-log").RequestLogContext;
+    const content = [{ type: "text", text: "secret é 😀\n\u0000" }, { type: "image", source: { type: "base64", data: "AQID" } }];
+    const caller = { messages: [{ role: "assistant", content: [{ type: "tool_use", name: "secret-name" }, { type: "thinking", thinking: "secret" }, { type: "redacted_thinking", data: "secret" }] },
+      { role: "user", content: [{ type: "tool_result", content }] }], tools: [{}] };
+    const before = JSON.stringify(caller);
+    recordRequestShape(ctx, caller, 987);
+    recordRequestShape(ctx, { input: [{ type: "function_call_output", output: "ok" }] }, 123, true);
+    const d = ctx.diagnostics!;
+    expect(d.inputItemCount).toBe(2);
+    expect(d.messageCount).toBe(2);
+    expect(d.toolCallCount).toBe(1);
+    expect(d.toolResultCount).toBe(1);
+    expect(d.reasoningItemCount).toBe(2);
+    expect(d.encryptedItemCount).toBe(1);
+    expect(d.imageCount).toBe(1);
+    expect(d.attachmentBytes).toBe(3);
+    expect(d.toolResultBytes).toBe(Buffer.byteLength(JSON.stringify(content)));
+    expect(d.forwardedInputItemCount).toBe(1);
+    expect(d.forwardedMessageCount).toBe(0);
+    expect(d.forwardedToolResultBytes).toBe(2);
+    expect(d.requestBytes).toBe(987);
+    expect(d.forwardedRequestBytes).toBe(123);
+    expect(JSON.stringify(caller)).toBe(before);
+    expect(JSON.stringify(d)).not.toContain("secret");
+  });
+
+  test("bounds structured results without invoking serialization and leaves remote sizes unknown", async () => {
+    const { recordRequestShape } = await import("../../src/server/transaction-capture");
+    const ctx = {} as import("../../src/server/request-log").RequestLogContext;
+    let invoked = false;
+    const output = { nested: { text: "x".repeat(1024 * 1024 + 1) }, toJSON() { invoked = true; throw new Error("do not serialize"); } };
+    recordRequestShape(ctx, { input: [{ type: "function_call_output", output }, { type: "message", content: [{ type: "input_image", image_url: "https://example.invalid/private" }] }] });
+    expect(invoked).toBe(false);
+    expect(ctx.diagnostics!.toolResultBytes).toBeUndefined();
+    expect(ctx.diagnostics!.fieldAvailability.toolResultBytes?.status).toBe("not_observed");
+    expect(ctx.diagnostics!.attachmentBytes).toBeUndefined();
+    expect(ctx.diagnostics!.fieldAvailability.attachmentBytes?.status).toBe("not_observed");
+  });
+
+  test("marks every partial classification and refreshes forwarded availability", async () => {
+    const { recordRequestShape } = await import("../../src/server/transaction-capture");
+    const ctx = {} as import("../../src/server/request-log").RequestLogContext;
+    recordRequestShape(ctx, { input: "hello" });
+    recordRequestShape(ctx, { messages: [{ role: "user", content: Array.from({ length: 3000 }, () => ({ type: "input_audio", input_audio: { data: "AQI=" } })) }] }, undefined, true);
+    expect(ctx.diagnostics!.forwardedInputItemCount).toBe(1);
+    expect(ctx.diagnostics!.fieldAvailability.forwardedAudioCount?.status).toBe("truncated");
+    expect(ctx.diagnostics!.fieldAvailability.forwardedFileCount?.status).toBe("truncated");
+    expect(ctx.diagnostics!.fieldAvailability.forwardedInputItemCount).toBeUndefined();
+    recordRequestShape(ctx, { messages: [{ role: "assistant", tool_calls: [{}, {}], content: [] }, { role: "tool", content: "é" }] }, undefined, true);
+    expect(ctx.diagnostics!.inputItemCount).toBe(1);
+    expect(ctx.diagnostics!.forwardedToolCallCount).toBe(2);
+    expect(ctx.diagnostics!.forwardedToolResultBytes).toBe(2);
+    expect(ctx.diagnostics!.fieldAvailability.forwardedAudioCount).toBeUndefined();
+  });
+
+  test("matches JSON sizes for escapes, keys, primitives, nested arrays and lone surrogates", async () => {
+    const { summarizeRequestShape } = await import("../../src/server/request-shape");
+    for (const output of [null, { "é\n": [true, false, null, 123.5, "\ud800", "\b\t\r\f\"\\"] }, [], {}, [1, ["😀"]]]) {
+      const shape = summarizeRequestShape({ input: [{ type: "function_call_output", output }] });
+      expect(shape.values.toolResultBytes).toBe(Buffer.byteLength(JSON.stringify(output)));
+    }
+  });
+  test("compact encrypted inputs and nested media use the same structural observer", async () => {
+    const { summarizeRequestShape } = await import("../../src/server/request-shape");
+    const shape = summarizeRequestShape({ input: [{ type: "compaction", encrypted_content: "private" },
+      { type: "reasoning", encrypted_content: "private" }, { role: "user", content: [
+        { type: "input_audio", input_audio: { data: "AQI=" } }, { type: "document", source: { type: "base64", data: "AQ==" } },
+      ] }] });
+    expect(shape.values.encryptedItemCount).toBe(2);
+    expect(shape.values.reasoningItemCount).toBe(1);
+    expect(shape.values.audioCount).toBe(1);
+    expect(shape.values.fileCount).toBe(1);
+    expect(shape.values.attachmentBytes).toBe(3);
+    const cyclic: unknown[] = []; cyclic.push(cyclic);
+    expect(summarizeRequestShape({ input: [{ type: "function_call_output", output: cyclic }] }).values.toolResultBytes).toBeUndefined();
   });
 });
