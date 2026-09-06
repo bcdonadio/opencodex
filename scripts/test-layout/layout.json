@@ -1184,6 +1184,7 @@
     "tool-argument-integers.test.ts": "adapters",
     "tool-catalog-nudge.test.ts": "adapters",
     "tool-choice-performance.test.ts": "adapters",
+    "transaction-diagnostics.test.ts": "usage",
     "transient-budget-scope-source.test.ts": "lib",
     "translator-budget.test.ts": "adapters",
     "tray-proxy-deadline.test.ts": "windows",

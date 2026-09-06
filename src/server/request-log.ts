@@ -46,6 +46,12 @@ import { capEstimateAtContextWindow } from "../lib/token-estimate";
 import { inferCursorContextWindow } from "../adapters/cursor/discovery";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { modelRecordValue } from "../reasoning-effort";
+import {
+  createDiagnosticAttemptId,
+  normalizeTransactionDiagnostics,
+  sanitizeDiagnosticError,
+  type TransactionDiagnosticsV1,
+} from "../diagnostics/transaction";
 
 export interface RequestLogContext {
   model: string;
@@ -65,6 +71,7 @@ export interface RequestLogContext {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  diagnostics?: TransactionDiagnosticsV1;
   /**
    * Set when an adapter answered the turn locally and no upstream request was made
    * (`ProviderAdapter.localTerminal`). A fixed identifier naming the code path, never
@@ -164,6 +171,7 @@ export interface RequestLogEntry {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  diagnostics?: TransactionDiagnosticsV1;
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
@@ -278,6 +286,11 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     provider: entry.provider,
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
+    ...(typeof entry.apiKeyId === "string" && entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
+    ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
+    ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+    ...(entry.diagnostics ? { diagnostics: entry.diagnostics } : {}),
+    ...(entry.localTerminalReason ? { localTerminalReason: entry.localTerminalReason } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
@@ -312,6 +325,9 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.usage ? { usage: entry.usage } : {}),
     ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
     ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+    ...(entry.affinity ? { affinity: entry.affinity } : {}),
+    ...(entry.transportPhase ? { transportPhase: entry.transportPhase } : {}),
+    ...(entry.terminalSource ? { terminalSource: entry.terminalSource } : {}),
     ...(routeDecision ? { routeDecision } : {}),
   };
 }
@@ -368,24 +384,29 @@ export function addRequestLog(entry: RequestLogEntry) {
   // line-oriented viewer — while `usage.jsonl` looked clean, which is the worst shape for a
   // sanitization bug because the safe surface is the one you check.
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
-  const retained: RequestLogEntry = shadowCallRewrittenFrom === entry.shadowCallRewrittenFrom
-    ? entry
-    : { ...entry, ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}) };
-  if (!shadowCallRewrittenFrom && retained !== entry) delete retained.shadowCallRewrittenFrom;
+  const upstreamError = sanitizeDiagnosticError(entry.upstreamError);
+  const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
+  const diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
+  const retained: RequestLogEntry = { ...entry };
+  if (shadowCallRewrittenFrom) retained.shadowCallRewrittenFrom = shadowCallRewrittenFrom;
+  else delete retained.shadowCallRewrittenFrom;
+  if (upstreamError) retained.upstreamError = upstreamError;
+  else delete retained.upstreamError;
+  if (localTerminalReason) retained.localTerminalReason = localTerminalReason;
+  else delete retained.localTerminalReason;
+  if (diagnostics) retained.diagnostics = diagnostics;
+  else delete retained.diagnostics;
   entry = retained;
   retainRequestLogEntry(entry);
   try {
-    // Failure diagnostics survive the 200-entry ring buffer by riding the persisted
-    // usage entry (devlog/_plan/260716_claudecode_hardening/030). Success rows stay
-    // in their existing shape; the >=400 gate deliberately includes 499 client-cancels.
-    const failureDiagnostics = entry.status >= 400 || (entry.terminalStatus && entry.terminalStatus !== "completed")
-      ? {
-        ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
-        ...(entry.terminalStatus ? { terminalStatus: entry.terminalStatus } : {}),
-        ...(entry.closeReason ? { closeReason: entry.closeReason } : {}),
-        ...(entry.upstreamError ? { upstreamError: entry.upstreamError } : {}),
-      }
-      : {};
+    // Terminal provenance is diagnostic evidence on successful and failed rows alike.
+    // Keeping it only for failures makes a restart erase the comparison baseline.
+    const terminalMetadata = {
+      ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
+      ...(entry.terminalStatus ? { terminalStatus: entry.terminalStatus } : {}),
+      ...(entry.closeReason ? { closeReason: entry.closeReason } : {}),
+      ...(entry.upstreamError ? { upstreamError: entry.upstreamError } : {}),
+    };
     appendUsageEntry({
       requestId: entry.requestId,
       timestamp: entry.timestamp,
@@ -398,6 +419,8 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+      ...(entry.diagnostics ? { diagnostics: entry.diagnostics } : {}),
+      ...(entry.localTerminalReason ? { localTerminalReason: entry.localTerminalReason } : {}),
       ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
@@ -429,7 +452,10 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.usage ? { usage: entry.usage } : {}),
       ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
       ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
-      ...failureDiagnostics,
+      ...terminalMetadata,
+      ...(entry.affinity ? { affinity: entry.affinity } : {}),
+      ...(entry.transportPhase ? { transportPhase: entry.transportPhase } : {}),
+      ...(entry.terminalSource ? { terminalSource: entry.terminalSource } : {}),
       ...(entry.routeDecision ? { routeDecision: entry.routeDecision } : {}),
     });
   } catch {
@@ -994,6 +1020,7 @@ export function addFinalRequestLog(
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
+    ...(logCtx.diagnostics ? { diagnostics: logCtx.diagnostics } : {}),
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),
@@ -1193,6 +1220,8 @@ export function beginRequestAttempt(
 ): PersistedUsageAttempt {
   return {
     ordinal,
+    attemptId: createDiagnosticAttemptId(),
+    attemptStartedAt: Date.now(),
     provider,
     model,
     adapter,
@@ -1253,6 +1282,9 @@ export function finishRequestAttempt(
   );
   attempt.status = status;
   attempt.durationMs = Math.max(0, durationMs);
+  attempt.attemptEndedAt = attempt.attemptStartedAt === undefined
+    ? Date.now()
+    : attempt.attemptStartedAt + attempt.durationMs;
   attempt.usageStatus = finalized.status;
   if (finalized.usage) attempt.usage = finalized.usage;
   else delete attempt.usage;

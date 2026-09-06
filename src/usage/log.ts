@@ -9,6 +9,15 @@ import { usageDisplayTotalTokens } from "./totals";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
+import {
+  normalizeDiagnosticSends,
+  normalizeTransactionDiagnostics,
+  sanitizeDiagnosticError,
+  sanitizeDiagnosticIdentifier,
+  type DiagnosticSendV1,
+  type DiagnosticTransportV1,
+  type TransactionDiagnosticsV1,
+} from "../diagnostics/transaction";
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
 /**
@@ -57,6 +66,11 @@ export type AttemptRecoveryKind =
 
 export interface PersistedUsageAttempt {
   ordinal: number;
+  attemptId?: string;
+  attemptStartedAt?: number;
+  attemptEndedAt?: number;
+  upstreamTransport?: DiagnosticTransportV1;
+  sends?: DiagnosticSendV1[];
   provider: string;
   model: string;
   adapter: string;
@@ -110,6 +124,8 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  /** Bounded v1 lifecycle/correlation facts; absent on rows written before diagnostics. */
+  diagnostics?: TransactionDiagnosticsV1;
   /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
   accountLogLabel?: CodexUsageAccountLogLabel;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
@@ -149,6 +165,10 @@ export interface PersistedUsageEntry {
   closeReason?: "terminal" | "client_cancel" | "non_stream" | "body_stall" | "body_overflow";
   /** Already redacted + capped at capture (request-log.ts redactSecretString().slice(0,500)). */
   upstreamError?: string;
+  localTerminalReason?: string;
+  affinity?: "reused" | "new_bind" | "rebound" | "cleared";
+  transportPhase?: "pre_headers" | "mid_stream" | "terminal_sse";
+  terminalSource?: "upstream" | "synthetic";
   /**
    * Bounded route-decision trace (RI-01): why this provider/model/account was
    * selected. Additive field; old rows without it parse unchanged. Never
@@ -397,8 +417,22 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
         && ATTEMPT_RECOVERY_KINDS.has(value as AttemptRecoveryKind),
     ))]
     : [];
+  const attemptId = sanitizeDiagnosticIdentifier(attempt.attemptId);
+  const sends = normalizeDiagnosticSends(attempt.sends);
   return {
     ordinal: attempt.ordinal as number,
+    ...(attemptId ? { attemptId } : {}),
+    ...(isNonNegativeFiniteNumber(attempt.attemptStartedAt)
+      ? { attemptStartedAt: attempt.attemptStartedAt }
+      : {}),
+    ...(isNonNegativeFiniteNumber(attempt.attemptEndedAt)
+      ? { attemptEndedAt: attempt.attemptEndedAt }
+      : {}),
+    ...(attempt.upstreamTransport === "http"
+      || attempt.upstreamTransport === "websocket"
+      || attempt.upstreamTransport === "mixed"
+      ? { upstreamTransport: attempt.upstreamTransport }
+      : {}),
     provider: attempt.provider,
     model: attempt.model,
     adapter: attempt.adapter,
@@ -410,6 +444,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
       ? { firstOutputMs: attempt.firstOutputMs }
       : {}),
     sendCount: attempt.sendCount as number,
+    ...(sends ? { sends } : {}),
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
     ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
@@ -484,6 +519,9 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
   const routeDecision = entry.routeDecision
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
+  const diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
+  const upstreamError = sanitizeDiagnosticError(entry.upstreamError);
+  const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
   return {
     requestId: entry.requestId,
     timestamp: entry.timestamp,
@@ -499,6 +537,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+    ...(diagnostics ? { diagnostics } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
@@ -550,9 +589,28 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ...(typeof entry.totalTokens === "number" ? { totalTokens: entry.totalTokens } : {}),
     ...(Array.isArray(entry.attempts) ? { attempts } : {}),
     ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
-    ...(entry.terminalStatus ? { terminalStatus: entry.terminalStatus } : {}),
-    ...(entry.closeReason ? { closeReason: entry.closeReason } : {}),
-    ...(entry.upstreamError ? { upstreamError: entry.upstreamError } : {}),
+    ...(entry.terminalStatus === "completed" || entry.terminalStatus === "failed"
+      || entry.terminalStatus === "incomplete"
+      ? { terminalStatus: entry.terminalStatus }
+      : {}),
+    ...(entry.closeReason === "terminal" || entry.closeReason === "client_cancel"
+      || entry.closeReason === "non_stream" || entry.closeReason === "body_stall"
+      || entry.closeReason === "body_overflow"
+      ? { closeReason: entry.closeReason }
+      : {}),
+    ...(upstreamError ? { upstreamError } : {}),
+    ...(localTerminalReason ? { localTerminalReason } : {}),
+    ...(entry.affinity === "reused" || entry.affinity === "new_bind"
+      || entry.affinity === "rebound" || entry.affinity === "cleared"
+      ? { affinity: entry.affinity }
+      : {}),
+    ...(entry.transportPhase === "pre_headers" || entry.transportPhase === "mid_stream"
+      || entry.transportPhase === "terminal_sse"
+      ? { transportPhase: entry.transportPhase }
+      : {}),
+    ...(entry.terminalSource === "upstream" || entry.terminalSource === "synthetic"
+      ? { terminalSource: entry.terminalSource }
+      : {}),
     ...(routeDecision ? { routeDecision } : {}),
   };
 }

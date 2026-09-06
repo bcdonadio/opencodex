@@ -48,7 +48,7 @@ test("5xx entry persists failure diagnostics to usage.jsonl (survives the ring b
   expect(row.upstreamError).toContain("request ID test-42");
 });
 
-test("successful entry keeps the existing persisted shape (no diagnostic fields)", () => {
+test("successful entry persists terminal metadata for restart diagnostics", () => {
   addRequestLog({
     requestId: "ocx-test-200",
     timestamp: Date.now(),
@@ -64,7 +64,7 @@ test("successful entry keeps the existing persisted shape (no diagnostic fields)
   const row = lastPersistedLine();
   expect(row.status).toBe(200);
   expect(row.errorCode).toBeUndefined();
-  expect(row.terminalStatus).toBeUndefined();
-  expect(row.closeReason).toBeUndefined();
+  expect(row.terminalStatus).toBe("completed");
+  expect(row.closeReason).toBe("terminal");
   expect(row.upstreamError).toBeUndefined();
 });
