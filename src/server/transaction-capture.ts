@@ -260,7 +260,7 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
     delete d.terminalEventType;
     for (const field of ["usageSource", "usageReportedAt", "usagePartial", "usageMissingCount", "usageMissingReason",
       "lastKnownUsageResponseId", "errorOrigin", "upstreamErrorCode", "errorType", "errorParam", "errorEnvelopeSchema",
-      "retryable", "retryAfterMs", "unknownErrorFieldNames", "incompleteReason"]) {
+      "retryable", "retryAfterMs", "unknownErrorFieldNames", "incompleteReason", "errorMessageTruncated"]) {
       delete d[field]; delete d.fieldAvailability[field];
     }
     ctx.upstreamTransport = ctx.upstreamTransport && ctx.upstreamTransport !== transport ? "mixed" : transport;
@@ -535,8 +535,12 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
     d.fieldAvailability.terminalMappedStatus = { status: "derived", source: "derived" };
     if (terminal && d.downstreamTerminalSentAt === undefined)
       d.fieldAvailability.downstreamTerminalSentAt = { status: "not_observed", source: "transport" };
-    if (status === 499) { d.streamAborted = true; d.cancellationReason ??= "client_cancel"; d.downstreamClosedAt ??= Date.now();
-      recordDiagnosticEvent(d, { type: "downstream.closed", at: Date.now(), source: "downstream" }); }
+    if (status === 499) {
+      d.streamAborted = true;
+      d.cancellationReason ??= "client_cancel";
+      // A replaced turn can yield 499 while the client's socket stays open.
+      // Only the downstream close owner records downstreamClosedAt.
+    }
     const clock = clocks.get(diagnostics(ctx))!;
     if (status >= 400) {
       if (clock.output !== undefined) d.outputDeliveredBeforeFailure = true;

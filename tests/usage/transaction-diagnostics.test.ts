@@ -514,6 +514,9 @@ describe("bounded upstream facts", () => {
       unknownErrorFieldNames: ["mystery"] });
     expect(d.upstreamRequestId).toBeUndefined();
     expect(d.errorMessage).toBeUndefined();
+    captureUpstreamPayloadFacts(d, { error: { message: "😀".repeat(126) } });
+    expect(d.errorMessageTruncated).toBe(true);
+    expect(d.errorMessage).toBeUndefined();
     expect(d.errorParam).toBeUndefined();
     expect(JSON.stringify(d)).not.toContain("private");
     captureUpstreamPayloadFacts(d, { error: { code: "arbitrary_private_token", type: "arbitrary_private_token" } });

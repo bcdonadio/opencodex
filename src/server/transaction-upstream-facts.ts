@@ -109,6 +109,13 @@ export function captureUpstreamPayloadFacts(d: TransactionDiagnosticsV1, payload
     label(d, "upstreamErrorCode", own(error, "code"), ERROR_LABELS);
     label(d, "errorType", own(error, "type"), ERROR_LABELS);
     label(d, "errorParam", own(error, "param"), ERROR_PARAMS);
+    const message = own(error, "message");
+    if (typeof message === "string") {
+      // Measure only the bounded prefix; content itself never enters diagnostics.
+      set(d, "errorMessageTruncated", message.length > 500 || Buffer.byteLength(message) > 500);
+      d.fieldAvailability.errorMessage = { status: "redacted", source: "upstream" };
+      d.redactionApplied = true;
+    }
     const retryable = own(error, "retryable");
     if (typeof retryable === "boolean") set(d, "retryable", retryable);
     for (const [key, field, multiplier] of [
