@@ -1,5 +1,5 @@
 import type { ResponsesTerminalStatus } from "../bridge";
-import { observeRequestTransport, recordReceivedBytes, recordUpstreamResponse, recordSyntheticTerminal } from "./transaction-capture";
+import { observeRequestTransport, recordReceivedBytes, recordUpstreamResponse, recordSyntheticTerminal, recordDeliveredOutput, recordDownstreamTerminal } from "./transaction-capture";
 import {
   cyberPolicyErrorType,
   CYBER_POLICY_ERROR_CODE,
@@ -599,9 +599,15 @@ export function trackSseForRequestLog(
   // Reuse the byte-bounded inspector so translated responses cannot retain an
   // unterminated upstream frame or parse the same event once per observer.
   const inspector = createSseInspector({
-    onTerminal: reportTerminal,
+    onTerminal: status => {
+      if (logCtx) recordDownstreamTerminal(logCtx);
+      reportTerminal(status);
+    },
     logCtx,
-    onFirstOutput,
+    onFirstOutput: () => {
+      if (logCtx) recordDeliveredOutput(logCtx);
+      onFirstOutput?.();
+    },
   });
 
   return new ReadableStream<Uint8Array>({
@@ -617,8 +623,10 @@ export function trackSseForRequestLog(
           controller.close();
           return;
         }
-        inspector.feed(value);
         controller.enqueue(value);
+        // Only the client-facing queue establishes delivery evidence. Upstream
+        // preflight and background inspection can observe output never relayed.
+        inspector.feed(value);
       } catch (err) {
         // The upstream read rejected: the 200 body died mid-flight. Client
         // cancellation is the caller's separate 499 path, so a cancel-drained
@@ -667,13 +675,15 @@ export function responseWithDeferredRequestLog(
         // client below, unchanged. JSON bodies keep full inspection (usage parsing).
         const isJson = contentType.includes("application/json");
         inspectResponseLogJson(logCtx, isJson ? text : text.slice(0, 8192));
-        addFinalRequestLog(requestId, start, logCtx, response.status, { closeReason: "non_stream" }, addLog);
         return text;
       };
       const body = new ReadableStream<Uint8Array>({
         async start(controller) {
           try {
-            controller.enqueue(new TextEncoder().encode(await finalizeJsonLog()));
+            const text = await finalizeJsonLog();
+            controller.enqueue(new TextEncoder().encode(text));
+            recordDownstreamTerminal(logCtx);
+            addFinalRequestLog(requestId, start, logCtx, response.status, { closeReason: "non_stream" }, addLog);
             controller.close();
           } catch (err) {
             addFinalRequestLog(requestId, start, logCtx, 502, { closeReason: "non_stream" }, addLog);
