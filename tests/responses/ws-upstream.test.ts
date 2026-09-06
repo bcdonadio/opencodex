@@ -4,6 +4,12 @@ import { transportObserver } from "../../src/server/transaction-capture";
 import { beginRequestAttempt, type RequestLogContext } from "../../src/server/request-log";
 import { handleResponses } from "../../src/server/responses";
 import { isEagerRelaySseResponse } from "../../src/server/relay";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { addFinalRequestLog, httpStatusForRequestLogTerminal } from "../../src/server/request-log";
+import { readUsageEntries, resetUsageReadCacheForTests } from "../../src/usage/log";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { isWin32EagerRewrite } from "../../src/lib/bun-stream-caps";
 import { CodexWsMetadata, CODEX_WS_METADATA_MAX_BYTES, CODEX_WS_METADATA_MAX_VALUE_BYTES } from "../../src/server/responses/codex-ws-metadata";
 import {
@@ -360,6 +366,98 @@ describe("handleResponses Codex WS relay selection", () => {
     const text = await response.text();
     expect(text).toContain("response.completed");
     expect(text).toContain("data: [DONE]");
+  });
+
+  test.each(["completed", "failed", "incomplete"] as const)("eager HTTP %s persists handoff before exactly-once finalization", async status => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-eager-handoff-"));
+    process.env.OPENCODEX_HOME = home;
+    resetUsageReadCacheForTests();
+    try {
+      const frames = [
+        { type: "response.created", response: { id: "handoff-response" } },
+        { type: "response.output_text.delta", response_id: "handoff-response", delta: "fixture text" },
+        { type: `response.${status}`, response: { id: "handoff-response", status, output: [],
+          ...(status === "failed" ? { error: { code: "server_error" } } : {}) } },
+      ];
+      installFake(ws => {
+        ws.emit("open", {});
+        for (const frame of frames) ws.emit("message", { data: JSON.stringify(frame) });
+      });
+      const ctx: RequestLogContext = { model: "", provider: "", inboundTransport: "http" };
+      let finalizations = 0;
+      const response = await handleResponses(request(), forwardConfig(), ctx, {
+        codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
+        onNativePassthroughTerminal: terminal => {
+          finalizations++;
+          addFinalRequestLog("eager-handoff", Date.now(), ctx, httpStatusForRequestLogTerminal(terminal, ctx),
+            { terminalStatus: terminal, closeReason: "terminal" });
+        },
+      });
+      const actual = await response.text();
+      expect(response.status).toBe(200);
+      expect(finalizations).toBe(1);
+      const rows = readUsageEntries().filter(row => row.requestId === "eager-handoff");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.diagnostics?.downstreamTerminalSentAt).toBeNumber();
+      expect(rows[0]?.diagnostics?.lastOutputKind).toBe("text");
+      if (status === "failed") expect(rows[0]?.diagnostics?.outputDeliveredBeforeFailure).toBe(true);
+
+      // The same eager path without HTTP delivery observation emits identical bytes.
+      const reference = await handleResponses(request(), forwardConfig(), { model: "", provider: "" }, {
+        codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
+      });
+      expect(reference.status).toBe(response.status);
+      expect(await reference.text()).toBe(actual);
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      resetUsageReadCacheForTests();
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("eager HTTP discard-drain persists upstream completion without terminal handoff", async () => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-eager-disconnect-"));
+    process.env.OPENCODEX_HOME = home;
+    resetUsageReadCacheForTests();
+    try {
+      installFake(ws => {
+        ws.emit("open", {});
+        ws.emit("message", { data: JSON.stringify({ type: "response.created", response: { id: "drain-response" } }) });
+      });
+      const ctx: RequestLogContext = { model: "", provider: "", inboundTransport: "http" };
+      const logged = Promise.withResolvers<void>();
+      let finalizations = 0;
+      const response = await handleResponses(request(), forwardConfig(), ctx, {
+        codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
+        onNativePassthroughTerminal: terminal => {
+          finalizations++;
+          addFinalRequestLog("eager-disconnect", Date.now(), ctx, httpStatusForRequestLogTerminal(terminal, ctx),
+            { terminalStatus: terminal, closeReason: "terminal" });
+          logged.resolve();
+        },
+      });
+      const reader = response.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      FakeWebSocket.instances.at(-1)!.emit("message", { data: JSON.stringify({ type: "response.completed",
+        response: { id: "drain-response", status: "completed", output: [] } }) });
+      await logged.promise;
+      expect(finalizations).toBe(1);
+      const rows = readUsageEntries().filter(row => row.requestId === "eager-disconnect");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.status).toBe(200);
+      expect(rows[0]?.diagnostics?.downstreamTerminalSentAt).toBeUndefined();
+      expect(rows[0]?.diagnostics?.downstreamClosedAt).toBeNumber();
+      expect(rows[0]?.diagnostics?.cancellationReason).toBe("client_disconnect");
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      resetUsageReadCacheForTests();
+      removeTreeWithRetry(home);
+    }
   });
 
   test("review: ordinary upstream WS error retains the later synthetic incomplete provenance", async () => {
