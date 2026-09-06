@@ -264,6 +264,7 @@ describe("headless GUI parity CLI", () => {
       ["/api/machine", "ocx connect/status/sync/disconnect"],
       ["/api/session/logout", "(none — GUI current-session logout)"],
       ["/api/logs", "ocx observe"],
+      ["/api/transaction-diagnostics/export", "ocx logs export"],
       ["/api/lab", "ocx lab"],
       ["/api/config", "ocx config"],
       // The client machine plane. These are served by the connected client's own loopback

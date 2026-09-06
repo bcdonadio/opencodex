@@ -287,6 +287,17 @@ describe("ocx logs --follow output contract", () => {
 });
 
 describe("ocx logs export", () => {
+  test.each([
+    ["--json", "--request", "ocx-one"],
+    ["--request", "ocx-one", "--json"],
+    ["--from", "1000", "--json", "--to", "2000"],
+  ])("explicit JSON accepts any option position: %j", async (...args) => {
+    const bundle = { exportSchemaVersion: 1, records: [] };
+    const result = await run(["logs", "export", ...args], bundle);
+    expect(result.code).toBe(0);
+    expect(result.out.trim()).toBe(JSON.stringify(bundle));
+    expect(result.urls).toHaveLength(1);
+  });
   const bundle = { exportSchemaVersion: 1, records: [{ requestId: "ocx-one" }] };
 
   test("repeats requestId selectors and prints only JSON by default", async () => {

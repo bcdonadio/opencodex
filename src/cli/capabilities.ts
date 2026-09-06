@@ -307,6 +307,7 @@ export const CAPABILITIES: readonly Capability[] = [
       { name: "--to", value: "number", summary: "Inclusive UTC epoch-millisecond window end, at most 24 hours after --from." },
       { name: "--out", value: "string", summary: "Write the JSON bundle to this explicit local path." },
       { name: "--force", value: "boolean", summary: "Replace an existing --out target." },
+      { name: "--json", value: "boolean", summary: "Emit the JSON support bundle (already the default)." },
     ],
     mutates: false,
     json: "payload",

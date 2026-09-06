@@ -261,7 +261,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "logs",
-    usage: "ocx logs [filters] [--follow] [--json|--jsonl] | ocx logs export (--request <id> ... | --from <ms> --to <ms>) [--out <path>] [--force]",
+    usage: "ocx logs [filters] [--follow] [--json|--jsonl] | ocx logs export (--request <id> ... | --from <ms> --to <ms>) [--out <path>] [--force] [--json]",
     summary: "Inspect request logs or create a bounded sanitized support bundle.",
   },
   {

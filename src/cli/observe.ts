@@ -25,7 +25,7 @@ const USAGE = `Usage:
   ocx observe logs [--provider <name>] [--model <id>] [--status <code>]
       [--conversation <id>] [--limit <n>] [--follow] [--json|--jsonl]
   ocx logs explain <request-id> [--json]
-  ocx logs export (--request <id> ... | --from <ms> --to <ms>) [--out <path>] [--force]
+  ocx logs export (--request <id> ... | --from <ms> --to <ms>) [--out <path>] [--force] [--json]
   ocx logs rebuild-index
   ocx logs index-status
   ocx observe usage [--range <today|1d|7d|30d|all>] [--surface <all|codex|claude|grok>]
@@ -153,6 +153,8 @@ function writeSupportExport(path: string, text: string, force: boolean): void {
 
 async function exportSupportBundle(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   const args = [...argv];
+  // JSON is the default; accept the explicit flag for the shared CLI contract.
+  takeFlag(args, "--json");
   const requestIds = takeRepeatedOptions(args, "--request");
   const from = takeIntegerOption(args, "--from", { min: 0 });
   const to = takeIntegerOption(args, "--to", { min: 0 });

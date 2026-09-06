@@ -164,6 +164,7 @@ Build a bounded, sanitized support bundle from canonical usage-ledger rows.
 | `--to` | number | Inclusive UTC epoch-millisecond window end, at most 24 hours after --from. |
 | `--out` | string | Write the JSON bundle to this explicit local path. |
 | `--force` | boolean | Replace an existing --out target. |
+| `--json` | boolean | Emit the JSON support bundle (already the default). |
 
 JSON mode: `payload`.
 

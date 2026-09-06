@@ -89,7 +89,7 @@ describe("capability table is a leaf data module", () => {
     expect(exported?.mutates).toBe(false);
     expect(exported?.json).toBe("payload");
     expect(exported?.flags.map(flag => flag.name)).toEqual([
-      "--request", "--from", "--to", "--out", "--force",
+      "--request", "--from", "--to", "--out", "--force", "--json",
     ]);
   });
 
