@@ -34,13 +34,36 @@ import {
   type PersistedUsageEntry,
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { observeRequestTransport, recordRequestShape, recordForwardedRequest, recordReconstructedContext } from "../../src/server/transaction-capture";
+import { observeRequestTransport, recordRequestShape, recordForwardedRequest, recordReconstructedContext, recordRequestedReasoning } from "../../src/server/transaction-capture";
 import { recordAuthRefresh, recordAuthSend, recordRouteAuth } from "../../src/server/transaction-auth-capture";
 import { noteAttemptSend, type RequestLogContext } from "../../src/server/request-log";
 import { captureRetryDelay } from "../../src/server/transaction-recovery-capture";
 import { applyClientIdentitySnapshot } from "../../src/server/transaction-client-capture";
 import { buildResponsesWsData, selectForwardHeaders } from "../../src/server/ws-bridge";
 import type { DataPlaneAdmission } from "../../src/server/auth-cors";
+
+test("reasoning and tier snapshots distinguish caller configuration and actual wire facts", () => {
+  const ctx = { requestedEffort: "high", callerServiceTier: "priority", configuredServiceTier: "flex", requestedServiceTier: "priority" } as RequestLogContext;
+  observeRequestTransport(ctx, "http");
+  recordRequestedReasoning(ctx, "high", "low");
+  ctx.requestedEffort = "high->medium";
+  ctx.effectiveEffort = "medium";
+  ctx.reasoningWireField = "reasoning.effort";
+  ctx.reasoningWireValue = "medium";
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "model", reasoning: { effort: "medium" }, service_tier: "default" }));
+  const send = ctx.activeAttempt?.sends?.[0];
+  expect(normalizeTransactionDiagnostics(ctx.diagnostics)).toMatchObject({ callerEffort: "high", configuredEffort: "low", configuredEffortSource: "local_codex_root_config" });
+  expect(send).toMatchObject({ callerEffort: "high", configuredEffort: "low", effectiveEffort: "medium", reasoningWireValue: "medium",
+    callerServiceTier: "priority", configuredServiceTier: "flex", serviceTier: "default" });
+  const normalizedSend = normalizeDiagnosticSends([send])[0];
+  expect(normalizedSend).toMatchObject({ callerEffort: "high", configuredEffort: "low", callerServiceTier: "priority", configuredServiceTier: "flex", serviceTier: "default" });
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "model" }));
+  expect(ctx.activeAttempt?.sends?.[1]?.serviceTier).toBeUndefined();
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "model", service_tier: "person@example.com" }));
+  expect(ctx.activeAttempt?.sends?.[2]?.serviceTier).toBeUndefined();
+  expect(JSON.stringify(ctx.activeAttempt?.sends)).not.toContain("person@example.com");
+  expect(ctx.diagnostics?.responseEffort).toBeUndefined();
+});
 
 test("client identity capture reads explicit headers and more specific per-request metadata", () => {
   const ctx = {} as RequestLogContext;

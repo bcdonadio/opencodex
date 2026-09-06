@@ -675,6 +675,14 @@ export function readConfiguredCodexServiceTier(): string | undefined {
   }
 }
 
+/** Local root config provenance only; never an assertion about a remote client. */
+export function readConfiguredCodexEffort(): string | undefined {
+  try {
+    if (!existsSync(CODEX_CONFIG_PATH)) return undefined;
+    return readRootTomlString(readFileSync(CODEX_CONFIG_PATH, "utf-8"), "model_reasoning_effort") ?? undefined;
+  } catch { return undefined; }
+}
+
 export function catalogModelSupportsServiceTier(modelId: string, serviceTier: string | undefined): boolean | undefined {
   if (!serviceTier) return undefined;
   const requestTier = serviceTier.trim().toLowerCase() === "fast" ? "priority" : serviceTier.trim();

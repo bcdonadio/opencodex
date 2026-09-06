@@ -1,4 +1,4 @@
-import { transportObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext } from "../transaction-capture";
+import { transportObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordRequestedReasoning } from "../transaction-capture";
 import { captureRetryDelay } from "../transaction-recovery-capture";
 import { recordRouteAuth, recordAuthRefresh } from "../transaction-auth-capture";
 import type { Server } from "bun";
@@ -289,6 +289,7 @@ import {
   inspectResponseLogJson,
   noteAttemptSend,
   readConfiguredCodexServiceTier,
+  readConfiguredCodexEffort,
   recordAdapterReasoning,
   recordAdapterTier,
   recordAdapterTierMetadata,
@@ -3071,6 +3072,7 @@ async function handleResponsesInner(
   }
   logCtx.requestedModel = parsed.modelId;
   logCtx.requestedEffort = parsed.options.reasoning;
+  recordRequestedReasoning(logCtx, parsed.options.reasoning, readConfiguredCodexEffort());
   logCtx.callerServiceTier = sanitizeLogMetadataString(parsed.options.serviceTier);
   logCtx.requestedServiceTier = parsed.options.serviceTier;
   logCtx.requestedSpeedLabel = requestLogSpeedLabel(parsed.options.serviceTier);

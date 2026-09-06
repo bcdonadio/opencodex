@@ -1,6 +1,6 @@
 import {
   beginDiagnosticSend, createDiagnosticAttemptId, createTransactionDiagnostics, finishDiagnosticSend,
-  normalizeTransactionDiagnostics, recordDiagnosticEvent, observeDiagnosticIdentifier,
+  normalizeTransactionDiagnostics, normalizeDiagnosticSend, recordDiagnosticEvent, observeDiagnosticIdentifier,
   MAX_DIAGNOSTIC_SENDS,
   type DiagnosticEventTypeV1, type DiagnosticSendV1, type TransactionDiagnosticsV1,
 } from "../diagnostics/transaction";
@@ -93,6 +93,22 @@ export function recordContextEstimate(ctx: RequestLogContext, contextWindow?: nu
         d.fieldAvailability.contextUsageRatioEstimate = { status: "derived", source: "derived" };
       }
     }
+    clean(ctx);
+  });
+}
+
+export function recordRequestedReasoning(ctx: RequestLogContext, caller: unknown, configured: unknown): void {
+  captureSafely(() => {
+    const d = diagnostics(ctx);
+    // Keep the legacy display transition string in requestedEffort untouched.
+    // This immutable copy precedes policy/clamp normalization.
+    if (d.callerEffort === undefined && typeof caller === "string") d.callerEffort = caller;
+    if (typeof configured === "string") {
+      d.configuredEffort = configured;
+      d.configuredEffortSource = "local_codex_root_config";
+    }
+    d.fieldAvailability.callerEffort = { status: typeof caller === "string" ? "observed" : "not_observed", source: "client" };
+    d.fieldAvailability.configuredEffort = { status: typeof configured === "string" ? "observed" : "not_observed", source: "proxy" };
     clean(ctx);
   });
 }
@@ -281,8 +297,11 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
         startedAt: Date.now(), upstreamTransport: transport, endpointClass: d.endpointClass as string,
         provider: ctx.provider, model: ctx.model, adapter: ctx.providerAdapter,
         accountLogLabel: ctx.accountLogLabel, requestedEffort: ctx.requestedEffort,
+        callerEffort: d.callerEffort as string | undefined, configuredEffort: d.configuredEffort as string | undefined,
+        callerServiceTier: ctx.callerServiceTier, configuredServiceTier: ctx.configuredServiceTier,
         effectiveEffort: ctx.effectiveEffort, reasoningWireField: ctx.reasoningWireField,
-        reasoningWireValue: ctx.reasoningWireValue, serviceTier: ctx.requestedServiceTier,
+        reasoningWireValue: ctx.reasoningWireValue,
+        serviceTier: ctx.tierOutcome?.wireKind === "service-tier" && typeof ctx.tierOutcome.wireValue === "string" ? ctx.tierOutcome.wireValue : undefined,
       });
       captureRecoveryDispatch(d, attempt, send);
       attempt.sends = owner.sends;
@@ -296,7 +315,14 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
       d.forwardedRequestBytes = Buffer.byteLength(body);
       d.bytesForwarded = Number(d.bytesForwarded ?? 0) + Buffer.byteLength(body);
       if (Buffer.byteLength(body) <= 1024 * 1024) {
-        try { recordRequestShape(ctx, JSON.parse(body), Buffer.byteLength(body), true); } catch { /* non-JSON */ }
+        try {
+          const wire: unknown = JSON.parse(body);
+          recordRequestShape(ctx, wire, Buffer.byteLength(body), true);
+          const send = activeSend(ctx);
+          if (send && wire && typeof wire === "object" && !Array.isArray(wire)) {
+            send.serviceTier = normalizeDiagnosticSend({ ...send, serviceTier: (wire as Record<string, unknown>).service_tier })?.serviceTier;
+          }
+        } catch { /* non-JSON */ }
       } else {
         delete d.forwardedModel;
         d.captureTruncated = true;
