@@ -82,6 +82,23 @@ function policyEntry(requestId = "ocx-policy", timestamp = 1_500): PersistedUsag
 }
 
 describe("transaction support export", () => {
+  test("keeps caller and configured reasoning and tiers distinct from wire settings", () => {
+    const row = policyEntry();
+    Object.assign(row.diagnostics!, {
+      callerEffort: "low", configuredEffort: "high",
+      configuredEffortSource: "local_codex_root_config",
+    });
+    Object.assign(row.attempts![0]!.sends![0]!, {
+      callerEffort: "low", configuredEffort: "high", effectiveEffort: "medium",
+      callerServiceTier: "priority", configuredServiceTier: "flex", serviceTier: "default",
+    });
+    const bundle = buildSupportExport({ requestIds: [row.requestId] }, [row]);
+    expect(bundle.records[0]).toMatchObject({
+      diagnostics: { callerEffort: "low", configuredEffort: "high", configuredEffortSource: "local_codex_root_config" },
+      attempts: [{ sends: [{ callerEffort: "low", configuredEffort: "high", effectiveEffort: "medium",
+        callerServiceTier: "priority", configuredServiceTier: "flex", serviceTier: "default" }] }],
+    });
+  });
   test("availability metadata does not stand in for captured values", () => {
     const row = policyEntry();
     row.diagnostics!.fieldAvailability = {

@@ -93,6 +93,7 @@ const DIAGNOSTIC_METADATA_FIELDS = [
   "originator", "upstreamProtocol", "adapterName", "protocolVersion", "proxyVersion",
   "runtimeName", "runtimeVersion", "osPlatform", "architecture", "osVersion",
   "adapterVersion", "diagnosticMode", "forwardedModel", "responseModel", "responseEffort",
+  "callerEffort", "configuredEffort", "configuredEffortSource",
   "routeKind", "fallbackReason", "rewriteReason", "authMode", "accountSelectionSource",
   "accountPoolSelectionReason", "subscriptionPlan", "entitlementSource", "cyberAccessStatus",
   "cyberAccessProgram", "modelAccessStatus", "authRefreshResult", "tokenEstimateMethod",
@@ -241,6 +242,7 @@ function exportSend(send: DiagnosticSendV1, state: Pseudonymizer): ExportObject 
   for (const field of [
     "upstreamTransport", "endpointClass", "provider", "model", "adapter", "forwardedModel",
     "requestedEffort", "effectiveEffort", "reasoningWireField", "serviceTier", "recoveryReason", "retryReason",
+    "callerEffort", "configuredEffort", "callerServiceTier", "configuredServiceTier",
   ]) setToken(result, field, send[field as keyof DiagnosticSendV1], 64);
   if (typeof send.reasoningWireValue === "number" && finiteNonNegative(send.reasoningWireValue)) {
     result.reasoningWireValue = send.reasoningWireValue;
