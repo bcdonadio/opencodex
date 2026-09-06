@@ -9,6 +9,7 @@ import type { TransportObservation } from "./responses/fetch-helpers";
 import { httpStatusFromTerminalError } from "../lib/errors";
 import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
+import type { RequestPacingObserver } from "../providers/request-pacing";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -500,9 +501,29 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
   });
 }
 
+/** Queue timestamps belong to actual provider pacing, not authentication admission. */
+export function pacingObserver(ctx: RequestLogContext): RequestPacingObserver {
+  return event => captureSafely(() => {
+    const d = diagnostics(ctx);
+    if (event.kind === "queued") {
+      d.queuedAt ??= event.at;
+      d.fieldAvailability.queuedAt = { status: "observed", source: "proxy" };
+    } else {
+      d.admittedAt = event.at;
+      d.queueMs = Number(d.queueMs ?? 0) + event.queueMs;
+      d.derivedFields = [...new Set([...(Array.isArray(d.derivedFields) ? d.derivedFields as string[] : []), "queueMs"])];
+      d.fieldAvailability.queueMs = { status: "derived", source: "derived" };
+      d.fieldAvailability.admittedAt = { status: "observed", source: "proxy" };
+      recordDiagnosticEvent(d, { type: "request.admitted", at: event.at, source: "proxy" });
+    }
+    clean(ctx);
+  });
+}
+
 /** Callback-only transport leaf integration; all exceptions terminate here. */
 export function transportObserver(ctx: RequestLogContext): (event: TransportObservation) => void {
   return event => captureSafely(() => {
+    if (event.kind === "queue") { pacingObserver(ctx)(event.observation); return; }
     if (event.kind === "prepared") {
       if (ctx.activeAttempt && !sendOwners.has(ctx.activeAttempt)) sendOwners.set(ctx.activeAttempt, { sendCount: 0 });
       return;

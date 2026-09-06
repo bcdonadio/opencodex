@@ -1,4 +1,4 @@
-import { transportObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext } from "../transaction-capture";
+import { transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext } from "../transaction-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -5802,7 +5802,7 @@ async function handleResponsesInner(
     // Initial admission must settle before the streaming Response commits HTTP 200.
     // Let the outer Responses facade preserve the local retryable-429 contract.
     try {
-      await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal);
+      await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal, pacingObserver(logCtx));
     } catch (error) {
       cleanupRunTurnAbort();
       queue.close();
@@ -5820,7 +5820,7 @@ async function handleResponsesInner(
     ): Promise<void> => {
       try {
         if (!pacingSlotAcquired) {
-          await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal);
+          await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal, pacingObserver(logCtx));
         }
         noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery);
         const runTurnProviderFetch = providerFetch(
@@ -6223,7 +6223,7 @@ async function handleResponsesInner(
   try {
     if (activeAdapter.fetchResponse) {
       noteAttemptSend(logCtx.activeAttempt, inputTokenEstimate);
-      await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal);
+      await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal, pacingObserver(logCtx));
       upstreamResponse = await activeAdapter.fetchResponse(builtInitialRequest, {
         abortSignal: upstream.signal,
         timeoutMs: connectMs,
@@ -6344,7 +6344,7 @@ async function handleResponsesInner(
       try {
         try {
           if (activeAdapter.fetchResponse) {
-            await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal);
+            await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal, pacingObserver(logCtx));
             return await activeAdapter.fetchResponse(retryRequest, {
               abortSignal: upstream.signal,
               timeoutMs: connectMs,
@@ -6825,7 +6825,7 @@ async function handleResponsesInner(
       try {
         if (activeAdapter.fetchResponse) {
           noteAttemptSend(logCtx.activeAttempt, continuationEstimate, replayKind);
-          await waitForProviderRequestSlot(route.providerName, route.provider, nextParsed.modelId, upstream.signal);
+          await waitForProviderRequestSlot(route.providerName, route.provider, nextParsed.modelId, upstream.signal, pacingObserver(logCtx));
           return await activeAdapter.fetchResponse(builtContinuationRequest, {
             abortSignal: upstream.signal,
             timeoutMs: connectMs,

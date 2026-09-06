@@ -7,7 +7,7 @@ import {
 } from "./ws-upstream";
 import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
-import { waitForProviderRequestSlot } from "../../providers/request-pacing";
+import { waitForProviderRequestSlot, type RequestPacingObservation } from "../../providers/request-pacing";
 import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 
@@ -65,6 +65,7 @@ export interface ProviderFetchOptions {
 }
 
 export type TransportObservation =
+  | { kind: "queue"; observation: RequestPacingObservation }
   | { kind: "prepared" }
   | { kind: "send"; transport: "http" | "websocket"; body?: unknown }
   | { kind: "response"; transport: "http" | "websocket"; response: Response }
@@ -117,7 +118,8 @@ export function providerFetch(
       return Promise.resolve();
     }
     return options.providerName
-      ? waitForProviderRequestSlot(options.providerName, provider, options.modelId, signal)
+      ? waitForProviderRequestSlot(options.providerName, provider, options.modelId, signal,
+        observation => notifyTransport(options.observeTransport, { kind: "queue", observation }))
       : Promise.resolve();
   };
   const wrapped = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
