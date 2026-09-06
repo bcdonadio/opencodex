@@ -1,18 +1,19 @@
-import { observeDiagnosticIdentifier, type TransactionDiagnosticsV1 } from "../diagnostics/transaction";
+import { createTransactionDiagnostics, normalizeTransactionDiagnostics, observeDiagnosticIdentifier, type TransactionDiagnosticsV1 } from "../diagnostics/transaction";
 
 // These names already belong to the Codex request boundary. Never inspect message
 // content, turn-state, arbitrary metadata, or interpret a grouping digest as an ID.
 const METADATA_IDS = [["thread_id", "codexThreadId"], ["turn_id", "codexTurnId"],
   ["session_id", "codexSessionId"], ["parent_thread_id", "parentThreadId"]] as const;
 
-function observe(d: TransactionDiagnosticsV1, field: string, value: unknown): void {
+function observe(d: TransactionDiagnosticsV1, field: string, value: unknown, replace = false): void {
   if (value === undefined || value === null) return;
   const result = observeDiagnosticIdentifier(value);
   if (result.state === "excluded") return;
   // First boundary wins, including redaction: malformed lower-priority aliases
   // must not replace an explicit header or conceal its privacy disposition.
-  if (d.fieldAvailability[field]?.status !== "not_observed" && d.fieldAvailability[field] !== undefined) return;
+  if (!replace && d.fieldAvailability[field]?.status !== "not_observed" && d.fieldAvailability[field] !== undefined) return;
   d.fieldAvailability[field] = { status: result.state, source: "client" };
+  delete d[field];
   if (result.value) {
     d[field] = result.value;
     d.correlationSource = "mixed";
@@ -22,12 +23,12 @@ function observe(d: TransactionDiagnosticsV1, field: string, value: unknown): vo
   if (result.state === "truncated") d.captureTruncated = true;
 }
 
-function turnMetadata(d: TransactionDiagnosticsV1, raw: unknown): void {
+function turnMetadata(d: TransactionDiagnosticsV1, raw: unknown, replace = false): void {
   if (typeof raw !== "string" || raw.length > 16 * 1024) return;
   try {
     const value: unknown = JSON.parse(raw);
     if (value && typeof value === "object" && !Array.isArray(value)) {
-      for (const [key, field] of METADATA_IDS) observe(d, field, (value as Record<string, unknown>)[key]);
+      for (const [key, field] of METADATA_IDS) observe(d, field, (value as Record<string, unknown>)[key], replace);
     }
   } catch { /* Malformed optional metadata never affects dispatch. */ }
 }
@@ -62,7 +63,44 @@ export function captureClientHeaders(d: TransactionDiagnosticsV1, headers: Heade
 export function captureClientMetadata(d: TransactionDiagnosticsV1, metadata: unknown): void {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return;
   const record = metadata as Record<string, unknown>;
-  for (const [key, field] of METADATA_IDS) observe(d, field, record[key]);
   // Native WebSocket frames transport the same compatibility JSON as a string.
-  turnMetadata(d, record["x-codex-turn-metadata"]);
+  // Per-turn metadata supersedes connection-time headers, especially turn_id.
+  turnMetadata(d, record["x-codex-turn-metadata"], true);
+  for (const [key, field] of METADATA_IDS) observe(d, field, record[key], true);
+}
+
+export interface ClientIdentitySnapshot {
+  fields: Record<string, string>;
+  fieldAvailability: TransactionDiagnosticsV1["fieldAvailability"];
+  captureTruncated?: boolean;
+  redactionApplied?: boolean;
+}
+
+/** The WebSocket keeps only sanitized client facts, separate from forwarded headers. */
+export function snapshotClientIdentity(headers: Headers): ClientIdentitySnapshot | undefined {
+  try {
+    const d = createTransactionDiagnostics({ requestId: "ws-upgrade", receivedAt: Date.now() });
+    captureClientHeaders(d, headers);
+    const normalized = normalizeTransactionDiagnostics(d);
+    if (!normalized) return undefined;
+    const fields: Record<string, string> = {};
+    for (const field of ["clientRequestId", "codexThreadId", "codexTurnId", "codexSessionId", "parentThreadId", "clientProduct", "clientVersion"]) {
+      if (typeof normalized[field] === "string") fields[field] = normalized[field] as string;
+    }
+    return { fields, fieldAvailability: { ...normalized.fieldAvailability }, captureTruncated: normalized.captureTruncated, redactionApplied: normalized.redactionApplied };
+  } catch { return undefined; }
+}
+
+export function applyClientIdentitySnapshot(d: TransactionDiagnosticsV1 | undefined, snapshot?: ClientIdentitySnapshot): void {
+  try {
+    if (!d || !snapshot) return;
+    Object.assign(d, snapshot.fields);
+    Object.assign(d.fieldAvailability, snapshot.fieldAvailability);
+    if (Object.keys(snapshot.fields).some(field => field.endsWith("Id"))) {
+      d.correlationSource = "mixed";
+      d.correlationConfidence = "direct";
+    }
+    if (snapshot.captureTruncated) d.captureTruncated = true;
+    if (snapshot.redactionApplied) d.redactionApplied = true;
+  } catch { /* Optional observation never affects frame handling. */ }
 }

@@ -37,8 +37,11 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { observeRequestTransport, recordRequestShape, recordForwardedRequest, recordReconstructedContext } from "../../src/server/transaction-capture";
 import { noteAttemptSend, type RequestLogContext } from "../../src/server/request-log";
 import { captureRetryDelay } from "../../src/server/transaction-recovery-capture";
+import { applyClientIdentitySnapshot } from "../../src/server/transaction-client-capture";
+import { buildResponsesWsData, selectForwardHeaders } from "../../src/server/ws-bridge";
+import type { DataPlaneAdmission } from "../../src/server/auth-cors";
 
-test("client identity capture reads bounded explicit headers and metadata, with first-source precedence", () => {
+test("client identity capture reads explicit headers and more specific per-request metadata", () => {
   const ctx = {} as RequestLogContext;
   observeRequestTransport(ctx, "http", new Request("http://localhost/v1/responses", { headers: {
     "x-client-request-id": "client-first", "x-request-id": "client-alias",
@@ -49,17 +52,17 @@ test("client identity capture reads bounded explicit headers and metadata, with 
   recordRequestShape(ctx, { client_metadata: { thread_id: "body-thread", parent_thread_id: "body-parent", root_thread_id: "invented-root" }, input: [] });
   const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
   expect(d.clientRequestId).toBe("client-first");
-  expect(d.codexThreadId).toBe("thread-one");
+  expect(d.codexThreadId).toBe("body-thread");
   expect(d.codexTurnId).toBe("turn-one");
   expect(d.codexSessionId).toBe("session-one");
-  expect(d.parentThreadId).toBe("parent-header");
+  expect(d.parentThreadId).toBe("body-parent");
   expect(d.clientProduct).toBe("codex_cli_rs");
   expect(d.clientVersion).toBe("0.153.0");
   expect(d.rootThreadId).toBeUndefined();
   expect(d.fieldAvailability.rootThreadId?.status).toBe("unsupported");
   expect(d.codexCoreVersion).toBeUndefined();
   expect(d.desktopVersion).toBeUndefined();
-  expect(JSON.stringify(d)).not.toMatch(/private-hostname|private-value|private\/path|invented-root|body-thread/);
+  expect(JSON.stringify(d)).not.toMatch(/private-hostname|private-value|private\/path|invented-root/);
 });
 
 test("WebSocket metadata and invalid client identifiers remain bounded and privacy safe", () => {
@@ -69,7 +72,7 @@ test("WebSocket metadata and invalid client identifiers remain bounded and priva
     "x-codex-turn-metadata": "[1,2,3]",
   } }));
   recordRequestShape(ctx, { client_metadata: {
-    "x-codex-turn-metadata": JSON.stringify({ thread_id: "frame-thread", session_id: "frame-session", parent_thread_id: "conceal-redaction" }),
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "frame-thread", session_id: "frame-session" }),
     agent_id: "invented-agent", client_version: "invented-version",
   } });
   const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
@@ -86,6 +89,31 @@ test("WebSocket metadata and invalid client identifiers remain bounded and priva
     "x-codex-turn-metadata": JSON.stringify({ thread_id: "x".repeat(17000) }),
   } }));
   expect(oversized.diagnostics?.codexThreadId).toBeUndefined();
+});
+
+test("WebSocket upgrade preserves sanitized identity separately from forward headers across turns", () => {
+  const headers = new Headers({ "user-agent": "codex_vscode/0.153.0 (private-machine)",
+    "x-codex-turn-id": "upgrade-turn", "x-request-id": "upgrade-request",
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread-one" }),
+  });
+  const forwarded = selectForwardHeaders(headers);
+  const socket = buildResponsesWsData(forwarded, { kind: "loopback" } as DataPlaneAdmission, undefined, undefined, headers);
+  expect(socket.headers?.has("user-agent")).toBe(false);
+  expect(socket.headers?.has("x-request-id")).toBe(false);
+  expect(JSON.stringify(socket.clientIdentitySnapshot)).not.toContain("private-machine");
+  for (const turn of ["turn-one", "turn-two"]) {
+    const ctx = {} as RequestLogContext;
+    observeRequestTransport(ctx, "websocket", new Request("http://localhost/v1/responses", { headers: forwarded }));
+    applyClientIdentitySnapshot(ctx.diagnostics, socket.clientIdentitySnapshot);
+    recordRequestShape(ctx, { client_metadata: { turn_id: turn } });
+    const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+    expect(d.clientProduct).toBe("codex_vscode");
+    expect(d.clientVersion).toBe("0.153.0");
+    expect(d.clientRequestId).toBe("upgrade-request");
+    expect(d.codexThreadId).toBe("thread-one");
+    expect(d.codexTurnId).toBe(turn);
+  }
+  expect(socket.clientIdentitySnapshot?.fields.codexTurnId).toBe("upgrade-turn");
 });
 
 test("recovery reasons belong to each actual dispatch, including repeated recovery kinds", () => {

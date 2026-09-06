@@ -8,6 +8,7 @@ import type { DataPlaneAdmission } from "./auth-cors";
 import type { AdmissionLease, AdmissionReservation } from "../lib/admission";
 import { BoundedSseFrameBuffer } from "./sse-frame-buffer";
 import { safeResponseHeaders } from "./safe-response-headers";
+import { snapshotClientIdentity, type ClientIdentitySnapshot } from "./transaction-client-capture";
 
 export { safeResponseHeaders } from "./safe-response-headers";
 
@@ -16,6 +17,7 @@ type ResponsesTerminalReporter = (status: ResponsesTerminalStatus) => void;
 type ResponsesPayloadObserver = (payload: string) => void;
 
 export interface WsData {
+  clientIdentitySnapshot?: ClientIdentitySnapshot;
   connectionId?: string;
   requestSequenceOnConnection?: number;
   headers?: Headers; // base inbound forward headers only; per-turn auth refresh injects current pool tokens
@@ -63,10 +65,12 @@ export function buildResponsesWsData(
   admission: DataPlaneAdmission,
   admissionLease?: AdmissionReservation<ServerWebSocket<WsData>>,
   sessionLaneId?: string,
+  clientHeaders?: Headers,
 ): WsData {
   // Auth is handshake-time only on this path: the per-frame contexts have no
   // request headers left to re-resolve from, so the decision rides along here.
   return {
+    ...(clientHeaders ? { clientIdentitySnapshot: snapshotClientIdentity(clientHeaders) } : {}),
     headers,
     admission,
     connectionId: `ws_${crypto.randomUUID()}`,
