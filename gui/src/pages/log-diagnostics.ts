@@ -19,6 +19,7 @@ const IDENTIFIER_FIELDS = [
   "lastKnownUsageResponseId",
 ] as const;
 const METADATA_FIELDS = [
+  "callerEffort", "configuredEffort", "configuredEffortSource",
   "agentRole", "clientProduct", "clientVersion", "codexCoreVersion", "desktopVersion", "originator",
   "upstreamProtocol", "adapterName", "protocolVersion", "proxyVersion", "runtimeName", "runtimeVersion",
   "osPlatform", "architecture", "osVersion", "adapterVersion", "diagnosticMode", "forwardedModel",
@@ -48,7 +49,11 @@ const NON_NEGATIVE_NUMBER_FIELDS = [
   "idleBeforeFailureMs", "requestBytes", "forwardedRequestBytes", "inputItemCount", "messageCount",
   "toolDefinitionCount", "toolCallCount", "toolResultCount", "imageCount", "audioCount", "fileCount",
   "encryptedItemCount", "reasoningItemCount", "conversationItemCount", "attachmentBytes", "toolResultBytes",
-  "largestToolResultBytes", "contextWindowTokens", "maxOutputTokens", "deltaInputCount",
+  "largestToolResultBytes", "contextWindowTokens", "contextUsageRatioEstimate", "maxOutputTokens", "deltaInputCount",
+  "forwardedInputItemCount", "forwardedConversationItemCount", "forwardedMessageCount", "forwardedToolDefinitionCount",
+  "forwardedToolCallCount", "forwardedToolResultCount", "forwardedReasoningItemCount", "forwardedEncryptedItemCount",
+  "forwardedImageCount", "forwardedAudioCount", "forwardedFileCount", "forwardedAttachmentBytes",
+  "forwardedToolResultBytes", "forwardedLargestToolResultBytes",
   "reconstructedInputCount", "replayedItemCount", "compactionCount", "httpStatus",
   "websocketHandshakeStatus", "terminalMappedStatus", "lastEventSequence", "streamEventCount", "bytesReceived",
   "bytesForwarded", "websocketCloseCode", "connectionAgeMs", "reconnectCount", "idleTimeoutMs", "bodyStallMs",
@@ -82,7 +87,7 @@ const eventTypes = ["request.received", "request.admitted", "route.selected", "u
   "upstream.connected", "upstream.handshake.completed", "upstream.request.sent", "upstream.headers.received",
   "response.created", "response.output_item.added", "response.output_text.delta", "response.completed",
   "response.failed", "response.incomplete", "upstream.error", "upstream.closed", "downstream.terminal.sent",
-  "downstream.closed", "request.finalized", "request.persisted"];
+  "downstream.closed", "request.finalized", "request.persisted", "context.compacted"];
 function project(raw: Record<string, unknown>, strings: readonly string[], numbers: readonly string[], booleans: readonly string[] = []): EvidenceFields {
   const fields: EvidenceFields = {};
   for (const key of strings) if (string(raw[key])) fields[key] = raw[key];
@@ -107,6 +112,8 @@ export function parseLogDiagnostics(raw: unknown): LogDiagnostics | undefined {
     inboundProtocol: ["responses", "chat", "messages"],
     inboundTransport: ["http", "websocket", "mixed"], upstreamTransport: ["http", "websocket", "mixed"],
     terminalSource: ["upstream", "synthetic"], transportPhase: ["pre_headers", "mid_stream", "terminal_sse"],
+    closeReason: ["terminal", "client_cancel", "non_stream", "body_stall", "body_overflow"],
+    policyFallbackOutcome: ["succeeded", "failed", "not_attempted"],
   };
   for (const [key, values] of Object.entries(enums)) if (string(raw[key]) && values.includes(raw[key])) fields[key] = raw[key];
   for (const key of STRING_LIST_FIELDS) {
@@ -137,6 +144,7 @@ export function parseLogDiagnostics(raw: unknown): LogDiagnostics | undefined {
 }
 const sendStrings = ["sendId", "upstreamTransport", "endpointClass", "provider", "model", "adapter",
   "accountLogLabel", "forwardedModel", "requestedEffort", "effectiveEffort", "reasoningWireField",
+  "callerEffort", "configuredEffort", "callerServiceTier", "configuredServiceTier",
   "serviceTier", "recoveryReason", "retryReason", "upstreamRequestId", "upstreamResponseId", "upstreamEventId"];
 const sendNumbers = ["sendOrdinal", "startedAt", "endedAt", "status", "httpStatus", "websocketHandshakeStatus", "bytesForwarded", "bytesReceived"];
 export function parseAttemptEvidence(raw: unknown): EvidenceFields[] {
