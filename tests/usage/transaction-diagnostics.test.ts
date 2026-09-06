@@ -738,3 +738,83 @@ describe("transaction diagnostics persistence", () => {
       .toEqual(Array.from({ length: prohibited.length }, () => undefined));
   });
 });
+describe("bounded caller and forwarded request shape", () => {
+  test("keeps Messages blocks and structured UTF-8 results distinct from forwarded Responses", async () => {
+    const { recordRequestShape } = await import("../../src/server/transaction-capture");
+    const ctx = {} as import("../../src/server/request-log").RequestLogContext;
+    const content = [{ type: "text", text: "secret é 😀\n\u0000" }, { type: "image", source: { type: "base64", data: "AQID" } }];
+    const caller = { messages: [{ role: "assistant", content: [{ type: "tool_use", name: "secret-name" }, { type: "thinking", thinking: "secret" }, { type: "redacted_thinking", data: "secret" }] },
+      { role: "user", content: [{ type: "tool_result", content }] }], tools: [{}] };
+    const before = JSON.stringify(caller);
+    recordRequestShape(ctx, caller, 987);
+    recordRequestShape(ctx, { input: [{ type: "function_call_output", output: "ok" }] }, 123, true);
+    const d = ctx.diagnostics!;
+    expect(d.inputItemCount).toBe(2);
+    expect(d.messageCount).toBe(2);
+    expect(d.toolCallCount).toBe(1);
+    expect(d.toolResultCount).toBe(1);
+    expect(d.reasoningItemCount).toBe(2);
+    expect(d.encryptedItemCount).toBe(1);
+    expect(d.imageCount).toBe(1);
+    expect(d.attachmentBytes).toBe(3);
+    expect(d.toolResultBytes).toBe(Buffer.byteLength(JSON.stringify(content)));
+    expect(d.forwardedInputItemCount).toBe(1);
+    expect(d.forwardedMessageCount).toBe(0);
+    expect(d.forwardedToolResultBytes).toBe(2);
+    expect(d.requestBytes).toBe(987);
+    expect(d.forwardedRequestBytes).toBe(123);
+    expect(JSON.stringify(caller)).toBe(before);
+    expect(JSON.stringify(d)).not.toContain("secret");
+  });
+
+  test("bounds structured results without invoking serialization and leaves remote sizes unknown", async () => {
+    const { recordRequestShape } = await import("../../src/server/transaction-capture");
+    const ctx = {} as import("../../src/server/request-log").RequestLogContext;
+    let invoked = false;
+    const output = { nested: { text: "x".repeat(1024 * 1024 + 1) }, toJSON() { invoked = true; throw new Error("do not serialize"); } };
+    recordRequestShape(ctx, { input: [{ type: "function_call_output", output }, { type: "message", content: [{ type: "input_image", image_url: "https://example.invalid/private" }] }] });
+    expect(invoked).toBe(false);
+    expect(ctx.diagnostics!.toolResultBytes).toBeUndefined();
+    expect(ctx.diagnostics!.fieldAvailability.toolResultBytes?.status).toBe("not_observed");
+    expect(ctx.diagnostics!.attachmentBytes).toBeUndefined();
+    expect(ctx.diagnostics!.fieldAvailability.attachmentBytes?.status).toBe("not_observed");
+  });
+
+  test("marks every partial classification and refreshes forwarded availability", async () => {
+    const { recordRequestShape } = await import("../../src/server/transaction-capture");
+    const ctx = {} as import("../../src/server/request-log").RequestLogContext;
+    recordRequestShape(ctx, { input: "hello" });
+    recordRequestShape(ctx, { messages: [{ role: "user", content: Array.from({ length: 3000 }, () => ({ type: "input_audio", input_audio: { data: "AQI=" } })) }] }, undefined, true);
+    expect(ctx.diagnostics!.forwardedInputItemCount).toBe(1);
+    expect(ctx.diagnostics!.fieldAvailability.forwardedAudioCount?.status).toBe("truncated");
+    expect(ctx.diagnostics!.fieldAvailability.forwardedFileCount?.status).toBe("truncated");
+    expect(ctx.diagnostics!.fieldAvailability.forwardedInputItemCount).toBeUndefined();
+    recordRequestShape(ctx, { messages: [{ role: "assistant", tool_calls: [{}, {}], content: [] }, { role: "tool", content: "é" }] }, undefined, true);
+    expect(ctx.diagnostics!.inputItemCount).toBe(1);
+    expect(ctx.diagnostics!.forwardedToolCallCount).toBe(2);
+    expect(ctx.diagnostics!.forwardedToolResultBytes).toBe(2);
+    expect(ctx.diagnostics!.fieldAvailability.forwardedAudioCount).toBeUndefined();
+  });
+
+  test("matches JSON sizes for escapes, keys, primitives, nested arrays and lone surrogates", async () => {
+    const { summarizeRequestShape } = await import("../../src/server/request-shape");
+    for (const output of [null, { "é\n": [true, false, null, 123.5, "\ud800", "\b\t\r\f\"\\"] }, [], {}, [1, ["😀"]]]) {
+      const shape = summarizeRequestShape({ input: [{ type: "function_call_output", output }] });
+      expect(shape.values.toolResultBytes).toBe(Buffer.byteLength(JSON.stringify(output)));
+    }
+  });
+  test("compact encrypted inputs and nested media use the same structural observer", async () => {
+    const { summarizeRequestShape } = await import("../../src/server/request-shape");
+    const shape = summarizeRequestShape({ input: [{ type: "compaction", encrypted_content: "private" },
+      { type: "reasoning", encrypted_content: "private" }, { role: "user", content: [
+        { type: "input_audio", input_audio: { data: "AQI=" } }, { type: "document", source: { type: "base64", data: "AQ==" } },
+      ] }] });
+    expect(shape.values.encryptedItemCount).toBe(2);
+    expect(shape.values.reasoningItemCount).toBe(1);
+    expect(shape.values.audioCount).toBe(1);
+    expect(shape.values.fileCount).toBe(1);
+    expect(shape.values.attachmentBytes).toBe(3);
+    const cyclic: unknown[] = []; cyclic.push(cyclic);
+    expect(summarizeRequestShape({ input: [{ type: "function_call_output", output: cyclic }] }).values.toolResultBytes).toBeUndefined();
+  });
+});

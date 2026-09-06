@@ -9,6 +9,7 @@ import type { TransportObservation } from "./responses/fetch-helpers";
 import { httpStatusFromTerminalError } from "../lib/errors";
 import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
+import { summarizeRequestShape } from "./request-shape";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -238,6 +239,19 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
     if (!forwarded) requestShapes.add(ctx);
     const b = body as Record<string, unknown>;
     const d = diagnostics(ctx);
+    const shape = summarizeRequestShape(b);
+    const shapeField = (name: string) => forwarded ? `forwarded${name[0]!.toUpperCase()}${name.slice(1)}` : name;
+    const source = forwarded ? "adapter" as const : "client" as const;
+    for (const [name, value] of Object.entries(shape.values)) {
+      d[shapeField(name)] = value;
+      delete d.fieldAvailability[shapeField(name)];
+    }
+    for (const name of shape.unavailable) {
+      delete d[shapeField(name)];
+      d.fieldAvailability[shapeField(name)] = { status: "not_observed", source };
+    }
+    for (const name of shape.truncated) d.fieldAvailability[shapeField(name)] = { status: "truncated", source };
+    if (shape.truncated.length) d.captureTruncated = true;
     if (bytes !== undefined) d[forwarded ? "forwardedRequestBytes" : "requestBytes"] = bytes;
     const previous = identifier(d, forwarded ? "forwardedPreviousResponseId" : "previousResponseId", b.previous_response_id, "client");
     if (forwarded) {
@@ -256,53 +270,8 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
           identifier(d, field!, (metadata as Record<string, unknown>)[key!], "client");
         }
       }
-      const items = Array.isArray(b.input) ? b.input : Array.isArray(b.messages) ? b.messages : [];
-      d.inputItemCount = typeof b.input === "string" ? 1 : items.length;
-      d.conversationItemCount = d.inputItemCount;
-      d.deltaInputCount = d.inputItemCount;
+      d.deltaInputCount = typeof b.input === "string" ? 1 : Array.isArray(b.input) ? b.input.length : Array.isArray(b.messages) ? b.messages.length : 0;
       d.continuationMode = previous ? "previous_response" : "explicit_input";
-      d.toolDefinitionCount = Array.isArray(b.tools) ? b.tools.length : 0;
-      let messages = 0, calls = 0, results = 0, reasoning = 0, images = 0, audio = 0, files = 0, encrypted = 0;
-      let remaining = 2048;
-      let toolBytes = 0, largestToolBytes = 0, toolBytesComplete = true;
-      for (const item of items.slice(0, 1024)) {
-        if (!item || typeof item !== "object") continue;
-        if (item.type === "message" || item.role) messages++;
-        if (item.type === "function_call" || item.type === "custom_tool_call") calls++;
-        if (Array.isArray(item.tool_calls)) calls += item.tool_calls.length;
-        if (item.type === "function_call_output" || item.type === "custom_tool_call_output" || item.role === "tool") results++;
-        if (item.type === "function_call_output" || item.type === "custom_tool_call_output" || item.role === "tool") {
-          const value = item.output ?? item.content;
-          if (typeof value === "string" && value.length <= 1024 * 1024 - toolBytes) {
-            const length = Buffer.byteLength(value); toolBytes += length; largestToolBytes = Math.max(largestToolBytes, length);
-          } else toolBytesComplete = false;
-        }
-        if (item.type === "reasoning") reasoning++;
-        if (item.encrypted_content !== undefined) encrypted++;
-        if (Array.isArray(item.content)) for (const part of item.content) {
-          if (--remaining < 0) break;
-          if (!part || typeof part !== "object") continue;
-          if (part.type === "input_image" || part.type === "image_url") images++;
-          if (part.type === "input_audio" || part.type === "audio") audio++;
-          if (part.type === "input_file" || part.type === "file") files++;
-        }
-      }
-      d.messageCount = messages; d.toolCallCount = calls; d.toolResultCount = results; d.reasoningItemCount = reasoning;
-      d.imageCount = images; d.audioCount = audio; d.fileCount = files; d.encryptedItemCount = encrypted;
-      if (toolBytesComplete && items.length <= 1024) {
-        d.toolResultBytes = toolBytes; d.largestToolResultBytes = largestToolBytes;
-      } else {
-        d.fieldAvailability.toolResultBytes = { status: "not_observed", source: "client" };
-        d.fieldAvailability.largestToolResultBytes = { status: "not_observed", source: "client" };
-      }
-      d.fieldAvailability.attachmentBytes = { status: "not_observed", source: "client" };
-      if (remaining < 0) { d.captureTruncated = true; d.fieldAvailability.imageCount = { status: "truncated", source: "client" }; }
-      if (items.length > 1024) {
-        d.captureTruncated = true;
-        for (const field of ["messageCount", "toolCallCount", "toolResultCount", "reasoningItemCount", "imageCount", "audioCount", "fileCount", "encryptedItemCount"]) {
-          d.fieldAvailability[field] = { status: "truncated", source: "client" };
-        }
-      }
       d.streamingRequested = b.stream; d.storeRequested = b.store; d.parallelToolCalls = b.parallel_tool_calls;
       d.maxOutputTokens = b.max_output_tokens ?? b.max_tokens;
       d.truncationMode = b.truncation;
