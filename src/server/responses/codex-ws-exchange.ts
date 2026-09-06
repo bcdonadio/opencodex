@@ -3,6 +3,7 @@ import { CodexWsMetadata, type CodexWsQuotaObserver } from "./codex-ws-metadata"
 import { CODEX_RESPONSES_HTTP_URL, type PreparedCodexWsRequest } from "./codex-ws-request";
 import { CodexWsCorrelation } from "./codex-ws-correlation";
 import type { CodexWsSession } from "./codex-ws-session";
+import type { ProviderFetchOptions, TransportObservation } from "./fetch-helpers";
 import { UPGRADE_DEADLINE_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES,
   MAX_CODEX_WS_QUEUE_BYTES, markCodexWsResponse, normalizeResponsesWsRelayEvent, closedBeforeTerminalMessage } from "./codex-ws-wire";
 
@@ -14,13 +15,18 @@ interface ExchangeOptions {
   sseFallback: typeof globalThis.fetch;
   onQuota?: CodexWsQuotaObserver;
   beforeDispatch?: (headers: Headers) => void;
+  observeTransport?: ProviderFetchOptions["observeTransport"];
 }
 
 /** The sole SSE exchange state machine for both one-shot and retained sockets. */
 export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
   const { session, url, init, prepared, sseFallback, onQuota, beforeDispatch } = options;
   const { frameText, headers } = prepared;
+  const observe = (event: TransportObservation): void => {
+    try { options.observeTransport?.(event); } catch { /* optional diagnostics */ }
+  };
   const signal = init.signal ?? undefined;
+  if (!session.opened) observe({ kind: "connect", connectionId: session.connectionId, generation: session.generation });
   return new Promise<Response>((resolve, reject) => {
     const ws = session.socket;
 
@@ -33,7 +39,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
     const encoder = new TextEncoder();
     const metadata = url === CODEX_RESPONSES_HTTP_URL ? new CodexWsMetadata(onQuota) : null;
-    const correlation = session.retainable ? new CodexWsCorrelation(session.reused, id => session.hasCompleted(id)) : null;
+    const correlation = session.retainable ? new CodexWsCorrelation(session.reused, id => session.hasCompleted(id),
+      () => observe({ kind: "mismatch" })) : null;
     let detachOwner = () => {};
     let preludeTimer: ReturnType<typeof setTimeout> | undefined;
     const stream = new ReadableStream<Uint8Array>({
@@ -68,6 +75,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const response = new Response(stream, { status: 200, headers: responseHeaders });
       metadata?.commit();
       markCodexWsResponse(response, Boolean(metadata && onQuota));
+      observe({ kind: "response", transport: "websocket", response });
       resolve(response);
     };
 
@@ -109,6 +117,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       if (settledPreOpen) return;
       clearTimeout(upgradeTimer);
       opened = true;
+      observe({ kind: "open", connectionId: session.connectionId, reused: session.reused,
+        sequence: ++session.requestSequence, generation: session.generation,
+        ageMs: Math.max(0, performance.now() - session.createdMonotonic) });
       try {
         beforeDispatch?.(new Headers(headers));
       } catch (error) {
@@ -128,6 +139,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       sent = true;
       try {
         ws.send(frameText);
+        observe({ kind: "send", transport: "websocket", body: frameText });
       } catch {
         if (received || responseCommitted) {
           if (terminal) session.dispose();
@@ -171,6 +183,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const normalized = normalizeResponsesWsRelayEvent(text);
       if (!normalized) return;
       const { type } = normalized;
+      observe({ kind: "event", payload: normalized.payload, bytes: rawEncodedText.byteLength });
       let relayText = normalized.text;
       let controlFrame = false;
       if (metadata) {
@@ -227,6 +240,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     };
 
     const onClose = (event: unknown) => {
+      observe({ kind: "close", connectionId: session.connectionId, code: (event as { code?: number })?.code });
       cleanup();
       if (!opened) {
         if (settledPreOpen) return;

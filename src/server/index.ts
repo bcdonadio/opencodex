@@ -1,3 +1,4 @@
+import { observeRequestTransport, recordRequestShape } from "./transaction-capture";
 import { markActivity } from "../lib/sidecar-tracker";
 import { knownModelIdsForProvider } from "../router";
 import {
@@ -1760,6 +1761,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundProtocol: "responses",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
           try {
@@ -1793,6 +1795,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         const endpoint = url.pathname.endsWith("/edits") ? "edits" as const : "generations" as const;
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           const response = await handleImages(req, config, endpoint, logCtx, turnAdmissionLease);
@@ -1848,6 +1851,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           const response = await handleSearch(req, config, logCtx, turnAdmissionLease, admission);
           addFinalRequestLog(requestId, start, logCtx, response.status,
@@ -1873,6 +1877,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundProtocol: "responses",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;
         const finalizeNativePassthroughLog = (
@@ -1947,6 +1952,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundProtocol: "messages",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         // Logging is finalized inside handleClaudeMessages (Responses-vocab tap on the
         // pre-translation stream + native passthrough callbacks) — do not re-wrap the
         // translated Anthropic stream here.
@@ -1977,6 +1983,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundProtocol: "chat",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => withCors(
           await handleChatCompletions(req, config, logCtx, { requestId, start, turnAdmissionLease, admission }),
           req,
@@ -2007,6 +2014,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           const response = await handleLive(req, config, logCtx, turnAdmissionLease);
           addFinalRequestLog(
@@ -2044,6 +2052,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         const turnAdmissionLease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
         if (!turnAdmissionLease) return serverBusyResponse(req, "active turns", policy);
         let resolved;
@@ -2305,6 +2314,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             headers: fwd,
             body: JSON.stringify({ ...payload, stream: true }),
           });
+          ws.data.requestSequenceOnConnection = (ws.data.requestSequenceOnConnection ?? 0) + 1;
+          observeRequestTransport(logCtx, "websocket", req, requestId, start,
+            ws.data.connectionId, ws.data.requestSequenceOnConnection);
+          recordRequestShape(logCtx, payload, rawBytes);
           try {
             let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;
             const response = await handleResponses(req, config, logCtx, {

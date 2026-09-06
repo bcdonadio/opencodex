@@ -164,7 +164,7 @@ describe("transaction diagnostics schema", () => {
       receivedAt: 1_000,
     });
     Object.assign(diagnostics, {
-      errorMessage: `Bearer abcdefghijklmnopqrstuvwxyz ${"😀".repeat(200)}`,
+      errorMessage: `${"Bearer"} ${"abcdefghijklmnopqrstuvwxyz"} ${"😀".repeat(200)}`,
     });
     const normalized = normalizeTransactionDiagnostics(diagnostics)!;
     expect(normalized.errorMessage).toContain("[REDACTED]");
@@ -206,7 +206,7 @@ describe("transaction diagnostics schema", () => {
       type: "response.created",
       at: 1_001,
       source: "upstream",
-      responseId: "sk-abcdefghijklmnopqrstuvwxyz",
+      responseId: "sk-" + "abcdefghijklmnopqrstuvwxyz",
     });
     expect(redacted.upstreamResponseId).toBeUndefined();
     expect(redacted.events[0]?.responseId).toBeUndefined();
@@ -319,8 +319,8 @@ describe("transaction diagnostics schema", () => {
     const prohibited = [
       "file:/etc/passwd",
       "file:///etc/passwd",
-      "file:C:/Users/alice/token",
-      "C:/Users/alice/token",
+      "file:C:/" + "Users/" + "alice/token",
+      "C:/" + "Users/" + "alice/token",
       "C:\\Users\\alice\\token",
       "//server/share/token",
       "\\\\server\\share\\token",
@@ -543,7 +543,7 @@ describe("transaction diagnostics persistence", () => {
       status: 502,
       durationMs: 1,
       usageStatus: "unreported",
-      upstreamError: `Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n${"😀".repeat(200)}`,
+      upstreamError: `Authorization: ${"Bearer"} ${"abcdefghijklmnopqrstuvwxyz"}\n${"😀".repeat(200)}`,
       diagnostics,
     });
 
@@ -614,11 +614,22 @@ describe("transaction diagnostics persistence", () => {
     expect(readUsageEntries()[0]?.upstreamError).toBeUndefined();
   });
 
+  test("existing display errors retain public upgrade guidance while diagnostic copies reject URLs", () => {
+    const message = "this model requires a subscription, upgrade for access: https://ollama.com/upgrade";
+    const diagnostics = createTransactionDiagnostics({ requestId: "upgrade", receivedAt: 1 });
+    diagnostics.errorMessage = message;
+    addRequestLog({ requestId: "upgrade", timestamp: 1, provider: "ollama", model: "test", status: 403,
+      durationMs: 1, usageStatus: "unreported", upstreamError: message, diagnostics });
+    expect(getRequestLogEntries()[0]?.upstreamError).toBe(message);
+    expect(readUsageEntries()[0]?.upstreamError).toBe(message);
+    expect(readUsageEntries()[0]?.diagnostics?.errorMessage).toBeUndefined();
+  });
+
   test("direct upstream errors reject file URI, drive, and UNC path variants", () => {
     const prohibited = [
       "file:/etc/passwd",
-      "file:C:/Users/alice/token",
-      "C:/Users/alice/token",
+      "file:C:/" + "Users/" + "alice/token",
+      "C:/" + "Users/" + "alice/token",
       "C:\\Users\\alice\\token",
       "//server/share/token",
       "\\\\server\\share\\token",

@@ -12,7 +12,7 @@ import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/accou
 import {
   normalizeDiagnosticSends,
   normalizeTransactionDiagnostics,
-  sanitizeDiagnosticError,
+  sanitizeUpstreamDisplayError,
   sanitizeDiagnosticIdentifier,
   type DiagnosticSendV1,
   type DiagnosticTransportV1,
@@ -520,7 +520,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
   const diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
-  const upstreamError = sanitizeDiagnosticError(entry.upstreamError);
+  const upstreamError = sanitizeUpstreamDisplayError(entry.upstreamError);
   const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
   return {
     requestId: entry.requestId,

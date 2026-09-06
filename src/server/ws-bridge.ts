@@ -16,6 +16,8 @@ type ResponsesTerminalReporter = (status: ResponsesTerminalStatus) => void;
 type ResponsesPayloadObserver = (payload: string) => void;
 
 export interface WsData {
+  connectionId?: string;
+  requestSequenceOnConnection?: number;
   headers?: Headers; // base inbound forward headers only; per-turn auth refresh injects current pool tokens
   /**
    * Resolved once at the handshake. Auth is handshake-time only on this path, so
@@ -67,6 +69,8 @@ export function buildResponsesWsData(
   return {
     headers,
     admission,
+    connectionId: `ws_${crypto.randomUUID()}`,
+    requestSequenceOnConnection: 0,
     ...(admissionLease ? { admissionLease } : {}),
     ...(sessionLaneId ? { sessionLaneId } : {}),
   };

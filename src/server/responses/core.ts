@@ -1,3 +1,4 @@
+import { transportObserver, recordRequestShape } from "../transaction-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -1330,6 +1331,7 @@ async function retryCodexPoolOnAlternateAccount(
           connectMs,
           stream,
           providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+            observeTransport: transportObserver(logCtx),
             providerName: route.providerName,
             modelId: route.modelId,
             onCodexWsQuota: codexWsQuotaObserver(retryAuthCtx, route.provider),
@@ -2495,6 +2497,9 @@ export async function handleComboResponses(
     const childLog: RequestLogContext = {
       model: pick.target.model,
       provider: pick.target.provider,
+      diagnostics: logCtx.diagnostics,
+      inboundTransport: logCtx.inboundTransport,
+      upstreamTransport: logCtx.upstreamTransport,
       ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
       ...(logCtx.surface ? { surface: logCtx.surface } : {}),
     };
@@ -2866,6 +2871,7 @@ async function handleResponsesInner(
   let body: unknown;
   try {
     body = await readJsonRequestBody(req, translatorBudget);
+    if (!options.comboAttempt) recordRequestShape(logCtx, body);
   } catch (err) {
     if (options.abortSignal?.aborted || req.signal.aborted) {
       return clientCancelledResponse();
@@ -4362,6 +4368,7 @@ async function handleResponsesInner(
             body: request.body,
           }, recovery), upstream.signal, connectMs, parsed.stream,
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              observeTransport: transportObserver(logCtx),
               providerName: route.providerName,
               modelId: route.modelId,
               onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
@@ -4438,6 +4445,7 @@ async function handleResponsesInner(
               body: request.body,
             }, innerRecovery), upstream.signal, connectMs, parsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
                 providerName: route.providerName,
                 modelId: route.modelId,
                 onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
@@ -4542,6 +4550,7 @@ async function handleResponsesInner(
           // here on is a genuine transport attempt.
           storedPoolReplayDispatchNotifier(
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              observeTransport: transportObserver(logCtx),
               providerName: route.providerName,
               modelId: route.modelId,
               onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
@@ -4660,6 +4669,7 @@ async function handleResponsesInner(
               body: request.body,
             }, recovery), upstream.signal, connectMs, parsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
                 providerName: route.providerName,
                 modelId: route.modelId,
                 onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
@@ -4762,6 +4772,7 @@ async function handleResponsesInner(
               body: request.body,
             }, recovery), upstream.signal, connectMs, parsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
                 providerName: route.providerName,
                 modelId: route.modelId,
                 onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
@@ -5625,7 +5636,7 @@ async function handleResponsesInner(
     const imageProviderFetch = providerFetch(
       route.provider,
       options.codexWsRuntimeIdentity,
-      { providerName: route.providerName, modelId: route.modelId },
+      { observeTransport: transportObserver(logCtx), providerName: route.providerName, modelId: route.modelId },
     );
     const imgResponse = await runWithImageBridge({
       parsed, adapter,
@@ -5700,6 +5711,7 @@ async function handleResponsesInner(
     // one pre-rotation providerFetch would keep the old credential and transport pin.
     const routedProviderFetch = ((input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
       providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+        observeTransport: transportObserver(logCtx),
         providerName: route.providerName,
         modelId: route.modelId,
       })(input, init)) as typeof globalThis.fetch;
@@ -5808,6 +5820,7 @@ async function handleResponsesInner(
           route.provider,
           options.codexWsRuntimeIdentity,
           {
+            observeTransport: transportObserver(logCtx),
             providerName: route.providerName,
             modelId: route.modelId,
             // runTurnAttempt acquired this logical turn's first physical-request slot above.
@@ -6209,6 +6222,7 @@ async function handleResponsesInner(
         timeoutMs: connectMs,
         stream: parsed.stream,
         executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+          observeTransport: transportObserver(logCtx),
           providerName: route.providerName,
           modelId: route.modelId,
         }),
@@ -6234,6 +6248,7 @@ async function handleResponsesInner(
             body: builtInitialRequest.body,
           }, recovery), upstream.signal, connectMs, parsed.stream,
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              observeTransport: transportObserver(logCtx),
               providerName: route.providerName,
               modelId: route.modelId,
             }));
@@ -6328,6 +6343,7 @@ async function handleResponsesInner(
               timeoutMs: connectMs,
               stream: parsed.stream,
               executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
                 providerName: route.providerName,
                 modelId: route.modelId,
               }),
@@ -6349,6 +6365,7 @@ async function handleResponsesInner(
                 method: retryRequest.method, headers: retryRequest.headers, body: retryRequest.body,
               }, recoveryKind), upstream.signal, connectMs, parsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
                 providerName: route.providerName,
                 modelId: route.modelId,
               })),
@@ -6807,6 +6824,7 @@ async function handleResponsesInner(
             timeoutMs: connectMs,
             stream: nextParsed.stream,
             executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              observeTransport: transportObserver(logCtx),
               providerName: route.providerName,
               modelId: nextParsed.modelId,
             }),
@@ -6832,6 +6850,7 @@ async function handleResponsesInner(
               connectMs,
               nextParsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
                 providerName: route.providerName,
                 modelId: nextParsed.modelId,
               }),

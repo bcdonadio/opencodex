@@ -3,6 +3,8 @@ import { relaySseWithFailedTail, relayWithAbort } from "../../src/server";
 import { relaySseEagerBounded, type EagerRelayHooks } from "../../src/server/relay-eager";
 import { MAX_TAIL_ERROR_MESSAGE_CHARS } from "../../src/server/relay";
 import { TranslatorBudgetExceededError } from "../../src/lib/translator-budget";
+import { responseWithDeferredRequestLog } from "../../src/server/relay";
+import type { RequestLogContext, RequestLogEntry } from "../../src/server/request-log";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -63,6 +65,29 @@ function doneEvents(text: string): string[] {
 }
 
 describe("relaySseWithFailedTail", () => {
+  test("diagnostics preserve created ID and real HTTP status across policy failure without usage", async () => {
+    const chunks = [
+      'data: {"type":"response.created","response":{"id":"resp_policy"}}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"private-output"}\n\n',
+      'data: {"type":"response.failed","response":{"error":{"code":"cyber_policy","message":"blocked"}}}\n\n',
+    ];
+    const ctx: RequestLogContext = { model: "test", provider: "test" };
+    const logs: RequestLogEntry[] = [];
+    const response = responseWithDeferredRequestLog(new Response(sourceStream(chunks), {
+      status: 200, headers: { "content-type": "text/event-stream", "x-request-id": "req_upstream" },
+    }), "request_diagnostics", Date.now(), ctx, entry => logs.push(entry));
+    const text = await response.text();
+    expect(text).toContain("private-output");
+    expect(response.status).toBe(200);
+    expect(logs[0]?.status).toBe(400);
+    expect(logs[0]?.diagnostics?.httpStatus).toBe(200);
+    expect(logs[0]?.diagnostics?.terminalMappedStatus).toBe(400);
+    expect(logs[0]?.diagnostics?.upstreamResponseId).toBe("resp_policy");
+    expect(logs[0]?.diagnostics?.upstreamRequestId).toBe("req_upstream");
+    expect(logs[0]?.diagnostics?.outputDeliveredBeforeFailure).toBe(true);
+    expect(logs[0]?.usageStatus).toBe("unreported");
+    expect(JSON.stringify(logs[0]?.diagnostics)).not.toContain("private-output");
+  });
   test("relays a healthy stream verbatim with no injected frame", async () => {
     const upstream = new AbortController();
     const src = sourceStream(["event: response.completed\n", 'data: {"type":"response.completed"}\n\n', "data: [DONE]\n\n"]);

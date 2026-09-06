@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { providerFetch } from "../../src/server/responses/fetch-helpers";
+import { transportObserver } from "../../src/server/transaction-capture";
+import { beginRequestAttempt, type RequestLogContext } from "../../src/server/request-log";
 import { handleResponses } from "../../src/server/responses";
 import { isEagerRelaySseResponse } from "../../src/server/relay";
 import { isWin32EagerRewrite } from "../../src/lib/bun-stream-caps";
@@ -484,6 +486,43 @@ describe("isWin32EagerRewrite", () => {
 });
 
 describe("codexWsUpstreamFetch", () => {
+  test("diagnostics distinguish pre-open HTTP fallback from a sent WS policy error without usage", async () => {
+    installFake(ws => ws.close());
+    const ctx: RequestLogContext = { provider: "test", model: "test", activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+    const base = { fetch: async () => new Response("fallback", { status: 429 }) } as any;
+    const response = await providerFetch(base, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(ctx) })(CODEX_URL, streamingInit());
+    expect(await response.text()).toBe("fallback");
+    expect(ctx.diagnostics?.httpStatus).toBe(429);
+    expect(ctx.activeAttempt?.sends?.map(send => send.upstreamTransport)).toEqual(["http"]);
+    expect(ctx.diagnostics?.websocketHandshakeStatus).toBeUndefined();
+
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: '{"type":"response.created","response":{"id":"resp-policy"}}' });
+      ws.emit("message", { data: '{"type":"error","error":{"code":"cyber_policy","message":"blocked"}}' });
+    });
+    const wsCtx: RequestLogContext = { provider: "test", model: "test", activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+    const wsResponse = await providerFetch(base, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(wsCtx) })(CODEX_URL, streamingInit());
+    const bytes = await wsResponse.text();
+    expect(bytes).toContain('"code":"cyber_policy"');
+    expect(wsCtx.diagnostics?.httpStatus).toBeUndefined();
+    expect(wsCtx.diagnostics?.websocketHandshakeStatus).toBe(101);
+    expect(wsCtx.diagnostics?.upstreamResponseId).toBe("resp-policy");
+    expect(wsCtx.diagnostics?.upstreamErrorCode).toBe("cyber_policy");
+    expect(wsCtx.activeAttempt?.sends?.length).toBe(1);
+    expect(wsCtx.diagnostics?.usageReportedAt).toBeUndefined();
+  });
+
+  test("throwing WS diagnostic observers cannot trigger fallback or alter client frames", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: '{"type":"response.completed","response":{"id":"unchanged"}}' });
+    });
+    const response = await rawCodexWsUpstreamFetch(CODEX_URL, streamingInit(),
+      (async () => { throw new Error("fallback forbidden"); }) as typeof fetch,
+      BOUNDED_WS_RUNTIME, undefined, undefined, () => { throw new Error("observer failure"); });
+    expect(await response.text()).toContain('"id":"unchanged"');
+  });
   test("the complete HTTP adapter dispatch maps Lite and final routing intent onto the actual WS", async () => {
     const frames: Record<string, unknown>[] = [];
     const seenHeaders: Record<string, string>[] = [];

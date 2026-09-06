@@ -14,10 +14,65 @@ import {
 import { relaySseEagerBounded, type EagerRelayHooks } from "../../src/server/relay-eager";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import type { RequestLogContext } from "../../src/server/request-log";
+import { beginRequestAttempt, addFinalRequestLog, noteAttemptSend } from "../../src/server/request-log";
+import { observeRequestTransport, recordRequestShape, transportObserver } from "../../src/server/transaction-capture";
+import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../../src/server/sse-frame-buffer";
 
 import { watchdogMs } from "../helpers/ci-watchdog";
 const enc = new TextEncoder();
+
+test("physical HTTP diagnostics snapshot each model without retaining body or secrets", async () => {
+  const ctx: RequestLogContext = { model: "model-one", provider: "test", conversationId: "opaque-not-a-thread" };
+  const request = new Request("http://localhost/v1/responses", { method: "POST" });
+  observeRequestTransport(ctx, "http", request, "transaction", Date.now());
+  recordRequestShape(ctx, { input: [{ role: "user", content: "private-prompt" }], client_metadata: { thread_id: "explicit-thread", turn_id: "turn-1", secret: "private-secret" } });
+  ctx.activeAttempt = beginRequestAttempt(1, "test", "model-one", "openai-responses");
+  const fetcher = providerFetch({ adapter: "openai-responses", fetch: async () => new Response("{}", { headers: { "x-request-id": "upstream-1" } }) } as any,
+    undefined, { observeTransport: transportObserver(ctx) });
+  await fetcher("https://example.com/v1/responses?secret=private-query", { method: "POST", body: '{"model":"model-one","input":"private-prompt"}' });
+  ctx.model = "model-two";
+  await fetcher("https://example.com/v1/responses", { method: "POST", body: '{"model":"model-two"}' });
+  expect(ctx.activeAttempt.sends?.map(send => send.forwardedModel)).toEqual(["model-one", "model-two"]);
+  expect(ctx.activeAttempt.sendCount).toBe(2);
+  expect(ctx.diagnostics?.codexThreadId).toBe("explicit-thread");
+  expect(ctx.diagnostics?.httpStatus).toBe(200);
+  expect(JSON.stringify(ctx.diagnostics)).not.toMatch(/private-|opaque-not-a-thread/);
+});
+
+test("diagnostic observer exceptions preserve HTTP response and semantic admission rejection", async () => {
+  let sends = 0;
+  const provider = { adapter: "openai-responses", fetch: async () => { sends++; return new Response("unchanged", { status: 201 }); } } as any;
+  const fetcher = providerFetch(provider, undefined, { observeTransport() { throw new Error("observer"); } });
+  const response = await fetcher("https://example.com", {});
+  expect(response.status).toBe(201); expect(await response.text()).toBe("unchanged");
+  const denied = providerFetch(provider, undefined, { observeTransport() { throw new Error("observer"); }, beforeDispatch() { throw new Error("admission"); } });
+  await expect(denied("https://example.com", {})).rejects.toThrow("admission");
+  expect(sends).toBe(1);
+});
+
+test("no-response cancellation records no invented HTTP status or response ID", () => {
+  const ctx: RequestLogContext = { model: "test", provider: "test" };
+  observeRequestTransport(ctx, "websocket", undefined, "cancel", Date.now(), "connection-one", 2);
+  let row: any;
+  addFinalRequestLog("cancel", Date.now(), ctx, 499, { closeReason: "client_cancel" }, entry => { row = entry; });
+  expect(row.diagnostics?.httpStatus).toBeUndefined();
+  expect(row.diagnostics?.upstreamResponseId).toBeUndefined();
+  expect(row.diagnostics?.streamAborted).toBe(true);
+  expect(row.diagnostics?.requestSequenceOnConnection).toBe(2);
+});
+
+test("a dispatch admission refusal does not become a physical send", async () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test", activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+  noteAttemptSend(ctx.activeAttempt, undefined);
+  const executor = providerFetch({ adapter: "openai-responses" } as any, undefined, {
+    observeTransport: transportObserver(ctx), beforeDispatch() { throw new Error("admission"); },
+  });
+  await expect(executor("https://example.com", {})).rejects.toThrow("admission");
+  addFinalRequestLog("no-send", Date.now(), ctx, 403, undefined, () => {});
+  expect(ctx.activeAttempt?.sendCount).toBe(0);
+  expect(ctx.activeAttempt?.sends).toBeUndefined();
+});
 
 function sse(event: string): Uint8Array {
   return enc.encode(`data: ${event}\n\n`);

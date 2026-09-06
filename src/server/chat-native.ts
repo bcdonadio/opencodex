@@ -1,3 +1,4 @@
+import { transportObserver } from "./transaction-capture";
 import { buildOpenAIChatPassthroughRequest, createOpenAIChatAdapter } from "../adapters/openai-chat";
 import type { AdapterRequest, ProviderAdapter } from "../adapters/base";
 import {
@@ -236,6 +237,7 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
             connectMs,
             requestedStream,
             providerFetch(activeProvider, undefined, {
+              observeTransport: transportObserver(logCtx),
               providerName: route.providerName,
               modelId: route.modelId,
             }),

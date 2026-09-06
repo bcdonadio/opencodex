@@ -1,3 +1,4 @@
+import { transportObserver, recordRequestShape } from "../transaction-capture";
 import type { Server } from "bun";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import {
@@ -516,6 +517,7 @@ export async function handleResponsesCompact(
   let body: unknown;
   try {
     body = await readJsonRequestBody(req);
+    recordRequestShape(logCtx, body);
   } catch (err) {
     return decodeRequestErrorResponse(err, "responses-compact");
   }
@@ -804,6 +806,7 @@ export async function handleResponsesCompact(
         connectMs,
         false,
         providerFetch(sendProvider, undefined, {
+          observeTransport: transportObserver(logCtx),
           providerName: route.providerName,
           modelId: route.modelId,
           beforeDispatch: isCanonicalOpenAiForwardProvider(sendProvider)

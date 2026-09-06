@@ -1,7 +1,12 @@
 export const MAX_CODEX_WS_SESSION_EXCHANGES = 32;
+let connectionGeneration = 0;
 
 /** Owns one physical socket; request listeners belong to the exchange, not this object. */
 export class CodexWsSession {
+  readonly connectionId = `ws_${crypto.randomUUID()}`;
+  readonly generation = ++connectionGeneration;
+  readonly createdMonotonic = performance.now();
+  requestSequence = 0;
   readonly socket: WebSocket;
   opened = false;
   closed = false;

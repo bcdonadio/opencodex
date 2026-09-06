@@ -53,6 +53,7 @@ export interface PaceAwareFetch {
 export type ProviderFetch = typeof globalThis.fetch & PaceAwareFetch;
 
 export interface ProviderFetchOptions {
+  observeTransport?: (event: TransportObservation) => void;
   providerName?: string;
   modelId?: string;
   /** One pacing slot was acquired immediately before this fetch wrapper was created. */
@@ -63,11 +64,23 @@ export interface ProviderFetchOptions {
   beforeDispatch?: (headers: Headers) => void;
 }
 
+export type TransportObservation =
+  | { kind: "prepared" }
+  | { kind: "send"; transport: "http" | "websocket"; body?: unknown }
+  | { kind: "response"; transport: "http" | "websocket"; response: Response }
+  | { kind: "event"; payload: unknown; bytes: number }
+  | { kind: "connect" | "open" | "close" | "mismatch"; connectionId?: string; reused?: boolean; code?: number; sequence?: number; generation?: number; ageMs?: number };
+
+export function notifyTransport(observer: ProviderFetchOptions["observeTransport"], event: TransportObservation): void {
+  try { observer?.(event); } catch { /* diagnostics cannot alter dispatch or fallback */ }
+}
+
 export function providerFetch(
   provider: OcxProviderConfig,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   options: ProviderFetchOptions = {},
 ): ProviderFetch {
+  notifyTransport(options.observeTransport, { kind: "prepared" });
   const base = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
@@ -75,7 +88,11 @@ export function providerFetch(
   const httpFetch = Object.assign(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
-      return base(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 });
+      const wireInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
+      notifyTransport(options.observeTransport, { kind: "send", transport: "http", body: init?.body });
+      const response = await base(input, wireInit);
+      notifyTransport(options.observeTransport, { kind: "response", transport: "http", response });
+      return response;
     },
     { preconnect },
   ) as typeof globalThis.fetch;
@@ -89,7 +106,7 @@ export function providerFetch(
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch, options.observeTransport);
     }
     return httpFetch(input, init);
   };

@@ -1,3 +1,4 @@
+import { recordForwardedRequest, recordUpstreamResponse } from "./transaction-capture";
 /**
  * /v1/live and /v1/realtime/calls relay (issue #371).
  *
@@ -656,6 +657,7 @@ export async function handleLive(
   const linkedSignal = signalWithTimeout(LIVE_UPSTREAM_TIMEOUT_MS, req.signal);
   const sidecarExit = sidecarEnter("live");
   try {
+    recordForwardedRequest(logCtx, "http", outboundBody);
     const upstreamResponse = await fetch(url, {
       method: "POST",
       headers,
@@ -666,6 +668,7 @@ export async function handleLive(
       // `session_id`, and `x-codex-turn-metadata` to the redirect target.
       redirect: "manual",
     });
+    recordUpstreamResponse(logCtx, upstreamResponse);
     // Record every completed upstream response before body size handling so account health /
     // cooldown still updates when we reject an oversized payload.
     relay.recordOutcome?.(upstreamResponse.status);

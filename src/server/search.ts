@@ -1,3 +1,4 @@
+import { recordForwardedRequest, recordUpstreamResponse } from "./transaction-capture";
 /**
  * /v1/alpha/search relay.
  *
@@ -156,6 +157,7 @@ export async function handleSearch(
   const sidecarExit = sidecarEnter("search");
   let upstreamResponse: Response | undefined;
   try {
+    recordForwardedRequest(logCtx, "http", JSON.stringify(relayBody));
     upstreamResponse = await fetch(url, {
       method: "POST",
       headers,
@@ -166,6 +168,7 @@ export async function handleSearch(
       // `session_id`, and `x-codex-turn-metadata` to the redirect target.
       redirect: "manual",
     });
+    recordUpstreamResponse(logCtx, upstreamResponse);
     const observed = await readBoundedResponseBytes(upstreamResponse, {
       maxBytes: SEARCH_RESPONSE_MAX_BYTES,
       signal: linkedSignal.signal,

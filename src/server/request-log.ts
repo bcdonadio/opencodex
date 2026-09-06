@@ -13,6 +13,7 @@ import {
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
+import { finalizeDiagnostics, recordDeliveredOutput, recordProtocolEvent } from "./transaction-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import type { AdapterRequest } from "../adapters/base";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -49,7 +50,7 @@ import { modelRecordValue } from "../reasoning-effort";
 import {
   createDiagnosticAttemptId,
   normalizeTransactionDiagnostics,
-  sanitizeDiagnosticError,
+  sanitizeUpstreamDisplayError,
   type TransactionDiagnosticsV1,
 } from "../diagnostics/transaction";
 
@@ -72,6 +73,8 @@ export interface RequestLogContext {
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
   diagnostics?: TransactionDiagnosticsV1;
+  inboundTransport?: "http" | "websocket";
+  upstreamTransport?: "http" | "websocket" | "mixed";
   /**
    * Set when an adapter answered the turn locally and no upstream request was made
    * (`ProviderAdapter.localTerminal`). A fixed identifier naming the code path, never
@@ -148,6 +151,8 @@ export interface RequestLogContext {
 }
 
 export interface RequestLogEntry {
+  inboundTransport?: "http" | "websocket";
+  upstreamTransport?: "http" | "websocket" | "mixed";
   requestId: string;
   timestamp: number;
   model: string;
@@ -274,6 +279,14 @@ function asCloseReason(value: string | undefined): RequestLogEntry["closeReason"
   }
 }
 
+/** Legacy transport projections derive from the normalized envelope, one durable authority. */
+function diagnosticTransports(diagnostics: TransactionDiagnosticsV1 | undefined): Pick<RequestLogEntry, "inboundTransport" | "upstreamTransport"> {
+  const result: Pick<RequestLogEntry, "inboundTransport" | "upstreamTransport"> = {};
+  if (diagnostics?.inboundTransport === "http" || diagnostics?.inboundTransport === "websocket") result.inboundTransport = diagnostics.inboundTransport;
+  if (diagnostics?.upstreamTransport === "http" || diagnostics?.upstreamTransport === "websocket" || diagnostics?.upstreamTransport === "mixed") result.upstreamTransport = diagnostics.upstreamTransport;
+  return result;
+}
+
 /** Project a persisted usage.jsonl row back into the in-memory /api/logs shape. */
 export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): RequestLogEntry {
   const terminalStatus = asTerminalStatus(entry.terminalStatus);
@@ -290,6 +303,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
     ...(entry.diagnostics ? { diagnostics: entry.diagnostics } : {}),
+    ...diagnosticTransports(entry.diagnostics),
     ...(entry.localTerminalReason ? { localTerminalReason: entry.localTerminalReason } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
@@ -384,7 +398,7 @@ export function addRequestLog(entry: RequestLogEntry) {
   // line-oriented viewer — while `usage.jsonl` looked clean, which is the worst shape for a
   // sanitization bug because the safe surface is the one you check.
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
-  const upstreamError = sanitizeDiagnosticError(entry.upstreamError);
+  const upstreamError = sanitizeUpstreamDisplayError(entry.upstreamError);
   const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
   let diagnostics: TransactionDiagnosticsV1 | undefined;
   try {
@@ -403,6 +417,9 @@ export function addRequestLog(entry: RequestLogEntry) {
   else delete retained.localTerminalReason;
   if (diagnostics) retained.diagnostics = diagnostics;
   else delete retained.diagnostics;
+  delete retained.inboundTransport;
+  delete retained.upstreamTransport;
+  Object.assign(retained, diagnosticTransports(diagnostics));
   entry = retained;
   retainRequestLogEntry(entry);
   try {
@@ -486,6 +503,7 @@ export function recordFirstOutput(
   now = Date.now(),
 ): void {
   if (!Number.isFinite(requestStartedAt) || !Number.isFinite(now)) return;
+  recordDeliveredOutput(logCtx);
   const requestElapsed = Math.max(0, now - requestStartedAt);
   if (logCtx.firstOutputMs === undefined) logCtx.firstOutputMs = requestElapsed;
   if (logCtx.activeAttempt && logCtx.activeAttempt.firstOutputMs === undefined) {
@@ -669,6 +687,7 @@ export function catalogModelSupportsServiceTier(modelId: string, serviceTier: st
 }
 
 export function applyResponseLogMetadata(logCtx: RequestLogContext, payload: unknown): void {
+  recordProtocolEvent(logCtx, payload);
   if (!payload || typeof payload !== "object") return;
   const source = "response" in payload && typeof (payload as { response?: unknown }).response === "object"
     ? (payload as { response?: unknown }).response
@@ -970,6 +989,7 @@ export function addFinalRequestLog(
   const effectiveStatus = status >= 500 && logCtx.upstreamError && isClientClosedMessage(logCtx.upstreamError)
     ? 499
     : status;
+  finalizeDiagnostics(logCtx, effectiveStatus, requestId, start, meta?.closeReason === "terminal");
   // A locally assigned code wins: it names a refusal this proxy made itself, which no
   // status-plus-upstream-message classification can reconstruct.
   const errorCode = logCtx.errorCode ?? requestLogErrorCode(
@@ -1028,6 +1048,7 @@ export function addFinalRequestLog(
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
     ...(logCtx.diagnostics ? { diagnostics: logCtx.diagnostics } : {}),
+    ...diagnosticTransports(logCtx.diagnostics),
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),

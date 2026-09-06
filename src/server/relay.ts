@@ -1,4 +1,5 @@
 import type { ResponsesTerminalStatus } from "../bridge";
+import { observeRequestTransport, recordReceivedBytes, recordUpstreamResponse } from "./transaction-capture";
 import {
   cyberPolicyErrorType,
   CYBER_POLICY_ERROR_CODE,
@@ -647,6 +648,10 @@ export function responseWithDeferredRequestLog(
   addLog: (entry: RequestLogEntry) => void = addRequestLog,
 ): Response {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const directResponseObservation = !logCtx.diagnostics && !logCtx.localTerminalReason;
+  if (!logCtx.diagnostics) observeRequestTransport(logCtx, logCtx.inboundTransport ?? "http", undefined, requestId, start);
+  // A native WS fetch returns a synthetic HTTP facade; its owner observed the handshake.
+  if (directResponseObservation) recordUpstreamResponse(logCtx, response, logCtx.upstreamTransport === "websocket" ? "websocket" : "http");
   if (isUsageDebugEnabled() && !logCtx.usageDebugContentType && contentType) {
     logCtx.usageDebugContentType = contentType;
   }
@@ -1158,6 +1163,7 @@ export function createSseInspector(handlers: SseInspectorHandlers): SseInspector
 
   return {
     feed(chunk) {
+      if (!disposed && handlers.logCtx) recordReceivedBytes(handlers.logCtx, chunk.byteLength);
       if (!disposed) scanChunk(chunk);
     },
     finish() {

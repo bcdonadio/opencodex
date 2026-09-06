@@ -324,7 +324,7 @@ const NON_NEGATIVE_NUMBER_FIELDS = [
   "reconstructedInputCount", "replayedItemCount", "compactionCount", "httpStatus",
   "websocketHandshakeStatus", "terminalMappedStatus", "lastEventSequence", "streamEventCount", "bytesReceived",
   "bytesForwarded", "websocketCloseCode", "connectionAgeMs", "reconnectCount", "idleTimeoutMs", "bodyStallMs",
-  "bodyOverflowBytes", "retryAfterMs", "connectionGeneration", "requestSequenceOnConnection", "retryDelayMs",
+  "bodyOverflowBytes", "retryAfterMs", "connectionGeneration", "requestSequenceOnConnection", "upstreamRequestSequenceOnConnection", "retryDelayMs",
   "retryBudgetRemaining", "usageMissingCount", "requestLimit", "tokenLimit", "accountWindowLimit",
   "accountWindowRemaining", "accountWindowResetAt",
 ] as const;
@@ -415,6 +415,26 @@ export function sanitizeDiagnosticIdentifier(value: unknown): string | undefined
 export function sanitizeDiagnosticError(value: unknown): string | undefined {
   const sanitized = sanitizedStringResult(value, MAX_DIAGNOSTIC_ERROR_BYTES, true);
   return sanitized.state === "redacted" && sanitized.value === undefined ? undefined : sanitized.value;
+}
+
+/** Preserve existing public URL guidance in display errors without exporting URL queries.
+ * Diagnostic error copies deliberately use the stricter sanitizer above. */
+export function sanitizeUpstreamDisplayError(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const urls: string[] = [];
+  const masked = value.slice(0, MAX_DIAGNOSTIC_ERROR_BYTES * 2).replace(/https?:\/\/[^\s<>"']+/gi, raw => {
+    try {
+      const url = new URL(raw);
+      url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+      urls.push(url.toString());
+      return `PUBLIC_URL_${urls.length - 1}`;
+    } catch { return "[REDACTED]"; }
+  });
+  // Continue rejecting local paths, environment dumps and other excluded context.
+  const safe = sanitizeDiagnosticError(masked);
+  if (!safe) return undefined;
+  const restored = safe.replace(/PUBLIC_URL_(\d+)/g, (marker, index) => urls[Number(index)] ?? marker);
+  return sanitizedStringResult(restored, MAX_DIAGNOSTIC_ERROR_BYTES, false).value;
 }
 
 function sanitizeDiagnosticMetadata(value: unknown): string | undefined {

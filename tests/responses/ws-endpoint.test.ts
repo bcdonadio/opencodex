@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import {
   buildWarmupCompletionFrames,
+  buildResponsesWsData,
   pumpResponsesSseToWebSocket,
   safeResponseHeaders,
   selectForwardHeaders,
@@ -36,6 +37,13 @@ function sseStream(frames: string[], onCancel?: () => void): ReadableStream<Uint
 }
 
 describe("WS endpoint re-framer (120/132)", () => {
+  test("each accepted socket has an independent diagnostics connection identity", () => {
+    const first = buildResponsesWsData(new Headers(), { kind: "loopback" });
+    const second = buildResponsesWsData(new Headers(), { kind: "loopback" });
+    expect(first.connectionId).toMatch(/^ws_/);
+    expect(first.connectionId).not.toBe(second.connectionId);
+    expect(first.requestSequenceOnConnection).toBe(0);
+  });
   test("server config declares explicit websocket idle timeout policy", () => {
     const source = readFileSync(new URL("../../src/server/index.ts", import.meta.url), "utf8");
     expect(source).toContain("const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;");

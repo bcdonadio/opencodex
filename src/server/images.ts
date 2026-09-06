@@ -1,3 +1,4 @@
+import { recordForwardedRequest, recordUpstreamResponse } from "./transaction-capture";
 /**
  * /v1/images/{generations,edits} relay (issue #83).
  *
@@ -721,6 +722,7 @@ export async function handleImages(
   try {
     // Images POSTs create paid, non-idempotent work. One fetch only: no reset retry without a
     // source-proven idempotency contract.
+    recordForwardedRequest(logCtx, "http", JSON.stringify(body));
     upstreamResponse = await fetch(url, {
       method: "POST",
       headers,
@@ -733,6 +735,7 @@ export async function handleImages(
       // compact already set this; the credential-bearing sidecars did not.
       redirect: "manual",
     });
+    recordUpstreamResponse(logCtx, upstreamResponse);
     const observed = await readImageResponseBytes(upstreamResponse, {
       maxBytes: IMAGES_RESPONSE_MAX_BYTES,
       signal: linkedSignal.signal,

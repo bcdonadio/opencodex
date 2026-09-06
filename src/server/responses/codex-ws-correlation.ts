@@ -17,9 +17,11 @@ export class CodexWsCorrelation {
   private readonly items = new Set<string>();
   private itemBytes = 0;
 
-  constructor(private readonly strict: boolean, private readonly previouslyCompleted: (id: string) => boolean) {}
+  constructor(private readonly strict: boolean, private readonly previouslyCompleted: (id: string) => boolean,
+    private readonly onMismatch?: () => void) {}
 
   private mismatch(): void {
+    try { this.onMismatch?.(); } catch { /* diagnostic only */ }
     this.reusable = false;
     if (this.strict) throw new Error("codex websocket response identity mismatch");
   }
