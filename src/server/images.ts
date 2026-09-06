@@ -1,4 +1,5 @@
-import { recordForwardedRequest, recordUpstreamResponse } from "./transaction-capture";
+import { transportObserver, recordUpstreamResponse } from "./transaction-capture";
+import { diagnosticTarget } from "./responses/fetch-helpers";
 /**
  * /v1/images/{generations,edits} relay (issue #83).
  *
@@ -722,7 +723,8 @@ export async function handleImages(
   try {
     // Images POSTs create paid, non-idempotent work. One fetch only: no reset retry without a
     // source-proven idempotency contract.
-    recordForwardedRequest(logCtx, "http", JSON.stringify(body));
+    transportObserver(logCtx)({ kind: "send", transport: "http", body: JSON.stringify(body),
+      target: diagnosticTarget(url, { method: "POST" }) });
     upstreamResponse = await fetch(url, {
       method: "POST",
       headers,
