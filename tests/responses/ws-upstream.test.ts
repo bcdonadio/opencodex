@@ -417,7 +417,7 @@ describe("handleResponses Codex WS relay selection", () => {
     }
   });
 
-  test("eager HTTP discard-drain persists upstream completion without terminal handoff", async () => {
+  test.each([true, false])("eager HTTP discard-drain persists exactly once without terminal handoff (terminal=%s)", async terminalArrives => {
     const previousHome = process.env.OPENCODEX_HOME;
     const home = mkdtempSync(join(tmpdir(), "ocx-eager-disconnect-"));
     process.env.OPENCODEX_HOME = home;
@@ -438,20 +438,26 @@ describe("handleResponses Codex WS relay selection", () => {
             { terminalStatus: terminal, closeReason: "terminal" });
           logged.resolve();
         },
+        onNativePassthroughCancel: () => {
+          finalizations++;
+          addFinalRequestLog("eager-disconnect", Date.now(), ctx, 499, { closeReason: "client_cancel" });
+          logged.resolve();
+        },
       });
       const reader = response.body!.getReader();
       await reader.read();
       await reader.cancel();
-      FakeWebSocket.instances.at(-1)!.emit("message", { data: JSON.stringify({ type: "response.completed",
+      if (terminalArrives) FakeWebSocket.instances.at(-1)!.emit("message", { data: JSON.stringify({ type: "response.completed",
         response: { id: "drain-response", status: "completed", output: [] } }) });
+      else FakeWebSocket.instances.at(-1)!.close();
       await logged.promise;
       expect(finalizations).toBe(1);
       const rows = readUsageEntries().filter(row => row.requestId === "eager-disconnect");
       expect(rows).toHaveLength(1);
-      expect(rows[0]?.status).toBe(200);
+      expect(rows[0]?.status).toBe(terminalArrives ? 200 : 499);
       expect(rows[0]?.diagnostics?.downstreamTerminalSentAt).toBeUndefined();
       expect(rows[0]?.diagnostics?.downstreamClosedAt).toBeNumber();
-      expect(rows[0]?.diagnostics?.cancellationReason).toBe("client_disconnect");
+      if (terminalArrives) expect(rows[0]?.diagnostics?.cancellationReason).toBe("client_disconnect");
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;

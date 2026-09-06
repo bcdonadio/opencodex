@@ -5151,6 +5151,7 @@ async function handleResponsesInner(
         // Upstream outcome accounting stays synchronous. Only the log callback
         // waits for the relay's accepted handoff and teardown observations.
         let pendingLogTerminal: ResponsesTerminalStatus | undefined;
+        let pendingLogCancellation = false;
         const deliveryInspector = logCtx.inboundTransport === "http"
           ? createDownstreamDiagnosticInspector(logCtx) : undefined;
         const reportNativeTerminal = recordTerminalOutcomes
@@ -5210,7 +5211,7 @@ async function handleResponsesInner(
               reportNativeTerminal("failed", 502);
             }
           },
-          onClientCancel: () => options.onNativePassthroughCancel?.(),
+          onClientCancel: () => { pendingLogCancellation = true; },
           onDone: () => {
             try {
               // Flush only downstream bytes already accepted by enqueue; this
@@ -5220,6 +5221,7 @@ async function handleResponsesInner(
             } catch { /* diagnostic inspection cannot block final logging */ }
             try {
               if (pendingLogTerminal !== undefined) options.onNativePassthroughTerminal?.(pendingLogTerminal);
+              else if (pendingLogCancellation) options.onNativePassthroughCancel?.();
             } finally {
               unregisterTurn(turnAc);
             }
