@@ -58,6 +58,20 @@ const request = (options = init(), guard?: (headers: Headers) => void) =>
   codexWsUpstreamFetch(URL, options, fallback, "1.4.0", undefined, guard);
 const drain = async (options = init()) => (await request(options)).text();
 
+test("review: reused socket stale created frame cannot populate the next transaction identity", async () => {
+  await drain();
+  Socket.onSend = socket => queueMicrotask(() => socket.emit({ type: "response.created",
+    response: { id: "response-1", model: "stale-model", usage: { input_tokens: 9, output_tokens: 4 } } }));
+  const ctx: RequestLogContext = { provider: "test", model: "test" };
+  const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", undefined, undefined, transportObserver(ctx));
+  await expect(response.text()).rejects.toThrow("identity mismatch");
+  expect(ctx.diagnostics?.correlationMismatch).toBe(true);
+  expect(ctx.diagnostics?.upstreamResponseId).toBeUndefined();
+  expect(ctx.diagnostics?.responseModel).toBeUndefined();
+  expect(ctx.diagnostics?.usageReportedAt).toBeUndefined();
+  expect(ctx.activeAttempt?.sends?.[0]?.upstreamResponseId).toBeUndefined();
+});
+
 test("diagnostics retain upstream connection sequence and individual sends across reuse and model switch", async () => {
   const contexts: RequestLogContext[] = [];
   for (const model of ["fixture-model", "fixture-model", "another-model"]) {

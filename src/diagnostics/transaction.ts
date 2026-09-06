@@ -412,6 +412,13 @@ export function sanitizeDiagnosticIdentifier(value: unknown): string | undefined
   return sanitizedString(value, MAX_DIAGNOSTIC_ID_BYTES);
 }
 
+/** Capture callers need transformation provenance, not a prefix usable as a direct key. */
+export function observeDiagnosticIdentifier(value: unknown): SanitizedDiagnosticString {
+  const result = sanitizedStringResult(value, MAX_DIAGNOSTIC_ID_BYTES, true);
+  if (result.state === "observed" && result.value !== value) return { state: "redacted" };
+  return result.state === "observed" ? result : { state: result.state };
+}
+
 export function sanitizeDiagnosticError(value: unknown): string | undefined {
   const sanitized = sanitizedStringResult(value, MAX_DIAGNOSTIC_ERROR_BYTES, true);
   return sanitized.state === "redacted" && sanitized.value === undefined ? undefined : sanitized.value;
@@ -421,19 +428,14 @@ export function sanitizeDiagnosticError(value: unknown): string | undefined {
  * Diagnostic error copies deliberately use the stricter sanitizer above. */
 export function sanitizeUpstreamDisplayError(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const urls: string[] = [];
+  const publicGuidance = "https://ollama.com/upgrade";
   const masked = value.slice(0, MAX_DIAGNOSTIC_ERROR_BYTES * 2).replace(/https?:\/\/[^\s<>"']+/gi, raw => {
-    try {
-      const url = new URL(raw);
-      url.username = ""; url.password = ""; url.search = ""; url.hash = "";
-      urls.push(url.toString());
-      return `PUBLIC_URL_${urls.length - 1}`;
-    } catch { return "[REDACTED]"; }
+    return raw === publicGuidance ? "PUBLIC_UPGRADE_GUIDANCE" : "[REDACTED]";
   });
   // Continue rejecting local paths, environment dumps and other excluded context.
   const safe = sanitizeDiagnosticError(masked);
   if (!safe) return undefined;
-  const restored = safe.replace(/PUBLIC_URL_(\d+)/g, (marker, index) => urls[Number(index)] ?? marker);
+  const restored = safe.replaceAll("PUBLIC_UPGRADE_GUIDANCE", publicGuidance);
   return sanitizedStringResult(restored, MAX_DIAGNOSTIC_ERROR_BYTES, false).value;
 }
 

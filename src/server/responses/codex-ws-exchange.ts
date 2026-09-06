@@ -39,8 +39,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
     const encoder = new TextEncoder();
     const metadata = url === CODEX_RESPONSES_HTTP_URL ? new CodexWsMetadata(onQuota) : null;
+    let rejectedCorrelation = false;
     const correlation = session.retainable ? new CodexWsCorrelation(session.reused, id => session.hasCompleted(id),
-      () => observe({ kind: "mismatch" })) : null;
+      () => { rejectedCorrelation = true; observe({ kind: "mismatch" }); }) : null;
     let detachOwner = () => {};
     let preludeTimer: ReturnType<typeof setTimeout> | undefined;
     const stream = new ReadableStream<Uint8Array>({
@@ -183,7 +184,6 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const normalized = normalizeResponsesWsRelayEvent(text);
       if (!normalized) return;
       const { type } = normalized;
-      observe({ kind: "event", payload: normalized.payload, bytes: rawEncodedText.byteLength });
       let relayText = normalized.text;
       let controlFrame = false;
       if (metadata) {
@@ -205,7 +205,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       }
       if (!controlFrame && !type.startsWith("response.") && type !== "error") return;
       if (!controlFrame) {
+        rejectedCorrelation = false;
         try { correlation?.accept(normalized.payload); } catch (error) { failStream(error); return; }
+        if (!rejectedCorrelation) observe({ kind: "event", payload: normalized.payload, bytes: rawEncodedText.byteLength });
         commitResponse();
       }
       const prefix = encoder.encode(`event: ${type}\ndata: `);

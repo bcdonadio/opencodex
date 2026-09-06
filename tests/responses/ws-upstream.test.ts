@@ -362,6 +362,22 @@ describe("handleResponses Codex WS relay selection", () => {
     expect(text).toContain("data: [DONE]");
   });
 
+  test("review: ordinary upstream WS error retains the later synthetic incomplete provenance", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: '{"type":"response.created","response":{"id":"ordinary-error"}}' });
+      ws.emit("message", { data: '{"type":"error","error":{"code":"server_error","message":"fixture refusal"}}' });
+    });
+    const ctx: RequestLogContext = { model: "", provider: "" };
+    const response = await handleResponses(request(), forwardConfig(), ctx, { codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME });
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(text).toContain('"type":"error"');
+    expect(text).toContain('"type":"response.incomplete"');
+    expect(ctx.diagnostics?.events.filter(event => ["upstream.error", "response.incomplete"].includes(event.type))
+      .map(event => [event.type, event.source])).toEqual([["upstream.error", "upstream"], ["response.incomplete", "proxy"]]);
+  });
+
   test("an HTTP fallback remains on the configured legacy tee path", async () => {
     installFake(ws => ws.close());
     globalThis.fetch = (async () => new Response(

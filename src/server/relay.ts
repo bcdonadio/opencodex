@@ -1,5 +1,5 @@
 import type { ResponsesTerminalStatus } from "../bridge";
-import { observeRequestTransport, recordReceivedBytes, recordUpstreamResponse } from "./transaction-capture";
+import { observeRequestTransport, recordReceivedBytes, recordUpstreamResponse, recordSyntheticTerminal } from "./transaction-capture";
 import {
   cyberPolicyErrorType,
   CYBER_POLICY_ERROR_CODE,
@@ -1007,6 +1007,7 @@ export function createSseInspector(handlers: SseInspectorHandlers): SseInspector
     );
   };
 
+  const diagnosticObserver = {};
   const scanPayload = (payload: string | null, sourceBytes: number): void => {
     if (!payload) return;
     let parsed: unknown | undefined;
@@ -1018,7 +1019,7 @@ export function createSseInspector(handlers: SseInspectorHandlers): SseInspector
       }
     }
     if (!reported && handlers.logCtx) {
-      inspectResponseLogSsePayloadParsed(handlers.logCtx, payload, parsed);
+      inspectResponseLogSsePayloadParsed(handlers.logCtx, payload, parsed, diagnosticObserver);
     }
     // Before any terminal handling: a consumer deciding on the whole turn must observe this
     // payload even when the terminal snapshot that follows no longer mentions it.
@@ -1377,7 +1378,10 @@ export function consumeForInspection(
     onCancel,
     onCleanEof: () => {
       if (!inspector.reported()) {
-        if (logCtx) logCtx.terminalSource = "synthetic";
+        if (logCtx) {
+          logCtx.terminalSource = "synthetic";
+          recordSyntheticTerminal(logCtx, "response.incomplete");
+        }
         onTerminal("incomplete");
       }
     },
@@ -1389,6 +1393,7 @@ export function consumeForInspection(
         if (logCtx) {
           logCtx.transportPhase = "mid_stream";
           logCtx.terminalSource = "synthetic";
+          recordSyntheticTerminal(logCtx, "response.failed");
           // A truncated 200 body must not meter as a success the client never
           // received; the router's equivalent turn carries 502 + streamAborted
           // (codex-router #139).

@@ -15,12 +15,71 @@ import { relaySseEagerBounded, type EagerRelayHooks } from "../../src/server/rel
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import type { RequestLogContext } from "../../src/server/request-log";
 import { beginRequestAttempt, addFinalRequestLog, noteAttemptSend } from "../../src/server/request-log";
-import { observeRequestTransport, recordRequestShape, transportObserver } from "../../src/server/transaction-capture";
+import { observeRequestTransport, recordRequestShape, transportObserver, recordProtocolEvent, recordForwardedRequest, recordUpstreamResponse, finalizeDiagnostics } from "../../src/server/transaction-capture";
 import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../../src/server/sse-frame-buffer";
 
 import { watchdogMs } from "../helpers/ci-watchdog";
 const enc = new TextEncoder();
+
+test("review: transformed correlation IDs never become direct prefix keys", () => {
+  for (const id of ["x".repeat(256) + "A", "x".repeat(256) + "B", "sk-" + "abcdefghijklmnopqrstuvwxyz"]) {
+    const ctx: RequestLogContext = { provider: "test", model: "test" };
+    observeRequestTransport(ctx, "http", new Request("http://localhost", { headers: { "x-request-id": id } }));
+    recordRequestShape(ctx, { client_metadata: { thread_id: id }, previous_response_id: id });
+    recordUpstreamResponse(ctx, new Response(null, { headers: { "x-request-id": id } }));
+    recordProtocolEvent(ctx, { type: "response.created", response: { id } });
+    for (const field of ["clientRequestId", "codexThreadId", "previousResponseId", "upstreamRequestId", "upstreamResponseId"]) {
+      expect(ctx.diagnostics?.[field]).toBeUndefined();
+      expect(ctx.diagnostics?.fieldAvailability[field]?.status).toBe(id.startsWith("sk-") ? "redacted" : "truncated");
+    }
+    expect(ctx.diagnostics?.correlationConfidence).not.toBe("direct");
+  }
+});
+
+test.each([200, 502])("review: combo parent adoption finalizes each child's actual send (%i)", finalStatus => {
+  const parent: RequestLogContext = { provider: "combo", model: "combo" };
+  observeRequestTransport(parent, "http");
+  const children: RequestLogContext[] = [];
+  for (const index of [0, 1]) {
+    const child: RequestLogContext = { provider: "test", model: `model-${index}`, diagnostics: parent.diagnostics,
+      activeAttempt: beginRequestAttempt(index + 1, "test", `model-${index}`, "openai-responses") };
+    recordForwardedRequest(child, "http");
+    recordProtocolEvent(child, { type: "response.created", response: { id: `response-${index}` } });
+    recordProtocolEvent(child, { type: index === 1 && finalStatus === 200 ? "response.completed" : "response.failed",
+      response: { id: `response-${index}`, error: { code: "server_error" } } });
+    Object.assign(parent, child);
+    children.push(child);
+  }
+  finalizeDiagnostics(parent, finalStatus, "combo", Date.now());
+  expect(children.map(child => child.activeAttempt?.sends?.[0]?.upstreamResponseId)).toEqual(["response-0", "response-1"]);
+  expect(children.map(child => child.activeAttempt?.sends?.[0]?.status)).toEqual([502, finalStatus]);
+  expect(children.every(child => child.activeAttempt?.sends?.[0]?.endedAt !== undefined)).toBe(true);
+});
+
+test("review: independent recovery sends do not inherit terminal identity or duplicate flags", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test" };
+  for (const index of [0, 1, 2]) {
+    recordForwardedRequest(ctx, "http");
+    recordProtocolEvent(ctx, { type: "response.created", response: { id: `response-${index}` } });
+    recordProtocolEvent(ctx, { type: index === 2 ? "response.completed" : "response.failed", response: { id: `response-${index}`, error: { code: "server_error" } } });
+  }
+  finalizeDiagnostics(ctx, 200, "retry", Date.now());
+  expect(ctx.diagnostics?.responseIdMismatch).toBeUndefined();
+  expect(ctx.diagnostics?.duplicateTerminalSuppressed).toBeUndefined();
+  expect(ctx.activeAttempt?.sends?.map(send => send.status)).toEqual([502, 502, 200]);
+  expect(ctx.activeAttempt?.sends?.map(send => send.upstreamResponseId)).toEqual(["response-0", "response-1", "response-2"]);
+});
+
+test("review: direct WS error and proxy incomplete remain distinct diagnostic terminals", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test" };
+  recordForwardedRequest(ctx, "websocket");
+  recordProtocolEvent(ctx, { type: "error", error: { code: "server_error" } }, 40, true);
+  ctx.terminalSource = "synthetic";
+  recordProtocolEvent(ctx, { type: "response.incomplete", response: { incomplete_details: { reason: "adapter_eof" } } });
+  expect(ctx.diagnostics?.events.filter(event => ["upstream.error", "response.incomplete"].includes(event.type))
+    .map(event => [event.type, event.source])).toEqual([["upstream.error", "upstream"], ["response.incomplete", "proxy"]]);
+});
 
 test("physical HTTP diagnostics snapshot each model without retaining body or secrets", async () => {
   const ctx: RequestLogContext = { model: "model-one", provider: "test", conversationId: "opaque-not-a-thread" };

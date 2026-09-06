@@ -1,4 +1,4 @@
-import { transportObserver, recordRequestShape } from "../transaction-capture";
+import { transportObserver, recordRequestShape, recordSyntheticTerminal } from "../transaction-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -5182,6 +5182,7 @@ async function handleResponsesInner(
             ? { rewriteBlocks: clientBlockRewrite }
             : {}),
           onSynthetic: kind => {
+            recordSyntheticTerminal(logCtx, kind === "incomplete" ? "response.incomplete" : "response.failed");
             if (!reportNativeTerminal) return;
             if (kind === "incomplete") {
               logCtx.terminalSource = "synthetic";

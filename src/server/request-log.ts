@@ -13,7 +13,7 @@ import {
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
-import { finalizeDiagnostics, recordDeliveredOutput, recordProtocolEvent } from "./transaction-capture";
+import { finalizeDiagnostics, finishAttemptDiagnostics, recordDeliveredOutput, recordProtocolEvent } from "./transaction-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import type { AdapterRequest } from "../adapters/base";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -686,8 +686,8 @@ export function catalogModelSupportsServiceTier(modelId: string, serviceTier: st
   }
 }
 
-export function applyResponseLogMetadata(logCtx: RequestLogContext, payload: unknown): void {
-  recordProtocolEvent(logCtx, payload);
+export function applyResponseLogMetadata(logCtx: RequestLogContext, payload: unknown, diagnosticObserver?: object): void {
+  recordProtocolEvent(logCtx, payload, 0, false, false, diagnosticObserver);
   if (!payload || typeof payload !== "object") return;
   const source = "response" in payload && typeof (payload as { response?: unknown }).response === "object"
     ? (payload as { response?: unknown }).response
@@ -798,11 +798,12 @@ export function inspectResponseLogSsePayloadParsed(
   logCtx: RequestLogContext,
   payload: string | null,
   parsed: unknown | undefined,
+  diagnosticObserver?: object,
 ): void {
   if (!payload || payload.trim() === "[DONE]") return;
   const debugEnabled = isUsageDebugEnabled();
   const sseAlreadyMarked = logCtx.usageDebugBodyKind === "sse";
-  if (parsed !== undefined) applyResponseLogMetadata(logCtx, parsed);
+  if (parsed !== undefined) applyResponseLogMetadata(logCtx, parsed, diagnosticObserver);
   else logCtx.activeTierMetadata?.markResponseUnparseable();
   captureUpstreamErrorParsed(logCtx, payload, parsed);
   if (debugEnabled) {
@@ -1301,6 +1302,7 @@ export function finishRequestAttempt(
   durationMs: number,
   usage?: OcxUsage,
 ): PersistedUsageAttempt {
+  finishAttemptDiagnostics(attempt, status);
   const finalized = finalizedUsage(
     attempt.adapter,
     usage ?? attempt.usage,

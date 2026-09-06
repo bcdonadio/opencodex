@@ -625,6 +625,16 @@ describe("transaction diagnostics persistence", () => {
     expect(readUsageEntries()[0]?.diagnostics?.errorMessage).toBeUndefined();
   });
 
+  test("review: display guidance exception never restores arbitrary private URL paths", () => {
+    for (const url of ["https://private.example/private-path?private-query", "https://user:pass" + "@" + "private.example/private-path",
+      "https://ollama.com/upgrade/private-path", "https://ollama.com/upgrade?private-query"]) {
+      addRequestLog({ requestId: "guidance-url", timestamp: 1, provider: "test", model: "test", status: 403,
+        durationMs: 1, usageStatus: "unreported", upstreamError: `blocked: ${url}` });
+      expect(JSON.stringify(getRequestLogEntries()[0])).not.toContain("private");
+      expect(JSON.stringify(readUsageEntries().at(-1))).not.toContain("private-path");
+    }
+  });
+
   test("direct upstream errors reject file URI, drive, and UNC path variants", () => {
     const prohibited = [
       "file:/etc/passwd",
