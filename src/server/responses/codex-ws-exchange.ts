@@ -118,9 +118,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       if (settledPreOpen) return;
       clearTimeout(upgradeTimer);
       opened = true;
-      observe({ kind: "open", connectionId: session.connectionId, reused: session.reused,
+      const connection = { connectionId: session.connectionId, reused: session.reused,
         sequence: ++session.requestSequence, generation: session.generation,
-        ageMs: Math.max(0, performance.now() - session.createdMonotonic) });
+        ageMs: Math.max(0, performance.now() - session.createdMonotonic) };
+      observe({ kind: "open", ...connection });
       try {
         beforeDispatch?.(new Headers(headers));
       } catch (error) {
@@ -141,6 +142,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       try {
         ws.send(frameText);
         observe({ kind: "send", transport: "websocket", body: frameText });
+        // The send observer owns creation of the send record. Attach only after
+        // send() succeeds, so an upgrade followed by a failed send cannot mark
+        // an HTTP fallback send as having reused this socket.
+        observe({ kind: "connection", ...connection });
       } catch {
         if (received || responseCommitted) {
           if (terminal) session.dispose();

@@ -258,7 +258,7 @@ const DIAGNOSTIC_REASONING_FIELDS = new Set([
 ]);
 const SAFE_DIAGNOSTIC_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:+/-]*$/;
 const SAFE_DIAGNOSTIC_FIELD = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
-const SAFE_HOSTNAME = /^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::[0-9]{1,5})?$/;
+const DIAGNOSTIC_HOST_CLASSES = new Set(["api_openai", "chatgpt", "api_anthropic", "google_api", "loopback", "custom", "unknown"]);
 const SAFE_ACCOUNT_LABEL = /^(?:main|[po][0-9a-f]{6})$/;
 const UNSAFE_DIAGNOSTIC_TEXT = /(?:\b(?:https?|file):\/\/|\bwww\.|(?:^|[\s"'(])(?:\/(?:home|Users|etc|var|tmp|mnt|opt|usr)\/|[A-Za-z]:\\|\\\\)|(?:^|[\s,{])(?:HOME|PATH|PWD|USER|SHELL|TOKEN|SECRET|API_KEY|AUTHORIZATION)\s*=|[A-Z][A-Z0-9_]{2,}\s*=|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|<\/?(?:thinking|reasoning|analysis)>|\b(?:chain[ -]of[ -]thought|hidden reasoning|private reasoning)\b|(?:^|[\s,{])(?:analysis|reasoning)\s*:)/i;
 const FILE_URI = /\bfile:(?:[\\/]+|[A-Za-z]:[\\/])/i;
@@ -458,7 +458,7 @@ function diagnosticMetadataResult(field: string, value: unknown): SanitizedDiagn
       accepted = DIAGNOSTIC_SUBSCRIPTION_PLANS.has(sanitized);
       break;
     case "upstreamHostname":
-      accepted = SAFE_HOSTNAME.test(sanitized);
+      accepted = DIAGNOSTIC_HOST_CLASSES.has(sanitized);
       break;
     case "errorParam":
       accepted = SAFE_DIAGNOSTIC_FIELD.test(sanitized);

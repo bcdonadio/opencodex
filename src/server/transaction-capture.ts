@@ -9,6 +9,7 @@ import type { TransportObservation } from "./responses/fetch-helpers";
 import { httpStatusFromTerminalError } from "../lib/errors";
 import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
+import type { RequestPacingObserver } from "../providers/request-pacing";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -306,6 +307,21 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
       }
       const send = activeSend(ctx);
       if (send) { send.bytesForwarded = Buffer.byteLength(body); send.forwardedModel = ctx.diagnostics?.forwardedModel as string | undefined; }
+    } else {
+      // Read only in-memory byte lengths. Request streams/FormData cannot be
+      // measured here without consuming or reserializing the caller's body.
+      const bytes = body instanceof ArrayBuffer ? body.byteLength
+        : ArrayBuffer.isView(body) ? body.byteLength
+        : body instanceof Blob ? body.size : undefined;
+      if (bytes !== undefined) {
+        d.forwardedRequestBytes = bytes;
+        d.bytesForwarded = Number(d.bytesForwarded ?? 0) + bytes;
+        const send = activeSend(ctx);
+        if (send) send.bytesForwarded = bytes;
+      } else {
+        delete d.forwardedRequestBytes;
+        d.fieldAvailability.forwardedRequestBytes = { status: "not_observed", source: "transport" };
+      }
     }
     recordDiagnosticEvent(ctx.diagnostics!, { type: "upstream.request.sent", at: Date.now(), source: "transport" });
     clean(ctx);
@@ -500,18 +516,57 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
   });
 }
 
+/** Queue timestamps belong to actual provider pacing, not authentication admission. */
+export function pacingObserver(ctx: RequestLogContext): RequestPacingObserver {
+  return event => captureSafely(() => {
+    const d = diagnostics(ctx);
+    if (event.kind === "queued") {
+      d.queuedAt ??= event.at;
+      d.fieldAvailability.queuedAt = { status: "observed", source: "proxy" };
+    } else {
+      d.admittedAt = event.at;
+      d.queueMs = Number(d.queueMs ?? 0) + event.queueMs;
+      d.derivedFields = [...new Set([...(Array.isArray(d.derivedFields) ? d.derivedFields as string[] : []), "queueMs"])];
+      d.fieldAvailability.queueMs = { status: "derived", source: "derived" };
+      d.fieldAvailability.admittedAt = { status: "observed", source: "proxy" };
+      recordDiagnosticEvent(d, { type: "request.admitted", at: event.at, source: "proxy" });
+    }
+    clean(ctx);
+  });
+}
+
 /** Callback-only transport leaf integration; all exceptions terminate here. */
 export function transportObserver(ctx: RequestLogContext): (event: TransportObservation) => void {
   return event => captureSafely(() => {
+    if (event.kind === "queue") { pacingObserver(ctx)(event.observation); return; }
     if (event.kind === "prepared") {
       if (ctx.activeAttempt && !sendOwners.has(ctx.activeAttempt)) sendOwners.set(ctx.activeAttempt, { sendCount: 0 });
       return;
     }
-    if (event.kind === "send") recordForwardedRequest(ctx, event.transport, event.body);
+    if (event.kind === "send") {
+      if (event.target) {
+        const d = diagnostics(ctx);
+        d.upstreamHostname = event.target.upstreamHostname;
+        d.endpointClass = event.target.endpointClass;
+        d.method = event.target.method;
+        d.fieldAvailability.endpointClass = { status: event.target.endpointClass ? "observed" : "not_observed", source: "transport" };
+      }
+      recordForwardedRequest(ctx, event.transport, event.body);
+    }
     else if (event.kind === "response") recordUpstreamResponse(ctx, event.response, event.transport);
     else if (event.kind === "event") recordProtocolEvent(ctx, event.payload, event.bytes, true);
     else {
       const d = diagnostics(ctx);
+      const previousConnectionId = d.upstreamConnectionId;
+      if (event.kind === "connect") {
+        // Count replacements observed within this transaction, never infer a
+        // reconnect from unrelated process-wide connection generations.
+        d.reconnectCount = Number(d.reconnectCount ?? 0)
+          + (previousConnectionId && previousConnectionId !== event.connectionId ? 1 : 0);
+        for (const field of ["websocketHandshakeStatus", "upstreamConnectedAt", "handshakeCompletedAt", "connectMs", "handshakeMs",
+          "connectionReused", "upstreamRequestSequenceOnConnection", "connectionAgeMs", "websocketCloseCode", "closedBy"]) delete d[field];
+        d.fieldAvailability.websocketHandshakeStatus = { status: "not_observed", source: "transport" };
+      }
       if (event.connectionId) d.upstreamConnectionId = event.connectionId;
       if (event.reused !== undefined) d.connectionReused = event.reused;
       if (event.sequence !== undefined) d.upstreamRequestSequenceOnConnection = event.sequence;
@@ -524,11 +579,24 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
         recordDiagnosticEvent(d, { type: "upstream.connect.started", at: Date.now(), source: "transport" });
       }
       if (event.kind === "open") {
-        d.websocketHandshakeStatus = 101; d.upstreamConnectedAt = Date.now(); d.handshakeCompletedAt = Date.now();
-        recordDiagnosticEvent(d, { type: "upstream.connected", at: Date.now(), source: "transport" });
-        recordDiagnosticEvent(d, { type: "upstream.handshake.completed", at: Date.now(), source: "transport" });
-        derived(d, "connectMs", performance.now(), clocks.get(d)!.connect);
-        derived(d, "handshakeMs", performance.now(), clocks.get(d)!.connect);
+        // A retained socket proves its original successful upgrade, but does
+        // not perform a second handshake for this transaction.
+        d.websocketHandshakeStatus = 101;
+        d.fieldAvailability.websocketHandshakeStatus = { status: "observed", source: "transport" };
+        if (!event.reused) {
+          d.upstreamConnectedAt = Date.now(); d.handshakeCompletedAt = Date.now();
+          recordDiagnosticEvent(d, { type: "upstream.connected", at: Date.now(), source: "transport" });
+          recordDiagnosticEvent(d, { type: "upstream.handshake.completed", at: Date.now(), source: "transport" });
+          derived(d, "connectMs", performance.now(), clocks.get(d)!.connect);
+          derived(d, "handshakeMs", performance.now(), clocks.get(d)!.connect);
+        }
+      }
+      if (event.kind === "connection") {
+        const send = activeSend(ctx);
+        if (send?.upstreamTransport === "websocket") {
+          send.websocketHandshakeStatus = 101;
+          send.connectionReused = event.reused;
+        }
       }
       if (event.kind === "close") { d.websocketCloseCode = event.code; d.closedBy = "upstream"; recordDiagnosticEvent(d, { type: "upstream.closed", at: Date.now(), source: "transport" }); }
       clean(ctx);
