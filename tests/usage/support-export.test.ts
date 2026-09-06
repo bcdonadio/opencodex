@@ -131,6 +131,21 @@ describe("transaction support export", () => {
     expect(bundle.exportCompleteness).toBe("partial");
   });
 
+  test("preserves forwarded request shape counts without payload data", () => {
+    const row = policyEntry();
+    const fields = ["forwardedInputItemCount", "forwardedConversationItemCount", "forwardedMessageCount",
+      "forwardedToolDefinitionCount", "forwardedToolCallCount", "forwardedToolResultCount",
+      "forwardedReasoningItemCount", "forwardedEncryptedItemCount", "forwardedImageCount",
+      "forwardedAudioCount", "forwardedFileCount", "forwardedAttachmentBytes",
+      "forwardedToolResultBytes", "forwardedLargestToolResultBytes"];
+    fields.forEach((field, index) => { row.diagnostics![field] = index; });
+    row.diagnostics!.forwardedInput = [{ content: "private-payload" }];
+    const bundle = buildSupportExport({ requestIds: [row.requestId] }, [row]);
+    const diagnostic = bundle.records[0]!.diagnostics as Record<string, unknown>;
+    fields.forEach((field, index) => { expect(diagnostic[field]).toBe(index); });
+    expect(JSON.stringify(bundle)).not.toContain("private-payload");
+  });
+
   test("reports incomplete canonical scans even when a selected request is found", () => {
     const row = policyEntry();
     const bundle = buildSupportExport({ requestIds: [row.requestId] }, [row], {
