@@ -272,6 +272,10 @@ const SAFE_ACCOUNT_LABEL = /^(?:main|[po][0-9a-f]{6})$/;
 const UNSAFE_DIAGNOSTIC_TEXT = /(?:\b(?:https?|file):\/\/|\bwww\.|(?:^|[\s"'(])(?:\/(?:home|Users|etc|var|tmp|mnt|opt|usr)\/|[A-Za-z]:\\|\\\\)|(?:^|[\s,{])(?:HOME|PATH|PWD|USER|SHELL|TOKEN|SECRET|API_KEY|AUTHORIZATION)\s*=|[A-Z][A-Z0-9_]{2,}\s*=|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|<\/?(?:thinking|reasoning|analysis)>|\b(?:chain[ -]of[ -]thought|hidden reasoning|private reasoning)\b|(?:^|[\s,{])(?:analysis|reasoning)\s*:)/i;
 const FILE_URI = /\bfile:(?:[\\/]+|[A-Za-z]:[\\/])/i;
 const WINDOWS_OR_UNC_PATH = /(?:^|[\s"'(])(?:[A-Za-z]:[\\/]|[\\/]{2}(?=[^\\/\s]))/;
+// Recognize filesystem syntax rather than specific directory names. Bare slash
+// namespaces (provider/model) remain valid metadata, but roots, home expansions,
+// dot segments and hidden directories cannot masquerade as diagnostic IDs.
+const FILESYSTEM_PATH_SYNTAX = /(?:\\|(?:^|[\s"'(])(?:\/|~[^/\s]*\/|[A-Za-z]:)|(?:^|\/)\.[^/\s]*(?:\/|$))/;
 
 type DiagnosticSanitizationState = "observed" | "redacted" | "truncated" | "excluded";
 
@@ -283,7 +287,8 @@ interface SanitizedDiagnosticString {
 function containsUnsafeDiagnosticText(value: string): boolean {
   return UNSAFE_DIAGNOSTIC_TEXT.test(value)
     || FILE_URI.test(value)
-    || WINDOWS_OR_UNC_PATH.test(value);
+    || WINDOWS_OR_UNC_PATH.test(value)
+    || FILESYSTEM_PATH_SYNTAX.test(value);
 }
 
 const IDENTIFIER_FIELDS = [

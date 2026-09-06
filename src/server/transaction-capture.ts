@@ -330,10 +330,12 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
       }
     } else {
       identifier(d, "originalPreviousResponseId", b.previous_response_id, "client");
-      d.previousResponseUsed = Boolean(previous);
+      // Presence is structural evidence even when retaining the ID is unsafe.
+      const previousPresent = typeof b.previous_response_id === "string" && b.previous_response_id.length > 0;
+      d.previousResponseUsed = previousPresent;
       captureClientMetadata(d, b.client_metadata);
       d.deltaInputCount = typeof b.input === "string" ? 1 : Array.isArray(b.input) ? b.input.length : Array.isArray(b.messages) ? b.messages.length : 0;
-      d.continuationMode = previous ? "previous_response" : "explicit_input";
+      d.continuationMode = previousPresent ? "previous_response" : "explicit_input";
       d.streamingRequested = b.stream; d.storeRequested = b.store; d.parallelToolCalls = b.parallel_tool_calls;
       d.maxOutputTokens = b.max_output_tokens ?? b.max_completion_tokens ?? b.max_tokens;
       d.truncationMode = b.truncation;

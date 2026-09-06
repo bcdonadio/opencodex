@@ -286,6 +286,52 @@ test("client identity capture reads explicit headers and more specific per-reque
   expect(JSON.stringify(d)).not.toMatch(/private-hostname|private-value|private\/path|invented-root/);
 });
 
+test("path syntax in client identity is redacted across capture and normalization", () => {
+  for (const value of ["../../Users/" + "alice/.codex/auth.json", "../../etc/passwd", "./secrets/key",
+    "route/../secrets/key", "route/./key", "~/private/key", "~alice/private/key",
+    ".codex/auth.json", "route/..", "route/.private", "/private/key", "..\\secrets\\key", "C:private/key"]) {
+    const ctx = {} as RequestLogContext;
+    observeRequestTransport(ctx, "http", new Request("http://localhost", { headers: { "thread-id": value } }));
+    recordRequestShape(ctx, { previous_response_id: value, client_metadata: { session_id: value } });
+    const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+    for (const field of ["codexThreadId", "codexSessionId", "previousResponseId", "originalPreviousResponseId"]) {
+      expect(d[field]).toBeUndefined();
+      expect(d.fieldAvailability[field]?.status).toBe("redacted");
+    }
+    expect(JSON.stringify(d)).not.toContain(value);
+    const raw = createTransactionDiagnostics({ requestId: "ocx-path-identity", receivedAt: 1_000 });
+    Object.assign(raw, { codexThreadId: value, previousResponseId: value });
+    const normalized = normalizeTransactionDiagnostics(raw)!;
+    expect(normalized.codexThreadId).toBeUndefined();
+    expect(normalized.previousResponseId).toBeUndefined();
+    expect(normalized.fieldAvailability.codexThreadId?.status).toBe("redacted");
+  }
+});
+
+test("continuation presence survives identifier redaction and truncation", () => {
+  for (const value of ["person@example.com", "https://private.example/key", "resp_" + "x".repeat(MAX_DIAGNOSTIC_ID_BYTES)]) {
+    const ctx = {} as RequestLogContext;
+    const body = { previous_response_id: value, input: [] };
+    recordRequestShape(ctx, body);
+    recordRequestShape(ctx, body, undefined, true);
+    const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+    expect(d.previousResponseUsed).toBe(true);
+    expect(d.continuationMode).toBe("previous_response");
+    expect(d.previousResponseId).toBeUndefined();
+    expect(d.originalPreviousResponseId).toBeUndefined();
+    expect(d.forwardedPreviousResponseId).toBeUndefined();
+    expect(d.previousResponseRewriteApplied).toBeUndefined();
+    expect(d.fieldAvailability.previousResponseId?.status).toBe(value.startsWith("resp_") ? "truncated" : "redacted");
+    expect(body.previous_response_id).toBe(value);
+  }
+  for (const value of [undefined, null, ""]) {
+    const ctx = {} as RequestLogContext;
+    recordRequestShape(ctx, { previous_response_id: value, input: [] });
+    expect(ctx.diagnostics?.previousResponseUsed).toBe(false);
+    expect(ctx.diagnostics?.continuationMode).toBe("explicit_input");
+  }
+});
+
 test("WebSocket metadata and invalid client identifiers remain bounded and privacy safe", () => {
   const ctx = {} as RequestLogContext;
   observeRequestTransport(ctx, "websocket", new Request("http://localhost/v1/responses", { headers: {
