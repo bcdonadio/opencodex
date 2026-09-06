@@ -2,7 +2,7 @@
  * /v1/live relay: Codex App / ChatGPT voice POSTs call-create against the injected base_url,
  * so the proxy must relay it to an OpenAI upstream instead of the /v1/* JSON-404 guard.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
@@ -26,6 +26,33 @@ import type { OcxConfig } from "../../src/types";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
+
+test("failed live sideband upgrade records its actual final status once", async () => {
+  saveConfig(forwardConfig());
+  clearRequestLogsForTests();
+  const server = startServer(0);
+  const upgrade = spyOn(server, "upgrade").mockReturnValue(false);
+  try {
+    const request = new Request(new URL("/v1/live/rtc_status", server.url), {
+      headers: {
+        upgrade: "websocket",
+        authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`,
+        "chatgpt-account-id": "acct-123",
+      },
+    });
+    const response = await fetch(request);
+    expect(response?.status).toBe(426);
+    const rows = getRequestLogEntries();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe(426);
+    expect(rows[0].diagnostics?.terminalMappedStatus).toBe(426);
+    expect(rows[0].diagnostics?.events.filter(event => event.type === "request.finalized")).toHaveLength(1);
+  } finally {
+    upgrade.mockRestore();
+    await server.stop(true);
+  }
+});
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
