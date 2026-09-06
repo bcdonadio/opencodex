@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { saveConfig } from "../../src/config";
 import { clearKeyCooldowns } from "../../src/providers/key-failover";
 import { startServer } from "../../src/server";
+import { getRequestLogEntries } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -109,6 +110,13 @@ describe("server same-target 429 retry (end-to-end)", () => {
       expect(seenHeaders).toHaveLength(3);
       expect(seenHeaders[0]).toEqual(seenHeaders[1]);
       expect(seenHeaders[1]).toEqual(seenHeaders[2]);
+      const logged = getRequestLogEntries().find(row => row.model === "DeepSeek-V4-Flash");
+      expect(logged?.diagnostics?.retryDelayMs).toBe(120);
+      expect(logged?.diagnostics?.retryDecision).toBe("retry_dispatched");
+      expect(logged?.diagnostics?.recoveryReason).toBe("rate-limit-429");
+      expect(logged?.attempts?.[0]?.sends?.map(send => send.retryReason)).toEqual([
+        undefined, "rate-limit-429", "rate-limit-429",
+      ]);
     } finally {
       try {
         await server?.stop(true);

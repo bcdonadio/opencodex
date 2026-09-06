@@ -34,8 +34,9 @@ import {
   type PersistedUsageEntry,
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { observeRequestTransport, recordRequestShape } from "../../src/server/transaction-capture";
-import type { RequestLogContext } from "../../src/server/request-log";
+import { observeRequestTransport, recordRequestShape, recordForwardedRequest, recordReconstructedContext } from "../../src/server/transaction-capture";
+import { noteAttemptSend, type RequestLogContext } from "../../src/server/request-log";
+import { captureRetryDelay } from "../../src/server/transaction-recovery-capture";
 
 test("client identity capture reads bounded explicit headers and metadata, with first-source precedence", () => {
   const ctx = {} as RequestLogContext;
@@ -85,6 +86,46 @@ test("WebSocket metadata and invalid client identifiers remain bounded and priva
     "x-codex-turn-metadata": JSON.stringify({ thread_id: "x".repeat(17000) }),
   } }));
   expect(oversized.diagnostics?.codexThreadId).toBeUndefined();
+});
+
+test("recovery reasons belong to each actual dispatch, including repeated recovery kinds", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test",
+    activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+  observeRequestTransport(ctx, "http");
+  for (const reason of [undefined, "transient-5xx", "connection-reset", "transient-5xx", undefined] as const) {
+    noteAttemptSend(ctx.activeAttempt, undefined, reason);
+    recordForwardedRequest(ctx, "http");
+  }
+  expect(ctx.activeAttempt?.sends?.map(send => send.retryReason)).toEqual([
+    undefined, "transient-5xx", "connection-reset", "transient-5xx", undefined,
+  ]);
+  expect(ctx.activeAttempt?.sends?.map(send => send.recoveryReason)).toEqual([
+    undefined, "transient-5xx", "connection-reset", "transient-5xx", undefined,
+  ]);
+  expect(ctx.activeAttempt?.recoveryKinds).toEqual(["transient-5xx", "connection-reset"]);
+  expect(ctx.diagnostics?.retryDecision).toBe("retry_dispatched");
+  expect(ctx.diagnostics?.recoveryReason).toBe("transient-5xx");
+  expect(ctx.diagnostics?.retryBudgetRemaining).toBeUndefined();
+  expect(ctx.diagnostics?.fieldAvailability.retryBudgetRemaining?.status).toBe("unsupported");
+});
+
+test("scheduled retry delay and restored state require positive owner evidence", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test" };
+  observeRequestTransport(ctx, "http");
+  recordReconstructedContext(ctx, { previous_response_id: "response-prior", input: [] }, 0);
+  expect(ctx.diagnostics?.stateRestored).toBeUndefined();
+  expect(ctx.diagnostics?.fieldAvailability.stateRestored?.status).toBe("not_observed");
+  expect(captureRetryDelay(ctx, 120)).toBe(120);
+  expect(ctx.diagnostics?.retryDelayMs).toBe(120);
+  expect(ctx.diagnostics?.retryDecision).toBe("retry_wait_scheduled");
+  expect(captureRetryDelay(ctx, Number.NaN)).toBeNaN();
+  expect(ctx.diagnostics?.retryDelayMs).toBe(120);
+  recordReconstructedContext(ctx, { input: [{ role: "user", content: "private-content" }] }, 1);
+  expect(ctx.diagnostics?.stateRestored).toBe(true);
+  expect(ctx.diagnostics?.stateRestoreSource).toBe("previous_response_replay");
+  expect(ctx.diagnostics?.resumeMode).toBe("local_replay");
+  expect(JSON.stringify(normalizeTransactionDiagnostics(ctx.diagnostics))).not.toContain("private-content");
+  expect(normalizeTransactionDiagnostics(ctx.diagnostics)?.stateRestoreSource).toBe("previous_response_replay");
 });
 
 let home = "";

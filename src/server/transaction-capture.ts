@@ -10,6 +10,7 @@ import { httpStatusFromTerminalError } from "../lib/errors";
 import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
 import { captureClientHeaders, captureClientMetadata } from "./transaction-client-capture";
+import { initializeRecoveryAvailability, captureRecoveryDispatch, captureReplayRestoration, finishRecoveryCapture } from "./transaction-recovery-capture";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -23,6 +24,7 @@ export function captureSafely(action: () => void): void { try { action(); } catc
 function diagnostics(ctx: RequestLogContext, requestId = "request", receivedAt = Date.now()): TransactionDiagnosticsV1 {
   if (!ctx.diagnostics) {
     ctx.diagnostics = createTransactionDiagnostics({ requestId, receivedAt, proxyVersion });
+    initializeRecoveryAvailability(ctx.diagnostics);
     recordDiagnosticEvent(ctx.diagnostics, { type: "request.received", at: receivedAt, source: "proxy", elapsedMs: 0 });
     for (const field of ["modelSwitchRequested", "modelSwitchApplied", "modelSwitchEffectiveFromRequestId",
       "settingsUpdatedAt", "settingsAppliedAt", "proxyCommit", "proxyBuildId", "modelCatalogRevision"]) {
@@ -67,6 +69,7 @@ export function recordReconstructedContext(ctx: RequestLogContext, body: unknown
     const input = (body as { input?: unknown }).input;
     const d = diagnostics(ctx);
     d.reconstructedInputCount = Array.isArray(input) ? input.length : typeof input === "string" ? 1 : 0;
+    captureReplayRestoration(d, replayedItems);
     d.replayedItemCount = replayedItems;
     if (replayedItems > 0) {
       d.continuationMode = "local_replay";
@@ -278,8 +281,8 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
         accountLogLabel: ctx.accountLogLabel, requestedEffort: ctx.requestedEffort,
         effectiveEffort: ctx.effectiveEffort, reasoningWireField: ctx.reasoningWireField,
         reasoningWireValue: ctx.reasoningWireValue, serviceTier: ctx.requestedServiceTier,
-        recoveryReason: attempt.recoveryKinds.at(-1),
       });
+      captureRecoveryDispatch(d, attempt, send);
       attempt.sends = owner.sends;
       attempt.sendCount = owner.sendCount;
       if (owner.sendCount > MAX_DIAGNOSTIC_SENDS) { d.captureTruncated = true; d.fieldAvailability.sends = { status: "truncated", source: "transport" }; }
@@ -455,6 +458,7 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
       if (owner) ctx.activeAttempt.sendCount = owner.sendCount;
     }
     d.terminalMappedStatus = status;
+    finishRecoveryCapture(d, status);
     d.terminalSource = ctx.terminalSource ?? (d.terminalEventType ? "upstream" : undefined);
     d.transportPhase = ctx.transportPhase;
     if (ctx.activeAttempt?.streamAborted) d.streamAborted = true;

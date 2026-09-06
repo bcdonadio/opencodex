@@ -1,4 +1,5 @@
 import { transportObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext } from "../transaction-capture";
+import { captureRetryDelay } from "../transaction-recovery-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -4752,7 +4753,7 @@ async function handleResponsesInner(
         for await (const _ of prepareSameTarget429Wait({
           body: upstreamResponse.body,
           signal: options.abortSignal,
-          delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+          delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
         })) {
           // pre-stream: no stall watchdog to feed
         }
@@ -6509,7 +6510,7 @@ async function handleResponsesInner(
           for await (const _ of prepareSameTarget429Wait({
             body: upstreamResponse.body,
             signal: options.abortSignal,
-            delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+            delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
           })) {
             // pre-stream: no stall watchdog to feed
           }
@@ -6913,7 +6914,7 @@ async function handleResponsesInner(
             // cancel aborts `upstream` through the bridge, and upstream is also linked from
             // options.abortSignal — so this covers both cancellation paths.
             signal: upstream.signal,
-            delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+            delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
             heartbeatIntervalMs: Math.min(10_000, Math.max(250, stallTimeoutMs / 2)),
           });
         } catch {

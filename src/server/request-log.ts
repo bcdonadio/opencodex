@@ -14,6 +14,7 @@ import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordDeliveredOutput, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
+import { noteRecoveryDispatch } from "./transaction-recovery-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import type { AdapterRequest } from "../adapters/base";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -1292,6 +1293,7 @@ export function noteAttemptSend(
   recovery?: AttemptRecoveryKind,
 ): void {
   if (!attempt) return;
+  noteRecoveryDispatch(attempt, recovery);
   attempt.sendCount += 1;
   if (typeof inputTokenEstimate === "number"
     && Number.isFinite(inputTokenEstimate)
