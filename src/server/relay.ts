@@ -864,6 +864,22 @@ export type SseInspectorHandlers = {
   pinCompletedResponseIdToFirstSeen?: boolean;
 };
 
+/** Inspect only bytes accepted by the downstream owner. No upstream metadata writes. */
+export function createDownstreamDiagnosticInspector(logCtx: RequestLogContext): SseInspector {
+  return createSseInspector({
+    onTerminal: () => recordDownstreamTerminal(logCtx),
+    onFirstOutput: () => recordDeliveredOutput(logCtx),
+    onParsedPayload: payload => {
+      if (!payload || typeof payload !== "object") return;
+      const event = payload as { type?: unknown; delta?: unknown };
+      if (typeof event.delta === "string" && event.delta.length > 0 && typeof event.type === "string"
+        && ["response.output_text.delta", "response.reasoning_summary_text.delta",
+          "response.function_call_arguments.delta", "response.refusal.delta"].includes(event.type))
+        recordDeliveredOutput(logCtx, event.type);
+    },
+  });
+}
+
 type CompletedOutputItem = { item: unknown; sourceBytes: number };
 
 function delimiterLengthAt(

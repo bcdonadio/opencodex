@@ -1,4 +1,4 @@
-import { transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput, recordRequestedReasoning } from "../transaction-capture";
+import { transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput, recordRequestedReasoning, recordDownstreamCancelled } from "../transaction-capture";
 import { captureRetryDelay } from "../transaction-recovery-capture";
 import { recordRouteAuth, recordAuthRefresh } from "../transaction-auth-capture";
 import type { Server } from "bun";
@@ -311,6 +311,7 @@ import {
   consumeForInspection,
   consumeForResponseLogMetadata,
   createSseInspector,
+  createDownstreamDiagnosticInspector,
   isEagerRelaySseResponse,
   isNativePassthroughSseResponse,
   markEagerRelaySseResponse,
@@ -5165,6 +5166,12 @@ async function handleResponsesInner(
         const turnAc = new AbortController();
         linkAbortSignal(upstream, turnAc.signal);
         registerTurn(turnAc, options.turnAdmissionLease);
+        // Upstream outcome accounting stays synchronous. Only the log callback
+        // waits for the relay's accepted handoff and teardown observations.
+        let pendingLogTerminal: ResponsesTerminalStatus | undefined;
+        let pendingLogCancellation = false;
+        const deliveryInspector = logCtx.inboundTransport === "http"
+          ? createDownstreamDiagnosticInspector(logCtx) : undefined;
         const reportNativeTerminal = recordTerminalOutcomes
           ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
             terminalRecorder?.(status, httpStatusOverride);
@@ -5184,7 +5191,7 @@ async function handleResponsesInner(
                 );
               }
             }
-            options.onNativePassthroughTerminal?.(status);
+            pendingLogTerminal ??= status;
           }
           : undefined;
         const inspector = createSseInspector({
@@ -5197,6 +5204,10 @@ async function handleResponsesInner(
         });
         const eagerBody = relaySseEagerBounded(passthroughSseBody, turnAc, {
           inspectChunk: chunk => inspector.feed(chunk),
+          onDeliveredChunk: chunk => deliveryInspector?.feed(chunk),
+          onClientGone: () => {
+            if (logCtx.inboundTransport === "http") recordDownstreamCancelled(logCtx, "client_disconnect");
+          },
           finishInspection: () => inspector.finish(),
           disposeInspection: () => inspector.dispose(),
           // Stream lifetime follows the protocol terminal even when this request
@@ -5218,8 +5229,21 @@ async function handleResponsesInner(
               reportNativeTerminal("failed", 502);
             }
           },
-          onClientCancel: () => options.onNativePassthroughCancel?.(),
-          onDone: () => unregisterTurn(turnAc),
+          onClientCancel: () => { pendingLogCancellation = true; },
+          onDone: () => {
+            try {
+              // Flush only downstream bytes already accepted by enqueue; this
+              // cannot borrow an upstream terminal consumed in discard-drain.
+              deliveryInspector?.finish();
+              deliveryInspector?.dispose();
+            } catch { /* diagnostic inspection cannot block final logging */ }
+            try {
+              if (pendingLogTerminal !== undefined) options.onNativePassthroughTerminal?.(pendingLogTerminal);
+              else if (pendingLogCancellation) options.onNativePassthroughCancel?.();
+            } finally {
+              unregisterTurn(turnAc);
+            }
+          },
         }, {
           clientGoneSignal: options.abortSignal,
           ...(inlineEagerRewrite ? { rewriteBudget: translatorBudget } : {}),
