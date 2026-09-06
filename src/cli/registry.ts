@@ -259,7 +259,11 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "`inspect star` reads the repository star status only. Starring uses your GitHub identity and is available from the dashboard alone.",
     ],
   },
-  { name: "logs", usage: "ocx logs [filters] [--follow] [--json|--jsonl]", summary: "Alias of ocx observe logs." },
+  {
+    name: "logs",
+    usage: "ocx logs [filters] [--follow] [--json|--jsonl] | ocx logs export (--request <id> ... | --from <ms> --to <ms>) [--out <path>] [--force]",
+    summary: "Inspect request logs or create a bounded sanitized support bundle.",
+  },
   {
     name: "usage",
     usage: "ocx usage [--range <today|1d|7d|30d|all>] [--surface <all|codex|claude|grok>] [--provider <name>] [--model <id>] [--json]",

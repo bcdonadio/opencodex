@@ -365,6 +365,38 @@ describe("request-history index (RI-02)", () => {
     await expect(queryRequestHistory({}, "garbage-cursor", 10)).rejects.toBeInstanceOf(InvalidCursorError);
   });
 
+  test("support export reads canonical usage rows without consulting the history database", async () => {
+    appendUsageEntry(entry("canonical-only", 1_500, "openai", "gpt-5.6-sol"));
+    // A derived index with invalid bytes must be irrelevant to this endpoint. If the
+    // route consults routing-history.sqlite, this fixture throws instead of exporting.
+    writeFileSync(join(getConfigDir(), HISTORY_DB_FILENAME), "not a sqlite database", "utf8");
+
+    const response = await apiGet("/api/transaction-diagnostics/export?requestId=canonical-only");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-disposition")).toBe(
+      'attachment; filename="opencodex-support-export.json"',
+    );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = await response.json() as { exportSchemaVersion: number; records: Array<{ requestId: string }> };
+    expect(body.exportSchemaVersion).toBe(1);
+    expect(body.records.map(row => row.requestId)).toEqual(["canonical-only"]);
+  });
+
+  test("support export rejects empty, mixed, partial, and over-wide selectors", async () => {
+    for (const path of [
+      "/api/transaction-diagnostics/export",
+      "/api/transaction-diagnostics/export?requestId=one&from=1&to=2",
+      "/api/transaction-diagnostics/export?from=1",
+      "/api/transaction-diagnostics/export?from=0&to=86400001",
+    ]) {
+      const response = await apiGet(path);
+      expect(response.status).toBe(400);
+    }
+    const tooMany = new URLSearchParams();
+    for (let index = 0; index < 33; index += 1) tooMany.append("requestId", `r-${index}`);
+    expect((await apiGet(`/api/transaction-diagnostics/export?${tooMany}`)).status).toBe(400);
+  });
+
   test("page size is bounded at the indexer level", async () => {
     for (const row of seedRows(120)) appendUsageEntry(row);
     const page = await queryRequestHistory({}, undefined, 9999);

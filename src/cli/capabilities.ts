@@ -298,6 +298,24 @@ export const CAPABILITIES: readonly Capability[] = [
     ],
   },
   {
+    command: ["logs", "export"],
+    summary: "Build a bounded, sanitized support bundle from canonical usage-ledger rows.",
+    routes: [{ method: "GET", path: "/api/transaction-diagnostics/export" }],
+    flags: [
+      { name: "--request", value: "string", summary: "Select a request id; repeat at most 32 times." },
+      { name: "--from", value: "number", summary: "Inclusive UTC epoch-millisecond window start." },
+      { name: "--to", value: "number", summary: "Inclusive UTC epoch-millisecond window end, at most 24 hours after --from." },
+      { name: "--out", value: "string", summary: "Write the JSON bundle to this explicit local path." },
+      { name: "--force", value: "boolean", summary: "Replace an existing --out target." },
+    ],
+    mutates: false,
+    json: "payload",
+    details: [
+      "Choose repeatable --request values or exact --from/--to, never both.",
+      "Without --out, stdout is only the JSON support bundle; the command never publishes or sends it.",
+    ],
+  },
+  {
     command: ["storage", "report"],
     summary: "Disk usage under CODEX_HOME, with the log-guard protection report.",
     routes: [{ method: "GET", path: "/api/storage" }],

@@ -295,6 +295,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/quota-resets", module: "server/management/quota-reset-routes", mutates: false, mechanism: "negated-guard" },
   // server/management/request-history-routes
   { method: "GET", path: "/api/request-history", module: "server/management/request-history-routes", mutates: false },
+  { method: "GET", path: "/api/transaction-diagnostics/export", module: "server/management/request-history-routes", mutates: false, mechanism: "path-constant" },
   // server/management/routing-analytics-routes
   // server/management/routing-profile-routes
   { method: "DELETE", path: "/api/routing-profiles", module: "server/management/routing-profile-routes", mutates: true },
