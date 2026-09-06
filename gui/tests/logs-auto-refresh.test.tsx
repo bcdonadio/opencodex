@@ -33,8 +33,24 @@ const updatedLog = {
   model: "gpt-updated",
 };
 
+const forwardedShape = {
+  forwardedInputItemCount: 9, forwardedConversationItemCount: 9, forwardedMessageCount: 3,
+  forwardedToolDefinitionCount: 1, forwardedToolCallCount: 2, forwardedToolResultCount: 2,
+  forwardedReasoningItemCount: 1, forwardedEncryptedItemCount: 1, forwardedImageCount: 1,
+  forwardedAudioCount: 0, forwardedFileCount: 0, forwardedAttachmentBytes: 128,
+  forwardedToolResultBytes: 512, forwardedLargestToolResultBytes: 320,
+};
+const settingsEvidence = { callerEffort: "low", configuredEffort: "high", configuredEffortSource: "model" };
+const sendEvidence = {
+  sendId: "send-settings", sendOrdinal: 1, startedAt: sampleLog.timestamp,
+  callerEffort: "low", configuredEffort: "high", callerServiceTier: "auto", configuredServiceTier: "priority",
+};
+
 const diagnosticLog = {
   ...sampleLog, requestId: "req/selected?", status: 400,
+  attempts: [{ attemptId: "attempt-settings", ordinal: 1, sendCount: 1, sends: [sendEvidence],
+    provider: "openai", model: "gpt-test", adapter: "openai-responses", status: 400,
+    durationMs: 42, recoveryKinds: [], usageStatus: "unreported" }],
   diagnostics: {
     schemaVersion: 1, diagnosticCaptureVersion: 1, transactionId: "tx-selected",
     recordKind: "request", receivedAt: sampleLog.timestamp, timestampSource: "proxy_wall_clock",
@@ -43,9 +59,15 @@ const diagnosticLog = {
     httpStatus: 200, terminalMappedStatus: 400, upstreamResponseId: "resp-created",
     outputDeliveredBeforeFailure: true, terminalSource: "upstream", transportPhase: "mid_stream",
     usageMissingReason: "terminal_without_usage", inputItemCount: 3,
+    contextUsageRatioEstimate: 0.375, closeReason: "body_stall", policyFallbackOutcome: "failed",
+    ...forwardedShape,
+    ...settingsEvidence,
     events: [{ eventSequence: 1, type: "response.created", at: sampleLog.timestamp,
-      source: "upstream", responseId: "resp-created", rawBody: "DO-NOT-RENDER" }],
-    fieldAvailability: { usageSource: { status: "not_observed", source: "upstream" } },
+      source: "upstream", responseId: "resp-created", rawBody: "DO-NOT-RENDER" },
+      { eventSequence: 2, type: "context.compacted", at: sampleLog.timestamp + 1, source: "proxy" }],
+    fieldAvailability: { usageSource: { status: "not_observed", source: "upstream" },
+      forwardedImageCount: { status: "observed", source: "adapter" },
+      contextUsageRatioEstimate: { status: "derived", source: "derived" } },
     rawBody: "DO-NOT-RENDER",
   },
 };
@@ -63,11 +85,32 @@ test("Logs: strict diagnostic projection survives cache round trips without unkn
   const parsed = parseLogDiagnostics(twice.diagnostics)!;
   expect(parsed.fields["derivedFields.0"]).toBe("httpStatus");
   expect(parsed.fields["outputItemCountsByType.message"]).toBe(3);
+  expect(parsed.fields.contextUsageRatioEstimate).toBe(0.375);
+  expect(parsed.fields.closeReason).toBe("body_stall");
+  expect(parsed.fields.policyFallbackOutcome).toBe("failed");
+  expect(parsed.fields).toMatchObject(forwardedShape);
+  expect(parsed.fields).toMatchObject(settingsEvidence);
+  expect(parseAttemptEvidence(twice.attempts)).toEqual([{ attemptId: "attempt-settings", ordinal: 1, sendCount: 1,
+    provider: "openai", model: "gpt-test", adapter: "openai-responses", status: 400, ...sendEvidence }]);
+  expect(parsed.events[1]).toEqual({ eventSequence: 2, type: "context.compacted", at: sampleLog.timestamp + 1, source: "proxy" });
+  expect(parsed.availability.forwardedImageCount).toEqual({ status: "observed", source: "adapter" });
+  expect(parsed.availability.contextUsageRatioEstimate).toEqual({ status: "derived", source: "derived" });
   expect(parsed.fields.toolCallCount).toBeUndefined();
   expect(parsed.availability.rawBody).toBeUndefined();
   expect(JSON.stringify(twice)).not.toContain("DO-NOT-RENDER");
   expect(JSON.stringify(twice)).not.toContain("hidden");
   for (const invalid of [null, [], { ...diagnosticLog.diagnostics, schemaVersion: 2 }, { ...diagnosticLog.diagnostics, receivedAt: NaN }]) expect(parseLogDiagnostics(invalid)).toBeUndefined();
+});
+
+test("Logs: newly supported telemetry still rejects malformed values and unknown enums", () => {
+  const parsed = parseLogDiagnostics({ ...diagnosticLog.diagnostics,
+    contextUsageRatioEstimate: -1, forwardedImageCount: NaN, forwardedAudioCount: "0",
+    forwardedFileCount: { privatePayload: "hidden" }, closeReason: "unknown-close",
+    policyFallbackOutcome: "unknown-outcome",
+    events: [{ eventSequence: 2, type: "context.compacted", at: -1, source: "proxy" }],
+  })!;
+  for (const key of ["contextUsageRatioEstimate", "forwardedImageCount", "forwardedAudioCount", "forwardedFileCount", "closeReason", "policyFallbackOutcome"]) expect(parsed.fields[key]).toBeUndefined();
+  expect(parsed.events).toEqual([]);
 });
 
 test("Logs: attempt evidence retains timing and transport and drops malformed sends", () => {
@@ -106,6 +149,10 @@ test("Logs: diagnostics disclosure preserves table and exports only the selected
     expect(container.querySelector("table")!.textContent).toBe(table);
     for (const value of ["Raw HTTP status", "200", "Mapped status", "400", "resp-created", "Output before failure", "Terminal source", "Transport phase", "terminal_without_usage", "Truncated", "Not observed"]) expect(disclosure.textContent).toContain(value);
     expect(disclosure.textContent).not.toContain("DO-NOT-RENDER");
+    for (const value of ["contextUsageRatioEstimate", "0.375", "closeReason", "body_stall", "policyFallbackOutcome", "failed"]) expect(disclosure.textContent).toContain(value);
+    for (const key of Object.keys(forwardedShape)) expect(disclosure.textContent).toContain(key);
+    expect(disclosure.textContent).toContain("context.compacted");
+    for (const key of ["callerEffort", "configuredEffort", "configuredEffortSource", "callerServiceTier", "configuredServiceTier"]) expect(disclosure.textContent).toContain(key);
     expect(requests.some(url => url.includes("/export?"))).toBe(false);
     const button = [...disclosure.querySelectorAll("button")].find(el => el.textContent === "Download support bundle")!;
     await act(async () => { button.click(); });
