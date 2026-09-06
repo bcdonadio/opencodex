@@ -7,6 +7,7 @@ import {
   buildSupportExport,
 } from "../../src/diagnostics/support-export";
 import type { PersistedUsageEntry } from "../../src/usage/log";
+import { normalizeUsageEntryForTest } from "../../src/usage/log";
 
 function policyEntry(requestId = "ocx-policy", timestamp = 1_500): PersistedUsageEntry {
   return {
@@ -82,6 +83,54 @@ function policyEntry(requestId = "ocx-policy", timestamp = 1_500): PersistedUsag
 }
 
 describe("transaction support export", () => {
+  test("retains canonical proxy decision IDs and explains excluded route projections", () => {
+    const row = policyEntry();
+    row.routeDecision = {
+      version: 1, decisionId: "a1b2c3d4e5f6", createdAt: row.timestamp,
+      requestedModel: row.model, routeKind: "policy",
+      profile: { id: "private-profile", revision: "private-revision" },
+      requirements: [{ id: "tools", outcome: "satisfied" }],
+      candidates: [{ provider: "openai", model: row.model, eligible: true, exclusions: [] }],
+      selected: { candidateIndex: 0, provider: "openai", model: row.model, reason: "selected", tieBreak: "none" },
+      truncated: { candidates: true, requirements: true },
+    };
+    const canonical = normalizeUsageEntryForTest(row);
+    expect(canonical.routeDecision?.decisionId).toBe("a1b2c3d4e5f6");
+    const bundle = buildSupportExport({ requestIds: [canonical.requestId] }, [canonical]);
+    const route = bundle.records[0]!.routeDecision as Record<string, any>;
+    expect(route.decisionId).toBe("a1b2c3d4e5f6");
+    expect(route.truncated).toBeUndefined();
+    expect(route.candidates).toBeUndefined();
+    expect(route.requirements).toBeUndefined();
+    expect(bundle.gaps).toEqual(expect.arrayContaining([
+      { kind: "projection_omission", field: "routeDecision.candidates", omittedRecordCount: 1 },
+      { kind: "projection_omission", field: "routeDecision.requirements", omittedRecordCount: 1 },
+    ]));
+    expect(bundle.exportCompleteness).toBe("partial");
+    expect(JSON.stringify(bundle)).not.toContain("private-profile");
+    expect(JSON.stringify(bundle)).not.toContain("private-revision");
+  });
+  test("marks canonical values excluded only by public export as redacted", () => {
+    const row = policyEntry();
+    row.diagnostics!.requestSettingsRevision = "opaque[revision]";
+    row.diagnostics!.fieldAvailability.requestSettingsRevision = { status: "observed", source: "proxy" };
+    row.diagnostics!.upstreamTraceHeaders = ["traceparent", "x-vendor-trace"];
+    row.diagnostics!.fieldAvailability.upstreamTraceHeaders = { status: "observed", source: "upstream" };
+    row.diagnostics!.fieldAvailability.codexThreadId = { status: "observed", source: "client" };
+    const canonical = normalizeUsageEntryForTest(row);
+    expect(canonical.diagnostics!.requestSettingsRevision).toBe("opaque[revision]");
+    expect(canonical.diagnostics!.fieldAvailability.requestSettingsRevision!.status).toBe("observed");
+    expect(canonical.diagnostics!.upstreamTraceHeaders).toEqual(["traceparent", "x-vendor-trace"]);
+    const bundle = buildSupportExport({ requestIds: [canonical.requestId] }, [canonical]);
+    const diagnostics = bundle.records[0]!.diagnostics as Record<string, any>;
+    expect(diagnostics.requestSettingsRevision).toBeUndefined();
+    expect(diagnostics.fieldAvailability.requestSettingsRevision).toEqual({ status: "redacted", source: "proxy" });
+    expect(diagnostics.upstreamTraceHeaders).toEqual(["traceparent"]);
+    expect(diagnostics.fieldAvailability.upstreamTraceHeaders).toEqual({ status: "redacted", source: "upstream" });
+    expect(diagnostics.fieldAvailability.codexThreadId).toEqual({ status: "observed", source: "client" });
+    expect(JSON.stringify(bundle)).not.toContain("opaque[revision]");
+    expect(canonical.diagnostics!.fieldAvailability.requestSettingsRevision!.status).toBe("observed");
+  });
   test("keeps caller and configured reasoning and tiers distinct from wire settings", () => {
     const row = policyEntry();
     Object.assign(row.diagnostics!, {

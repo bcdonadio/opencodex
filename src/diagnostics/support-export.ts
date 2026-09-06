@@ -25,7 +25,7 @@ export type SupportExportSelection =
   | { from: number; to: number };
 
 export interface SupportExportGapV1 {
-  kind: "request_not_found" | "field_unavailable" | "record_limit" | "byte_limit" | "record_validation" | "log_coverage";
+  kind: "request_not_found" | "field_unavailable" | "record_limit" | "byte_limit" | "record_validation" | "projection_omission" | "log_coverage";
   requestId?: string;
   field?: string;
   omittedRecordCount: number;
@@ -299,7 +299,11 @@ function exportAttempt(attempt: PersistedUsageAttempt, state: Pseudonymizer): Ex
   return result;
 }
 
-function exportAvailability(value: Record<string, DiagnosticAvailabilityV1>): ExportObject {
+function exportAvailability(
+  value: Record<string, DiagnosticAvailabilityV1>,
+  source: TransactionDiagnosticsV1,
+  exported: ExportObject,
+): ExportObject {
   const result: ExportObject = {};
   for (const [rawField, availability] of Object.entries(value)) {
     const field = safeToken(rawField, 64);
@@ -307,6 +311,17 @@ function exportAvailability(value: Record<string, DiagnosticAvailabilityV1>): Ex
     const item: ExportObject = {};
     setToken(item, "status", availability.status, 64);
     setToken(item, "source", availability.source, 64);
+    const captured = source[rawField];
+    const retained = exported[rawField];
+    // Capture availability describes the private ledger. Public allowlists can
+    // exclude that value or part of a list; do not advertise it as still intact.
+    if (captured !== undefined && (retained === undefined
+      || (Array.isArray(captured) && Array.isArray(retained) && retained.length < captured.length)
+      || (captured !== null && retained !== null && typeof captured === "object"
+        && typeof retained === "object" && !Array.isArray(captured)
+        && Object.keys(retained).length < Object.keys(captured).length))) {
+      item.status = "redacted";
+    }
     if (item.status) result[field] = item;
   }
   return result;
@@ -381,20 +396,20 @@ function exportDiagnostics(source: TransactionDiagnosticsV1, state: Pseudonymize
     const map = exportCounterMap(source[field]);
     if (map) result[field] = map;
   }
-  result.fieldAvailability = exportAvailability(source.fieldAvailability);
   const events: ExportObject[] = [];
   for (const event of source.events) {
     const exported = exportEvent(event, state);
     if (exported) events.push(exported);
   }
   result.events = events;
+  result.fieldAvailability = exportAvailability(source.fieldAvailability, source, result);
   return result;
 }
 
 function exportRouteDecision(value: PersistedUsageEntry["routeDecision"], state: Pseudonymizer): ExportObject | undefined {
   if (!value) return undefined;
   const result: ExportObject = { version: 1, createdAt: value.createdAt };
-  setPseudonym(result, "decisionId", value.decisionId, state);
+  if (/^[a-f0-9]{12}$/.test(value.decisionId)) result.decisionId = value.decisionId;
   setToken(result, "requestedModel", value.requestedModel);
   setToken(result, "routeKind", value.routeKind, 64);
   if (value.profile) {
@@ -410,13 +425,16 @@ function exportRouteDecision(value: PersistedUsageEntry["routeDecision"], state:
   setToken(selected, "reason", value.selected.reason, 128);
   setToken(selected, "tieBreak", value.selected.tieBreak, 128);
   result.selected = selected;
-  if (value.truncated) {
-    const truncated: ExportObject = {};
-    for (const field of ["candidates", "exclusions", "requirements", "strings", "compatibility"] as const) {
-      if (value.truncated[field] === true) truncated[field] = true;
-    }
-    result.truncated = truncated;
-  }
+  // Candidate evidence includes operator-authored details outside this public
+  // projection. Explain its omission instead of copying its capture truncation
+  // flags as though the corresponding collections were included in the bundle.
+  const omittedFields: string[] = [];
+  if (value.candidates.length > 0 || value.truncated?.candidates
+    || value.truncated?.exclusions || value.truncated?.compatibility) omittedFields.push("candidates");
+  else result.candidates = [];
+  if (value.requirements.length > 0 || value.truncated?.requirements) omittedFields.push("requirements");
+  else result.requirements = [];
+  if (omittedFields.length > 0) result.omittedFields = omittedFields;
   return result;
 }
 
@@ -620,12 +638,28 @@ export function buildSupportExport(
   }
   if (byteOmitted > 0) gaps.push({ kind: "byte_limit", omittedRecordCount: byteOmitted });
   if (validationOmitted > 0) gaps.push({ kind: "record_validation", omittedRecordCount: validationOmitted });
+  for (const field of ["candidates", "requirements"]) {
+    const count = bundle.records.filter(record => {
+      const omitted = (record.routeDecision as ExportObject | undefined)?.omittedFields;
+      return Array.isArray(omitted) && omitted.includes(field);
+    }).length;
+    if (count > 0) gaps.push({ kind: "projection_omission", field: `routeDecision.${field}`, omittedRecordCount: count });
+  }
 
   bundle.unavailableFields = IMPORTANT_AVAILABILITY_FIELDS.filter(field =>
     !bundle.records.some(record => hasField(record, field)));
   bundle.exportCompleteness = gaps.length > 0 ? "partial" : "complete";
   while (bundleBytes(bundle) > SUPPORT_EXPORT_MAX_BYTES && bundle.records.length > 0) {
-    bundle.records.pop();
+    const removed = bundle.records.pop();
+    const omitted = (removed?.routeDecision as ExportObject | undefined)?.omittedFields;
+    if (Array.isArray(omitted)) {
+      for (let index = gaps.length - 1; index >= 0; index -= 1) {
+        const gap = gaps[index]!;
+        if (gap.kind !== "projection_omission" || !omitted.some(field => gap.field === `routeDecision.${field}`)) continue;
+        gap.omittedRecordCount -= 1;
+        if (gap.omittedRecordCount === 0) gaps.splice(index, 1);
+      }
+    }
     const byteGap = gaps.find(gap => gap.kind === "byte_limit");
     if (byteGap) byteGap.omittedRecordCount += 1;
     else gaps.push({ kind: "byte_limit", omittedRecordCount: 1 });
