@@ -12,6 +12,8 @@ import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import { EmptyState, Notice } from "../ui";
 import Debug from "./Debug";
+import { sanitizeLogEvidence } from "./log-diagnostics";
+import { LogDiagnosticsDetails } from "./log-diagnostics-details";
 import { LogsFilterBar } from "./logs-filter-bar";
 import { logsClockAnchor, logsClockNow, type LogsClockAnchor } from "./logs-clock";
 import { DEFAULT_LOG_FILTER_STATE, extractLogFilterOptions, filterLogs, hasActiveLogFilters, type LogFilterState } from "./logs-filter";
@@ -131,6 +133,7 @@ interface LogAttempt {
 }
 
 export interface LogEntry {
+  diagnostics?: unknown;
   requestId?: string;
   timestamp: number;
   model: string;
@@ -196,7 +199,7 @@ function validCachedLogs(cached: LogEntry[] | null): LogEntry[] | null {
       return null;
     }
   }
-  return cached;
+  return cached.map(sanitizeLogEvidence);
 }
 
 function displayTokenTotal(log: LogEntry): number | undefined {
@@ -468,7 +471,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       const body = await res.json() as LogEntry[] | { logs?: LogEntry[]; generatedAt?: unknown };
       const receivedAt = performance.now();
       const raw = Array.isArray(body) ? body : (body.logs ?? []);
-      const next = raw.map(sanitizeLogEntryRouteDecision);
+      const next = raw.map(sanitizeLogEntryRouteDecision).map(sanitizeLogEvidence);
       // The resource-store generation guard runs only after this loader returns.
       // Guard these local side effects here as fetch/body readers may ignore abort.
       if (!isCurrent()) throw signal.reason ?? new DOMException("Obsolete log request", "AbortError");
@@ -860,6 +863,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
 
       {detail && (
         <LogDetailDialog
+          apiBase={apiBase}
           detail={detail}
           detailInfo={detailInfo}
           localeCode={locale}
@@ -890,8 +894,9 @@ function useModalDialog(open: boolean) {
 }
 
 function LogDetailDialog({
-  detail, detailInfo, localeCode, localeTag, serverTimeZone, t, onClose, onFilterConversation,
+  apiBase, detail, detailInfo, localeCode, localeTag, serverTimeZone, t, onClose, onFilterConversation,
 }: {
+  apiBase: string;
   detail: LogEntry;
   detailInfo: ReturnType<typeof statusCodeInfo> | null;
   localeCode: string;
@@ -975,6 +980,8 @@ function LogDetailDialog({
             {detail.upstreamError && (<><span className="muted">{t("logs.col.upstreamReason")}</span><span className="mono log-detail-break">{detail.upstreamError}</span></>)}
           </div>
         </section>
+
+        <LogDiagnosticsDetails key={`${apiBase}:${detail.requestId}`} diagnostics={detail.diagnostics} attempts={detail.attempts} requestId={detail.requestId} apiBase={apiBase} />
 
         <section className="log-detail-section" aria-labelledby="log-detail-route">
           <h4 id="log-detail-route" className="log-detail-section-title">{t("logs.detail.route.section")}</h4>
