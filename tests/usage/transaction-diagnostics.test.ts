@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -34,6 +34,7 @@ import {
   type PersistedUsageEntry,
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { requestLogDto } from "../../src/server/management/shared";
 
 let home = "";
 let previousHome: string | undefined;
@@ -446,6 +447,289 @@ describe("transaction diagnostics schema", () => {
 });
 
 describe("transaction diagnostics persistence", () => {
+  // Hand-authored contract witnesses, deliberately independent of the normalizer's
+  // field lists and capture builders. Distinct values reveal provenance conflation.
+  function completeEnvelope(): TransactionDiagnosticsV1 {
+    return {
+      schemaVersion: 1, diagnosticCaptureVersion: 1, transactionId: "ocx-txn-contract",
+      recordKind: "request", correlationSource: "mixed", correlationConfidence: "direct",
+      receivedAt: 1_000, timestampSource: "proxy_wall_clock", droppedDiagnosticEventCount: 0,
+      captureTruncated: false, redactionApplied: true, redactionVersion: 1, retentionClass: "usage_ledger",
+      parentRequestId: "parent-request", retryOfRequestId: "retry-request", replayOfRequestId: "replay-request",
+      codexThreadId: "thread-child", codexTurnId: "turn-child", codexSessionId: "session-client",
+      rootThreadId: "thread-root", rootTurnId: "turn-root", parentThreadId: "thread-parent",
+      agentId: "agent-child", parentAgentId: "agent-parent", agentRole: "reviewer",
+      clientRequestId: "client-request", clientResponseId: "client-response",
+      upstreamResponseId: "resp-terminal", previousResponseId: "resp-previous",
+      originalPreviousResponseId: "resp-original", forwardedPreviousResponseId: "resp-forwarded",
+      upstreamRequestId: "upstream-request", upstreamConversationId: "upstream-conversation",
+      upstreamSessionId: "upstream-session", upstreamEventId: "event-terminal", policyEventId: "policy-event",
+      traceId: "trace-request", spanId: "span-request", parentSpanId: "span-parent",
+      connectionId: "connection-client", upstreamConnectionId: "connection-provider",
+      connectionGeneration: 2, requestSequenceOnConnection: 3, upstreamRequestSequenceOnConnection: 4,
+      admittedAt: 1_001, routeSelectedAt: 1_003, queuedAt: 1_002,
+      upstreamConnectStartedAt: 1_004, upstreamConnectedAt: 1_006, handshakeCompletedAt: 1_009,
+      upstreamRequestSentAt: 1_010, upstreamHeadersAt: 1_015, responseCreatedAt: 1_016,
+      firstEventAt: 1_016, lastEventAt: 1_070, upstreamTerminalAt: 1_070,
+      downstreamTerminalSentAt: 1_072, downstreamClosedAt: 1_074, finalizedAt: 1_075,
+      queueMs: 1, connectMs: 2, handshakeMs: 3, upstreamTimeToFirstEventMs: 6, firstOutputMs: 30,
+      upstreamDurationMs: 60, downstreamDeliveryLagMs: 2, finalizationLagMs: 3, idleBeforeFailureMs: 40,
+      clockAnomaly: false, derivedFields: ["connectMs", "handshakeMs", "firstOutputMs"],
+      clientProduct: "codex", clientVersion: "0.120.0", codexCoreVersion: "0.119.0", desktopVersion: "1.2.3",
+      originator: "codex_cli_rs", inboundProtocol: "responses", inboundTransport: "websocket",
+      upstreamProtocol: "responses", upstreamTransport: "http", adapterName: "openai-responses",
+      protocolVersion: "v1", proxyVersion: "2.43.0", runtimeName: "bun", runtimeVersion: "1.3.0",
+      osPlatform: "linux", architecture: "x64", osVersion: "6.18", adapterVersion: "1",
+      proxyCommit: "abcdef123456", proxyBuildId: "build-test", proxyInstanceId: "instance-test",
+      configRevision: "config-1", routeConfigRevision: "route-2", modelCatalogRevision: "catalog-3",
+      relevantFeatureFlags: ["diagnostics"], diagnosticMode: "bounded",
+      forwardedModel: "wire-model", responseModel: "response-model", responseEffort: "minimal",
+      routeKind: "fallback", routeDecisionId: "decision-request", selectedCandidate: "candidate-selected",
+      fallbackReason: "transient-5xx", rewriteReason: "alias", settingsRevision: "settings-current",
+      settingsUpdatedAt: 900, settingsAppliedAt: 950, requestSettingsRevision: "settings-request",
+      modelSwitchRequested: false, modelSwitchApplied: false,
+      authMode: "oauth", accountPseudonym: "p123abc", accountSelectionSource: "pool",
+      accountAffinity: "p456def", accountChangedBetweenAttempts: true, accountPoolSelectionReason: "fallback",
+      subscriptionPlan: "pro", entitlementSource: "provider", entitlementObservedAt: 990,
+      cyberAccessStatus: "unknown", cyberAccessProgram: "unknown", modelAccessStatus: "allowed",
+      authRefreshOccurred: true, authRefreshResult: "success",
+      requestBytes: 401, forwardedRequestBytes: 402, inputItemCount: 10, messageCount: 3,
+      toolDefinitionCount: 2, toolCallCount: 1, toolResultCount: 1, imageCount: 1, audioCount: 0,
+      fileCount: 0, encryptedItemCount: 1, reasoningItemCount: 1, conversationItemCount: 6,
+      attachmentBytes: 501, toolResultBytes: 502, largestToolResultBytes: 503,
+      contextWindowTokens: 128_000, contextUsageRatioEstimate: 0.125, maxOutputTokens: 4_096,
+      tokenEstimateMethod: "byte_estimate", previousResponseUsed: true, continuationMode: "delta",
+      deltaInputCount: 2, reconstructedInputCount: 6, replayedItemCount: 3,
+      locallyInjectedItemCounts: { message: 1 }, contextTransformationKinds: ["continuation_replay"],
+      droppedItemCounts: { reasoning: 2 }, truncatedItemCounts: { message: 0 }, compactionOccurred: true,
+      compactionCount: 1, lastCompactionAt: 980, toolChoiceMode: "auto", parallelToolCalls: false,
+      streamingRequested: true, storeRequested: false, truncationMode: "disabled",
+      endpointClass: "responses", upstreamHostname: "api.example.test", method: "POST",
+      httpStatus: 200, websocketHandshakeStatus: 101, terminalMappedStatus: 502,
+      upstreamContentType: "text/event-stream", protocolEventType: "response.failed",
+      terminalEventType: "response.failed", lastEventType: "response.failed", lastEventSequence: 3,
+      lastOutputKind: "message", outputItemCountsByType: { message: 1, reasoning: 0 }, streamEventCount: 3,
+      bytesReceived: 701, bytesForwarded: 702, outputDeliveredBeforeFailure: true,
+      upstreamRequestAccepted: true, streamAborted: true, connectionReused: false,
+      websocketCloseCode: 1000, websocketCloseReason: "terminal received", closedBy: "upstream",
+      connectionAgeMs: 800, reconnectCount: 1, heartbeatTimeout: false, idleTimeoutMs: 900,
+      bodyStallMs: 0, bodyOverflowBytes: 0, transportPhase: "terminal_sse", terminalSource: "upstream",
+      closeReason: "terminal", upstreamErrorCode: "server_error", errorType: "server_error",
+      errorParam: "response.id", errorMessage: "Synthetic provider failure", retryable: false,
+      retryAfterMs: 1_100, incompleteReason: "max_output_tokens", contentFilterResult: "unknown",
+      errorEnvelopeSchema: "responses", errorMessageTruncated: false, unknownErrorFieldNames: ["future_code"],
+      refusalCategory: "unknown", policyRuleId: "rule-observed", policyStage: "output",
+      policyDecisionSource: "upstream", errorOrigin: "upstream", requestIdHeader: "x-request-id",
+      upstreamTraceHeaders: ["x-request-id", "traceparent"], retryDelayMs: 20,
+      retryDecision: "stop", retryBudgetRemaining: 0, recoveryReason: "transient-5xx",
+      policyFallbackAttempted: false, policyFallbackOutcome: "not_attempted",
+      previousResponseRewriteApplied: true, resumeMode: "replay", stateRestored: true,
+      stateRestoreSource: "memory", upstreamCallMade: true, correlationMismatch: false,
+      responseIdMismatch: false, duplicateTerminalSuppressed: true,
+      cancellationSource: "client", cancellationReason: "client_disconnect",
+      usageSource: "upstream", usageReportedAt: 1_069, usagePartial: true, usageMissingReason: "terminal_failure",
+      lastKnownUsageResponseId: "resp-terminal", billedUsageSource: "unknown", usageMissingCount: 0,
+      requestLimit: 100, tokenLimit: 10_000, accountWindowLimit: 200, accountWindowRemaining: 199,
+      accountWindowResetAt: 2_000, rateLimitReachedType: "none", spendControlReached: false,
+      quotaErrorCode: "none", logSink: "usage_jsonl", truncationReason: "none", expiresAt: 90_000,
+      events: [
+        { eventSequence: 1, type: "response.created", at: 1_016, elapsedMs: 16,
+          source: "upstream", responseId: "resp-terminal", eventId: "event-created" },
+        { eventSequence: 2, type: "response.output_text.delta", at: 1_030, elapsedMs: 30,
+          source: "upstream", responseId: "resp-terminal", eventId: "event-output" },
+        { eventSequence: 3, type: "response.failed", at: 1_070, elapsedMs: 70,
+          source: "upstream", responseId: "resp-terminal", eventId: "event-terminal" },
+      ],
+      fieldAvailability: {
+        upstreamResponseId: { status: "observed", source: "upstream" },
+        connectMs: { status: "derived", source: "transport" },
+        modelSwitchAppliedAt: { status: "unsupported", source: "proxy" },
+        modelSwitchEffectiveFromRequestId: { status: "not_observed", source: "route" },
+        parentAgentId: { status: "observed", source: "client" },
+        billedUsageSource: { status: "unknown", source: "adapter" },
+      },
+    };
+  }
+
+  function completeAttempt(): PersistedUsageAttempt {
+    return {
+      ordinal: 1, attemptId: "ocx-attempt-contract", attemptStartedAt: 1_003, attemptEndedAt: 1_071,
+      upstreamTransport: "http", provider: "attempt-provider", model: "attempt-model",
+      adapter: "openai-responses", status: 502, durationMs: 68, streamAborted: true, firstOutputMs: 27,
+      sendCount: 1, recoveryKinds: ["transient-5xx"], usageStatus: "reported", accountLogLabel: "p123abc",
+      inputTokenEstimate: 81, usage: { inputTokens: 11, outputTokens: 13, totalTokens: 24,
+        contextTotalTokens: 101, cachedInputTokens: 2, cacheReadInputTokens: 3,
+        cacheCreationInputTokens: 4, reasoningOutputTokens: 5 }, totalTokens: 24,
+      errorCode: "upstream_error", requestedEffort: "high", effectiveEffort: "medium",
+      reasoningWireField: "thinking.budget_tokens", reasoningWireValue: 2_048,
+      tierOutcome: { canonical: "priority", wireKind: "service-tier", wireValue: "priority",
+        fastOutcome: "downgraded", fastDowngradeReason: "response-declined", callerTierDropped: false,
+        callerFastSuppressedByConfig: false, confirmation: "downgraded", responseServiceTier: "default" },
+      sends: [{ sendId: "ocx-send-contract", sendOrdinal: 1, startedAt: 1_010, endedAt: 1_070,
+        upstreamTransport: "http", endpointClass: "responses", provider: "send-provider", model: "send-model",
+        adapter: "openai-responses", accountLogLabel: "p456def", forwardedModel: "send-wire-model",
+        requestedEffort: "low", effectiveEffort: "minimal", reasoningWireField: "reasoning.enabled",
+        reasoningWireValue: false, serviceTier: "flex", recoveryReason: "transient-5xx", retryReason: "retry",
+        status: 502, httpStatus: 200, websocketHandshakeStatus: 101, upstreamRequestId: "send-request",
+        upstreamResponseId: "send-response", upstreamEventId: "send-event", bytesForwarded: 901,
+        bytesReceived: 902, upstreamRequestAccepted: true, streamAborted: true, connectionReused: false }],
+    };
+  }
+
+  function completeRow(): PersistedUsageEntry {
+    return {
+      requestId: "ocx-contract", timestamp: 1_000, provider: "row-provider", model: "row-model",
+      requestedAlias: "caller-alias", requestedModel: "caller-model", resolvedModel: "resolved-model",
+      shadowCallRewrittenFrom: "helper-model", surface: "claude", apiKeyId: "configured-test",
+      admissionKind: "configured", inboundProtocol: "responses", accountLogLabel: "p123abc",
+      conversationId: "opaque-group", requestedEffort: "ultra", effectiveEffort: "xhigh",
+      reasoningWireField: "reasoning.effort", reasoningWireValue: "xhigh", callerServiceTier: "auto",
+      requestedServiceTier: "priority", requestedSpeedLabel: "fast", configuredServiceTier: "default",
+      configuredSpeedLabel: "standard", modelSupportsServiceTier: false, responseServiceTier: "flex",
+      tierOutcome: { fastOutcome: "not-requested", confirmation: "unknown", callerTierDropped: true,
+        callerFastSuppressedByConfig: true, wireKind: null, wireValue: null },
+      status: 502, durationMs: 75, firstOutputMs: 30, usageStatus: "reported",
+      usage: { inputTokens: 11, outputTokens: 13, totalTokens: 24, contextTotalTokens: 101,
+        cachedInputTokens: 2, cacheReadInputTokens: 3, cacheCreationInputTokens: 4, reasoningOutputTokens: 5 },
+      totalTokens: 24, errorCode: "upstream_error", terminalStatus: "failed", closeReason: "terminal",
+      upstreamError: "Synthetic provider failure", localTerminalReason: "provider-terminal",
+      affinity: "rebound", transportPhase: "terminal_sse", terminalSource: "upstream",
+      diagnostics: completeEnvelope(), attempts: [completeAttempt()],
+    };
+  }
+
+  test("contract: every accepted envelope fact survives normalization unchanged", () => {
+    const expected = completeEnvelope();
+    expect(normalizeTransactionDiagnostics(expected)).toEqual(expected);
+  });
+
+  test("contract: complete row survives JSONL, cold reload and management DTO", () => {
+    const expected = completeRow();
+    appendUsageEntry(expected);
+    const jsonl = JSON.parse(readFileSync(usageLogPath(), "utf8").trim());
+    expect(jsonl).toEqual(expected);
+    expect(normalizePersistedUsageRow(jsonl)).toEqual(expected);
+    resetUsageReadCacheForTests();
+    const persisted = readUsageEntries()[0]!;
+    expect(persisted).toEqual(expected);
+    const reloaded = requestLogEntryFromPersistedUsage(persisted);
+    expect(reloaded).toMatchObject(expected);
+    const dto = JSON.parse(JSON.stringify(requestLogDto(reloaded)));
+    expect(dto).toMatchObject(expected);
+    expect(dto.inboundTransport).toBe("websocket");
+    expect(dto.upstreamTransport).toBe("http");
+  });
+
+  test("contract: an exact local zero-send attempt remains explicit after restart", () => {
+    const attempt = baseAttempt({ provider: "cursor", locallyAnswered: true,
+      usage: { inputTokens: 0, outputTokens: 0 }, totalTokens: 0 });
+    const expected: PersistedUsageEntry = { requestId: "local-zero", timestamp: 1,
+      model: "local-model", provider: "cursor", status: 200, durationMs: 0,
+      usageStatus: "reported", attempts: [attempt] };
+    appendUsageEntry(expected);
+    resetUsageReadCacheForTests();
+    const reloaded = requestLogEntryFromPersistedUsage(readUsageEntries()[0]!);
+    expect(reloaded.attempts).toEqual([attempt]);
+    expect(requestLogDto(reloaded)).toMatchObject({ attempts: [attempt] });
+    expect(reloaded.attempts?.[0]?.sends).toBeUndefined();
+    expect(reloaded.attempts?.[0]?.usage?.estimated).toBeUndefined();
+  });
+
+  test.each([
+    { field: "reasoning.effort", value: "high" },
+    { field: "thinking.budget_tokens", value: 0 },
+    { field: "reasoning.enabled", value: false },
+    { field: "reasoning.enabled", value: true },
+  ])("contract: reasoning wire primitive $field=$value survives every scope", ({ field, value }) => {
+    const row = completeRow();
+    // Alias loss has its own exact-row regression; it must not mask these cases.
+    delete row.requestedAlias;
+    row.reasoningWireField = field;
+    row.reasoningWireValue = value;
+    row.attempts![0]!.reasoningWireField = field;
+    row.attempts![0]!.reasoningWireValue = value;
+    row.attempts![0]!.sends![0]!.reasoningWireField = field;
+    row.attempts![0]!.sends![0]!.reasoningWireValue = value;
+    appendUsageEntry(row);
+    resetUsageReadCacheForTests();
+    const persisted = readUsageEntries()[0]!;
+    expect(persisted).toEqual(row);
+    const dto = requestLogDto(requestLogEntryFromPersistedUsage(persisted));
+    expect(dto).toMatchObject(row);
+    expect(dto.reasoningWireValue).toBe(value);
+    expect(persisted.attempts?.[0]?.reasoningWireValue).toBe(value);
+    expect(persisted.attempts?.[0]?.sends?.[0]?.reasoningWireValue).toBe(value);
+  });
+
+  test("contract: unavailable facts keep their status and source without invented values", () => {
+    const row = completeRow();
+    delete row.requestedAlias;
+    row.diagnostics = {
+      schemaVersion: 1, diagnosticCaptureVersion: 1, transactionId: "ocx-txn-unavailable",
+      recordKind: "request", correlationSource: "proxy", correlationConfidence: "unknown",
+      receivedAt: 1_000, timestampSource: "proxy_wall_clock", events: [],
+      droppedDiagnosticEventCount: 0, captureTruncated: true, redactionApplied: true,
+      redactionVersion: 1, retentionClass: "usage_ledger",
+      fieldAvailability: {
+        clientRequestId: { status: "redacted", source: "client" },
+        upstreamEventId: { status: "truncated", source: "upstream" },
+        connectMs: { status: "derived", source: "derived" },
+        recordPersisted: { status: "not_observed", source: "persistence" },
+        modelSwitchApplied: { status: "unsupported", source: "proxy" },
+        responseEffort: { status: "unknown", source: "adapter" },
+      },
+    };
+    appendUsageEntry(row);
+    resetUsageReadCacheForTests();
+    const persisted = readUsageEntries()[0]!;
+    expect(persisted.diagnostics).toEqual(row.diagnostics);
+    expect(requestLogDto(requestLogEntryFromPersistedUsage(persisted)).diagnostics).toEqual(row.diagnostics);
+    for (const field of Object.keys(row.diagnostics.fieldAvailability)) {
+      expect(persisted.diagnostics).not.toHaveProperty(field);
+    }
+  });
+
+  test("contract: legacy, unknown and malformed members remain isolated across JSONL reload", () => {
+    const legacy = { requestId: "legacy-contract", timestamp: 1, model: "old", provider: "openai",
+      status: 200, durationMs: 0, usageStatus: "unreported" };
+    const malformed = { ...legacy, requestId: "malformed-contract", futureTopLevel: "drop",
+      diagnostics: { ...completeEnvelope(), futureEnvelope: "drop", inputItemCount: -1,
+        streamingRequested: "yes", responseEffort: "invented", upstreamTransport: "pipe",
+        events: [{ eventSequence: 1, type: "future.event", at: 2, source: "upstream" }],
+        fieldAvailability: { upstreamResponseId: { status: "observed", source: "upstream", future: "drop" },
+          futureField: { status: "observed", source: "client" } } },
+      attempts: [{ ...baseAttempt(), futureAttempt: "drop", sends: [
+        { sendId: "valid-send", sendOrdinal: 1, startedAt: 2, futureSend: "drop",
+          reasoningWireField: "reasoning.effort", reasoningWireValue: true, bytesReceived: -1 },
+        { sendId: "invalid-send", sendOrdinal: -1, startedAt: 2 },
+      ] }, { ...baseAttempt(), ordinal: 0 }] };
+    writeFileSync(usageLogPath(), [legacy, malformed, { ...legacy, requestId: "future-schema",
+      diagnostics: { ...completeEnvelope(), schemaVersion: 99 } }].map(row => JSON.stringify(row)).join("\n") + "\n");
+    resetUsageReadCacheForTests();
+    const rows = readUsageEntries();
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toEqual(legacy);
+    const dto = requestLogDto(requestLogEntryFromPersistedUsage(rows[1]!));
+    expect(dto).not.toHaveProperty("futureTopLevel");
+    const diagnostics = dto.diagnostics as TransactionDiagnosticsV1;
+    for (const field of ["futureEnvelope", "inputItemCount", "streamingRequested", "responseEffort", "upstreamTransport"]) {
+      expect(diagnostics).not.toHaveProperty(field);
+    }
+    expect(diagnostics.events).toEqual([]);
+    expect(diagnostics.fieldAvailability).toMatchObject({
+      upstreamResponseId: { status: "observed", source: "upstream" },
+      responseEffort: { status: "redacted", source: "upstream" },
+    });
+    expect(diagnostics.fieldAvailability).not.toHaveProperty("futureField");
+    expect(diagnostics.fieldAvailability.upstreamResponseId).not.toHaveProperty("future");
+    expect(rows[1]?.attempts).toHaveLength(1);
+    expect(rows[1]?.attempts?.[0]).not.toHaveProperty("futureAttempt");
+    expect(rows[1]?.attempts?.[0]?.sends).toEqual([{ sendId: "valid-send", sendOrdinal: 1,
+      startedAt: 2, reasoningWireField: "reasoning.effort" }]);
+    expect(requestLogDto(requestLogEntryFromPersistedUsage(rows[0]!))).not.toHaveProperty("diagnostics");
+    expect(requestLogDto(requestLogEntryFromPersistedUsage(rows[2]!))).not.toHaveProperty("diagnostics");
+  });
+
   test("survives live entry through JSONL normalization and restart projection", () => {
     const diagnostics = createTransactionDiagnostics({
       requestId: "ocx-round-trip",
