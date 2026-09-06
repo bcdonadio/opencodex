@@ -1660,6 +1660,27 @@ describe("transaction diagnostics persistence", () => {
     expect(readUsageEntries()[0]?.diagnostics?.errorMessage).toBeUndefined();
   });
 
+  test("HTTP endpoint errors survive display persistence while diagnostic copies stay strict", () => {
+    for (const message of ["Not Found: /v1/chat/completions", "POST /v1/responses returned 502"]) {
+      clearRequestLogsForTests();
+      const diagnostics = createTransactionDiagnostics({ receivedAt: 1 });
+      diagnostics.errorMessage = message;
+      addRequestLog({ requestId: "endpoint-error", timestamp: 1, provider: "test", model: "test", status: 502,
+        durationMs: 1, usageStatus: "unreported", upstreamError: message, diagnostics });
+      expect(getRequestLogEntries()[0]?.upstreamError).toBe(message);
+      expect(readUsageEntries().at(-1)?.upstreamError).toBe(message);
+      expect(readUsageEntries().at(-1)?.diagnostics?.errorMessage).toBeUndefined();
+    }
+    for (const message of ["failed: /v1/responses/private-file", "failed: ../private/file", "failed: /home/person/file",
+      "failed: /v1/responses?secret=value", "failed: /private/data", "failed: /v1/../private"]) {
+      clearRequestLogsForTests();
+      addRequestLog({ requestId: "private-path-error", timestamp: 1, provider: "test", model: "test", status: 502,
+        durationMs: 1, usageStatus: "unreported", upstreamError: message });
+      expect(getRequestLogEntries()[0]?.upstreamError).toBeUndefined();
+      expect(readUsageEntries().at(-1)?.upstreamError).toBeUndefined();
+    }
+  });
+
   test("review: display guidance exception never restores arbitrary private URL paths", () => {
     for (const url of ["https://private.example/private-path?private-query", "https://user:pass" + "@" + "private.example/private-path",
       "https://ollama.com/upgrade/private-path", "https://ollama.com/upgrade?private-query"]) {

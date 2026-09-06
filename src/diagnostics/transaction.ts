@@ -447,14 +447,25 @@ export function sanitizeDiagnosticError(value: unknown): string | undefined {
  * Diagnostic error copies deliberately use the stricter sanitizer above. */
 export function sanitizeUpstreamDisplayError(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
+  if (/(?:^|[\s"'(])\.{1,2}\//.test(value)) return undefined;
   const publicGuidance = "https://ollama.com/upgrade";
   const masked = value.slice(0, MAX_DIAGNOSTIC_ERROR_BYTES * 2).replace(/https?:\/\/[^\s<>"']+/gi, raw => {
     return raw === publicGuidance ? "PUBLIC_UPGRADE_GUIDANCE" : "[REDACTED]";
   });
+  // Canonical API routes in 404/405/gateway errors are public protocol context.
+  // Mask only complete known routes; suffixes, queries and filesystem paths
+  // still go through the strict diagnostic rejection below.
+  const routes: string[] = [];
+  const maskedRoutes = masked.replace(/(^|[\s"'(])((?:\/v1)?\/(?:chat\/completions|responses|messages|models|embeddings|images\/(?:generations|edits)|audio\/(?:transcriptions|translations|speech)))(?=$|[\s"'),;:])/g,
+    (_match, prefix: string, route: string) => {
+      routes.push(route);
+      return `${prefix}PUBLIC_API_ROUTE_${routes.length - 1}`;
+    });
   // Continue rejecting local paths, environment dumps and other excluded context.
-  const safe = sanitizeDiagnosticError(masked);
+  const safe = sanitizeDiagnosticError(maskedRoutes);
   if (!safe) return undefined;
-  const restored = safe.replaceAll("PUBLIC_UPGRADE_GUIDANCE", publicGuidance);
+  const restored = safe.replaceAll("PUBLIC_UPGRADE_GUIDANCE", publicGuidance)
+    .replace(/PUBLIC_API_ROUTE_(\d+)/g, (token, index: string) => routes[Number(index)] ?? token);
   return sanitizedStringResult(restored, MAX_DIAGNOSTIC_ERROR_BYTES, false).value;
 }
 
