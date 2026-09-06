@@ -258,7 +258,7 @@ const DIAGNOSTIC_RECOVERY_REASONS = new Set([
   "empty-completion", "fallback", "retry", "resume", "unknown",
 ]);
 const DIAGNOSTIC_CANCELLATION_REASONS = new Set([
-  "client_cancel", "client_disconnect", "abort_signal", "timeout", "downstream_closed", "unknown",
+  "client_cancel", "client_disconnect", "turn_replaced", "abort_signal", "timeout", "downstream_closed", "unknown",
 ]);
 const DIAGNOSTIC_ENDPOINT_CLASSES = new Set(["responses", "chat", "messages", "images", "search", "live", "compact"]);
 const DIAGNOSTIC_REASONING_FIELDS = new Set([
@@ -687,7 +687,7 @@ function boundedEvents(raw: unknown): BoundedEvents {
   return { events: valid, dropped, responseIdState, eventIdState };
 }
 
-function normalizedStringList(raw: unknown): string[] | undefined {
+function normalizedStringList(raw: unknown): { value: string[]; truncated: boolean } | undefined {
   if (!Array.isArray(raw)) return undefined;
   const values: string[] = [];
   const scanLimit = Math.min(raw.length, MAX_DIAGNOSTIC_LIST_MEMBERS + DIAGNOSTIC_COLLECTION_LOOKAHEAD);
@@ -697,19 +697,21 @@ function normalizedStringList(raw: unknown): string[] | undefined {
     if (normalized
       && SAFE_DIAGNOSTIC_FIELD.test(normalized)
       && !values.includes(normalized)) values.push(normalized);
-    if (values.length === MAX_DIAGNOSTIC_LIST_MEMBERS) break;
+    if (values.length === MAX_DIAGNOSTIC_LIST_MEMBERS) {
+      return { value: values, truncated: index + 1 < raw.length };
+    }
   }
-  return values;
+  return { value: values, truncated: scanLimit < raw.length };
 }
 
-function normalizedCounterMap(raw: unknown): Record<string, number> | undefined {
+function normalizedCounterMap(raw: unknown): { value: Record<string, number>; truncated: boolean } | undefined {
   if (!isPlainObject(raw)) return undefined;
   const result: Record<string, number> = {};
   let inspected = 0;
   for (const rawName in raw) {
     if (!Object.prototype.hasOwnProperty.call(raw, rawName)) continue;
     inspected += 1;
-    if (inspected > MAX_DIAGNOSTIC_LIST_MEMBERS) break;
+    if (inspected > MAX_DIAGNOSTIC_LIST_MEMBERS) return { value: result, truncated: true };
     let value: unknown;
     try {
       value = raw[rawName];
@@ -720,7 +722,7 @@ function normalizedCounterMap(raw: unknown): Record<string, number> | undefined 
     if (name && SAFE_DIAGNOSTIC_FIELD.test(name)
       && typeof value === "number" && Number.isSafeInteger(value) && value >= 0) result[name] = value;
   }
-  return result;
+  return { value: result, truncated: false };
 }
 
 function assignOptionalDiagnostics(raw: Record<string, unknown>, result: TransactionDiagnosticsV1): void {
@@ -743,6 +745,15 @@ function assignOptionalDiagnostics(raw: Record<string, unknown>, result: Transac
     recordSanitizationAvailability(result.fieldAvailability, field, sanitized.state);
   }
   for (const field of NON_NEGATIVE_NUMBER_FIELDS) {
+    if (field === "httpStatus" || field === "websocketHandshakeStatus" || field === "terminalMappedStatus") {
+      const status = raw[field];
+      if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599) {
+        result[field] = status;
+      } else if (status !== undefined) {
+        result.fieldAvailability[field] = { status: "unknown", source: "persistence" };
+      }
+      continue;
+    }
     if (isNonNegativeFiniteNumber(raw[field])) result[field] = raw[field];
   }
   for (const field of BOOLEAN_FIELDS) {
@@ -750,11 +761,17 @@ function assignOptionalDiagnostics(raw: Record<string, unknown>, result: Transac
   }
   for (const field of STRING_LIST_FIELDS) {
     const value = normalizedStringList(raw[field]);
-    if (value) result[field] = value;
+    if (value) {
+      result[field] = value.value;
+      if (value.truncated) recordSanitizationAvailability(result.fieldAvailability, field, "truncated", "persistence");
+    }
   }
   for (const field of COUNTER_MAP_FIELDS) {
     const value = normalizedCounterMap(raw[field]);
-    if (value) result[field] = value;
+    if (value) {
+      result[field] = value.value;
+      if (value.truncated) recordSanitizationAvailability(result.fieldAvailability, field, "truncated", "persistence");
+    }
   }
 
   if (typeof raw.inboundProtocol === "string" && PROTOCOLS.has(raw.inboundProtocol as DiagnosticProtocolV1)) {

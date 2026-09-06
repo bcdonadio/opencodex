@@ -695,6 +695,46 @@ describe("durability boundary regressions", () => {
 });
 
 describe("transaction diagnostics schema", () => {
+  test("retains turn replacement cancellation through normalization", () => {
+    const raw = createTransactionDiagnostics({ receivedAt: 1 });
+    raw.cancellationReason = "turn_replaced";
+    expect(normalizeTransactionDiagnostics(raw)?.cancellationReason).toBe("turn_replaced");
+  });
+
+  test("only retains integer HTTP statuses in the protocol range", () => {
+    for (const field of ["httpStatus", "websocketHandshakeStatus", "terminalMappedStatus"] as const) {
+      for (const status of [0, 99, 200.5, 600, Infinity, NaN]) {
+        const raw = createTransactionDiagnostics({ receivedAt: 1 });
+        raw[field] = status;
+        raw.fieldAvailability[field] = { status: "observed", source: "transport" };
+        const normalized = normalizeTransactionDiagnostics(raw)!;
+        expect(normalized[field]).toBeUndefined();
+        expect(normalized.fieldAvailability[field]?.status).not.toBe("observed");
+      }
+      for (const status of [100, 101, 200, 499, 599]) {
+        const raw = createTransactionDiagnostics({ receivedAt: 1 });
+        raw[field] = status;
+        expect(normalizeTransactionDiagnostics(raw)?.[field]).toBe(status);
+      }
+    }
+  });
+
+  test("reports capped diagnostic lists and counter maps", () => {
+    for (const count of [64, 65, 200]) {
+      const raw = createTransactionDiagnostics({ receivedAt: 1 });
+      raw.derivedFields = Array.from({ length: count }, (_, i) => `field${i}`);
+      raw.outputItemCountsByType = Object.fromEntries(raw.derivedFields.map(name => [name, 1]));
+      const normalized = normalizeTransactionDiagnostics(raw)!;
+      expect(normalized.derivedFields).toHaveLength(64);
+      expect(Object.keys(normalized.outputItemCountsByType!)).toHaveLength(64);
+      expect(normalized.captureTruncated).toBe(count > 64);
+      if (count > 64) {
+        expect(normalized.fieldAvailability.derivedFields?.status).toBe("truncated");
+        expect(normalized.fieldAvailability.outputItemCountsByType?.status).toBe("truncated");
+        expect(normalizeTransactionDiagnostics(normalized)?.captureTruncated).toBe(true);
+      }
+    }
+  });
   test("derives response-created correlation through the v1 lifecycle builder", () => {
     const diagnostics = createTransactionDiagnostics({
       requestId: "ocx-test",
