@@ -9,6 +9,7 @@ import type { TransportObservation } from "./responses/fetch-helpers";
 import { httpStatusFromTerminalError } from "../lib/errors";
 import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
+import { captureClientHeaders, captureClientMetadata } from "./transaction-client-capture";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -145,10 +146,7 @@ export function observeRequestTransport(ctx: RequestLogContext, transport: "http
         : path.includes("search") ? "search" : path.includes("live") ? "live"
           : path.includes("messages") ? "messages" : path.includes("chat") ? "chat" : "responses";
       d.originator = req.headers.get("originator");
-      for (const [header, field] of [["x-client-request-id", "clientRequestId"], ["x-request-id", "clientRequestId"], ["x-codex-turn-id", "codexTurnId"],
-        ["thread-id", "codexThreadId"], ["x-codex-thread-id", "codexThreadId"], ["session_id", "codexSessionId"]]) {
-        identifier(d, field!, req.headers.get(header!), "client");
-      }
+      captureClientHeaders(d, req.headers);
     }
     if (connectionId) d.connectionId = connectionId;
     if (sequence !== undefined) d.requestSequenceOnConnection = sequence;
@@ -180,12 +178,7 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
     } else {
       identifier(d, "originalPreviousResponseId", b.previous_response_id, "client");
       d.previousResponseUsed = Boolean(previous);
-      const metadata = b.client_metadata;
-      if (metadata && typeof metadata === "object") {
-        for (const [key, field] of [["thread_id", "codexThreadId"], ["turn_id", "codexTurnId"], ["session_id", "codexSessionId"]]) {
-          identifier(d, field!, (metadata as Record<string, unknown>)[key!], "client");
-        }
-      }
+      captureClientMetadata(d, b.client_metadata);
       const items = Array.isArray(b.input) ? b.input : Array.isArray(b.messages) ? b.messages : [];
       d.inputItemCount = typeof b.input === "string" ? 1 : items.length;
       d.conversationItemCount = d.inputItemCount;

@@ -34,6 +34,58 @@ import {
   type PersistedUsageEntry,
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { observeRequestTransport, recordRequestShape } from "../../src/server/transaction-capture";
+import type { RequestLogContext } from "../../src/server/request-log";
+
+test("client identity capture reads bounded explicit headers and metadata, with first-source precedence", () => {
+  const ctx = {} as RequestLogContext;
+  observeRequestTransport(ctx, "http", new Request("http://localhost/v1/responses", { headers: {
+    "x-client-request-id": "client-first", "x-request-id": "client-alias",
+    "session-id": "session-one", "x-codex-parent-thread-id": "parent-header",
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread-one", turn_id: "turn-one", parent_thread_id: "parent-meta", unknown: "private-value" }),
+    "user-agent": "codex_cli_rs/0.153.0 (private-hostname /private/path)",
+  } }));
+  recordRequestShape(ctx, { client_metadata: { thread_id: "body-thread", parent_thread_id: "body-parent", root_thread_id: "invented-root" }, input: [] });
+  const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+  expect(d.clientRequestId).toBe("client-first");
+  expect(d.codexThreadId).toBe("thread-one");
+  expect(d.codexTurnId).toBe("turn-one");
+  expect(d.codexSessionId).toBe("session-one");
+  expect(d.parentThreadId).toBe("parent-header");
+  expect(d.clientProduct).toBe("codex_cli_rs");
+  expect(d.clientVersion).toBe("0.153.0");
+  expect(d.rootThreadId).toBeUndefined();
+  expect(d.fieldAvailability.rootThreadId?.status).toBe("unsupported");
+  expect(d.codexCoreVersion).toBeUndefined();
+  expect(d.desktopVersion).toBeUndefined();
+  expect(JSON.stringify(d)).not.toMatch(/private-hostname|private-value|private\/path|invented-root|body-thread/);
+});
+
+test("WebSocket metadata and invalid client identifiers remain bounded and privacy safe", () => {
+  const ctx = {} as RequestLogContext;
+  observeRequestTransport(ctx, "websocket", new Request("http://localhost/v1/responses", { headers: {
+    "x-codex-parent-thread-id": "person@example.com", "user-agent": "unknown/1.2.3 private",
+    "x-codex-turn-metadata": "[1,2,3]",
+  } }));
+  recordRequestShape(ctx, { client_metadata: {
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "frame-thread", session_id: "frame-session", parent_thread_id: "conceal-redaction" }),
+    agent_id: "invented-agent", client_version: "invented-version",
+  } });
+  const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+  expect(d.codexThreadId).toBe("frame-thread");
+  expect(d.codexSessionId).toBe("frame-session");
+  expect(d.parentThreadId).toBeUndefined();
+  expect(d.fieldAvailability.parentThreadId?.status).toBe("redacted");
+  expect(d.clientVersion).toBeUndefined();
+  expect(d.fieldAvailability.clientVersion?.status).toBe("not_observed");
+  expect(d.agentId).toBeUndefined();
+  expect(JSON.stringify(d)).not.toMatch(/person@example|conceal-redaction|invented-agent|invented-version/);
+  const oversized = {} as RequestLogContext;
+  observeRequestTransport(oversized, "http", new Request("http://localhost", { headers: {
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "x".repeat(17000) }),
+  } }));
+  expect(oversized.diagnostics?.codexThreadId).toBeUndefined();
+});
 
 let home = "";
 let previousHome: string | undefined;
