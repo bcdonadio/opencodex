@@ -35,6 +35,7 @@ import {
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { observeRequestTransport, recordRequestShape, recordForwardedRequest, recordReconstructedContext } from "../../src/server/transaction-capture";
+import { recordAuthRefresh, recordAuthSend, recordRouteAuth } from "../../src/server/transaction-auth-capture";
 import { noteAttemptSend, type RequestLogContext } from "../../src/server/request-log";
 import { captureRetryDelay } from "../../src/server/transaction-recovery-capture";
 import { applyClientIdentitySnapshot } from "../../src/server/transaction-client-capture";
@@ -154,6 +155,64 @@ test("scheduled retry delay and restored state require positive owner evidence",
   expect(ctx.diagnostics?.resumeMode).toBe("local_replay");
   expect(JSON.stringify(normalizeTransactionDiagnostics(ctx.diagnostics))).not.toContain("private-content");
   expect(normalizeTransactionDiagnostics(ctx.diagnostics)?.stateRestoreSource).toBe("previous_response_replay");
+});
+
+test("auth capture observes resolved facts without retaining account identities", () => {
+  const ctx = { diagnostics: createTransactionDiagnostics({ requestId: "auth-test" }) } as RequestLogContext;
+  recordRouteAuth(ctx, "forward", { kind: "pool", fixedAccount: true });
+  expect(ctx.diagnostics?.authMode).toBe("forward");
+  expect(ctx.diagnostics?.accountSelectionSource).toBe("explicit_selector");
+  expect(ctx.diagnostics?.fieldAvailability.accountAffinity?.status).toBe("not_observed");
+  expect(ctx.diagnostics?.accountPoolSelectionReason).toBeUndefined();
+  ctx.accountLogLabel = "raw-private-account";
+  recordAuthSend(ctx);
+  expect(ctx.diagnostics?.accountPseudonym).toBeUndefined();
+  recordRouteAuth(ctx, "oauth");
+  expect(ctx.diagnostics?.accountSelectionSource).toBeUndefined();
+  recordRouteAuth(ctx, "untrusted-auth-mode");
+  expect(ctx.diagnostics?.authMode).toBeUndefined();
+  recordAuthRefresh(ctx, "failed");
+  const normalized = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+  expect(normalized.authRefreshOccurred).toBe(true);
+  expect(normalized.authRefreshResult).toBe("failed");
+  expect(JSON.stringify(normalized)).not.toContain("raw-private-account");
+});
+
+test("account changes require sends from distinct observed attempt owners", () => {
+  const ctx = { diagnostics: createTransactionDiagnostics({ requestId: "auth-change" }) } as RequestLogContext;
+  ctx.activeAttempt = beginRequestAttempt(1, "provider", "model", "adapter");
+  ctx.accountLogLabel = "pabcdef";
+  recordForwardedRequest(ctx, "http");
+  expect(ctx.diagnostics?.accountPseudonym).toBe("pabcdef");
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBeUndefined();
+  ctx.accountLogLabel = "p123456";
+  recordForwardedRequest(ctx, "http");
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBeUndefined();
+  ctx.activeAttempt = beginRequestAttempt(2, "provider", "model", "adapter");
+  recordForwardedRequest(ctx, "websocket");
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBe(false);
+  ctx.activeAttempt = beginRequestAttempt(3, "provider", "model", "adapter");
+  ctx.accountLogLabel = "main";
+  recordForwardedRequest(ctx, "http");
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBe(true);
+  ctx.accountLogLabel = undefined;
+  ctx.activeAttempt = beginRequestAttempt(4, "provider", "model", "adapter");
+  recordForwardedRequest(ctx, "http");
+  expect(ctx.diagnostics?.accountPseudonym).toBeUndefined();
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBe(true);
+});
+
+test("missing account observations prevent a later false no-change claim", () => {
+  const ctx = { diagnostics: createTransactionDiagnostics({ requestId: "auth-unknown" }) } as RequestLogContext;
+  ctx.activeAttempt = beginRequestAttempt(1, "provider", "model", "adapter");
+  recordAuthSend(ctx);
+  ctx.accountLogLabel = "main";
+  ctx.activeAttempt = beginRequestAttempt(2, "provider", "model", "adapter");
+  recordAuthSend(ctx);
+  ctx.activeAttempt = beginRequestAttempt(3, "provider", "model", "adapter");
+  recordAuthSend(ctx);
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBeUndefined();
+  expect(ctx.diagnostics?.fieldAvailability.accountChangedBetweenAttempts?.status).toBe("not_observed");
 });
 
 let home = "";

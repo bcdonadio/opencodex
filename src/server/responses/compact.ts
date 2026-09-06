@@ -1,4 +1,5 @@
 import { transportObserver, recordRequestShape } from "../transaction-capture";
+import { recordRouteAuth } from "../transaction-auth-capture";
 import type { Server } from "bun";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import {
@@ -571,6 +572,7 @@ export async function handleResponsesCompact(
     ? `${route.providerName}-${route.codexAccountNamespace}`
     : route.providerName;
   logCtx.providerAdapter = route.provider.adapter;
+  recordRouteAuth(logCtx, route.provider.authMode);
   const virtual = resolveOpenAiCompactModel(route.providerName, selectedModelId);
   if (virtual) {
     route.modelId = virtual.wireModelId;
@@ -672,6 +674,7 @@ export async function handleResponsesCompact(
           nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
         });
         logCtx.accountLogLabel = codexAuthContextLogLabel(authCtx, config);
+        recordRouteAuth(logCtx, route.provider.authMode, authCtx);
         const selected = await materializeCodexUpstreamAuthAsync(req.headers, authCtx, {
           admission,
           config: isCanonicalOpenAiForwardProvider(route.provider) ? config : undefined,
@@ -930,6 +933,7 @@ export async function handleResponsesCompact(
       compactProvider = replay.provider;
       headers = replay.headers;
       logCtx.accountLogLabel = codexAuthContextLogLabel(replay.authCtx, config);
+      recordRouteAuth(logCtx, route.provider.authMode, replay.authCtx);
       try {
         upstream = await sendCompactAttempt(compactProvider, headers, "single", authCtx);
       } catch (err) {
@@ -1004,6 +1008,7 @@ export async function handleResponsesCompact(
         await upstream.body?.cancel().catch(() => undefined);
         outcomeCtx = alternate.authCtx;
         logCtx.accountLogLabel = codexAuthContextLogLabel(alternate.authCtx, config);
+        recordRouteAuth(logCtx, route.provider.authMode, alternate.authCtx);
         try {
           upstream = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx);
         } catch (err) {

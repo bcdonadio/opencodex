@@ -11,6 +11,7 @@ import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
 import { captureClientHeaders, captureClientMetadata } from "./transaction-client-capture";
 import { initializeRecoveryAvailability, captureRecoveryDispatch, captureReplayRestoration, finishRecoveryCapture } from "./transaction-recovery-capture";
+import { recordAuthSend } from "./transaction-auth-capture";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -271,6 +272,7 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
       (ctx.attempts ??= []).push(ctx.activeAttempt);
     }
     const attempt = ctx.activeAttempt;
+    recordAuthSend(ctx);
     if (attempt) {
       attempt.upstreamTransport = attempt.upstreamTransport && attempt.upstreamTransport !== transport ? "mixed" : transport;
       let owner = sendOwners.get(attempt);
