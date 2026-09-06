@@ -460,6 +460,20 @@ export function recordDownstreamTerminal(ctx: RequestLogContext): void {
   });
 }
 
+export function recordDownstreamCancelled(ctx: RequestLogContext, reason: "client_disconnect" | "turn_replaced"): void {
+  captureSafely(() => {
+    const d = diagnostics(ctx);
+    d.streamAborted = true;
+    d.cancellationSource = "client";
+    d.cancellationReason = reason;
+    if (reason === "client_disconnect") {
+      d.downstreamClosedAt = Date.now();
+      recordDiagnosticEvent(d, { type: "downstream.closed", at: Date.now(), source: "downstream" });
+    }
+    clean(ctx);
+  });
+}
+
 /** Successful append is live evidence only: the completed write cannot encode its end. */
 export function diagnosticFinalizedClock(d: TransactionDiagnosticsV1 | undefined): number | undefined {
   return d ? clocks.get(d)?.finalized : undefined;
@@ -513,7 +527,7 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
     d.fieldAvailability.terminalMappedStatus = { status: "derived", source: "derived" };
     if (terminal && d.downstreamTerminalSentAt === undefined)
       d.fieldAvailability.downstreamTerminalSentAt = { status: "not_observed", source: "transport" };
-    if (status === 499) { d.streamAborted = true; d.cancellationReason = "client_cancel"; d.downstreamClosedAt = Date.now();
+    if (status === 499) { d.streamAborted = true; d.cancellationReason ??= "client_cancel"; d.downstreamClosedAt ??= Date.now();
       recordDiagnosticEvent(d, { type: "downstream.closed", at: Date.now(), source: "downstream" }); }
     const clock = clocks.get(diagnostics(ctx))!;
     if (status >= 400) {
@@ -545,7 +559,7 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
       d.streamAborted = true;
       d.errorOrigin = "transport";
       d.cancellationReason = event.reason;
-      d.cancellationSource = event.reason === "client_cancel" || event.reason === "request_abort" ? "client"
+      d.cancellationSource = event.reason === "client_cancel" ? "client"
         : event.reason === "owner_cancel" ? "proxy" : "transport";
       if (event.reason === "frame_overflow" || event.reason === "queue_overflow") d.bodyOverflowBytes = event.bytes;
       // A prelude timer is not an idle-between-events timer.
