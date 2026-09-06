@@ -1,4 +1,4 @@
-import { transportObserver } from "./transaction-capture";
+import { transportObserver, recordRequestedReasoning } from "./transaction-capture";
 import { buildOpenAIChatPassthroughRequest, createOpenAIChatAdapter } from "../adapters/openai-chat";
 import type { AdapterRequest, ProviderAdapter } from "../adapters/base";
 import {
@@ -151,6 +151,8 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
   logCtx.requestedServiceTier = typeof options.chatBody.service_tier === "string"
     ? options.chatBody.service_tier
     : undefined;
+  logCtx.callerServiceTier = logCtx.requestedServiceTier;
+  recordRequestedReasoning(logCtx, logCtx.requestedEffort, undefined);
 
   const upstream = new AbortController();
   const cleanupAbort = linkAbortSignal(upstream, req.signal);

@@ -1,4 +1,6 @@
-import { transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput } from "../transaction-capture";
+import { transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput, recordRequestedReasoning } from "../transaction-capture";
+import { captureRetryDelay } from "../transaction-recovery-capture";
+import { recordRouteAuth, recordAuthRefresh } from "../transaction-auth-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -287,6 +289,7 @@ import {
   inspectResponseLogJson,
   noteAttemptSend,
   readConfiguredCodexServiceTier,
+  readConfiguredCodexEffort,
   recordAdapterReasoning,
   recordAdapterTier,
   recordAdapterTierMetadata,
@@ -1299,6 +1302,7 @@ async function retryCodexPoolOnAlternateAccount(
     config,
   );
   logCtx.accountLogLabel = codexAuthContextLogLabel(retryAuthCtx, config);
+  recordRouteAuth(logCtx, route.provider.authMode, retryAuthCtx);
   sealRequestAttemptIdentity(
     logCtx.activeAttempt,
     logCtx.provider,
@@ -2187,6 +2191,7 @@ async function applyFinalRouteRequestNormalization(args: {
   logCtx.providerAdapter = route.provider.adapter;
   logCtx.routeDecision = route.routeDecision;
   recordSelectedRoute(logCtx);
+  recordRouteAuth(logCtx, route.provider.authMode);
   if (route.routeReason === "model-alias" || route.modelId !== responseModelId && responseModelId.includes("/")) logCtx.requestedAlias = responseModelId;
 
   if (responsesUpstreamStreaming === false && route.provider.adapter === "openai-responses") {
@@ -3072,6 +3077,7 @@ async function handleResponsesInner(
   }
   logCtx.requestedModel = parsed.modelId;
   logCtx.requestedEffort = parsed.options.reasoning;
+  recordRequestedReasoning(logCtx, parsed.options.reasoning, readConfiguredCodexEffort());
   logCtx.callerServiceTier = sanitizeLogMetadataString(parsed.options.serviceTier);
   logCtx.requestedServiceTier = parsed.options.serviceTier;
   logCtx.requestedSpeedLabel = requestLogSpeedLabel(parsed.options.serviceTier);
@@ -3498,6 +3504,7 @@ async function handleResponsesInner(
     ? `${route.providerName}-${route.codexAccountNamespace}`
     : formatCodexProviderForLog(route.providerName, codexLogAccountId(authCtx), config);
   logCtx.accountLogLabel = codexAuthContextLogLabel(authCtx, config);
+  recordRouteAuth(logCtx, route.provider.authMode, authCtx);
   // Seed an account-derived scope before final adapter binding. Cursor never treats it as
   // authoritative: bindRouteReasoningReplayScope replaces it with the exact route owner or a
   // per-request fail-closed sentinel after the final provider and credential are known.
@@ -3764,6 +3771,7 @@ async function handleResponsesInner(
   }
   logCtx.providerAdapter = adapter.name;
   recordSelectedRoute(logCtx);
+  recordRouteAuth(logCtx, adapterProvider.authMode, authCtx);
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
   if (!options.comboAttempt && !logCtx.activeAttempt) {
@@ -4516,6 +4524,7 @@ async function handleResponsesInner(
       }
       authCtx = replay.authCtx;
       route.provider = replay.provider;
+      recordRouteAuth(logCtx, route.provider.authMode, authCtx);
       selectedForwardHeaders = replay.headers;
       const replayAdapter = resolveAdapter(
         resolveWireProtocolOverride(route.providerName, route.modelId, replay.provider, inboundWire),
@@ -4602,7 +4611,9 @@ async function handleResponsesInner(
       let refreshed: OAuthAccessSnapshot;
       try {
         refreshed = await forceRefreshOAuthAccessSnapshot(sentOAuthSnapshot);
+        recordAuthRefresh(logCtx, "succeeded");
       } catch (err) {
+        recordAuthRefresh(logCtx, "failed");
         upstream.abort();
         releaseCodexAuthContextProbeLease(authCtx);
         return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
@@ -4759,7 +4770,7 @@ async function handleResponsesInner(
         for await (const _ of prepareSameTarget429Wait({
           body: upstreamResponse.body,
           signal: options.abortSignal,
-          delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+          delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
         })) {
           // pre-stream: no stall watchdog to feed
         }
@@ -6428,7 +6439,9 @@ async function handleResponsesInner(
         let refreshed: OAuthAccessSnapshot;
         try {
           refreshed = await forceRefreshOAuthAccessSnapshot(sentOAuthSnapshot);
+          recordAuthRefresh(logCtx, "succeeded");
         } catch (err) {
+          recordAuthRefresh(logCtx, "failed");
           cleanupUpstreamAbort();
           return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
         }
@@ -6524,7 +6537,7 @@ async function handleResponsesInner(
           for await (const _ of prepareSameTarget429Wait({
             body: upstreamResponse.body,
             signal: options.abortSignal,
-            delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+            delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
           })) {
             // pre-stream: no stall watchdog to feed
           }
@@ -6928,7 +6941,7 @@ async function handleResponsesInner(
             // cancel aborts `upstream` through the bridge, and upstream is also linked from
             // options.abortSignal — so this covers both cancellation paths.
             signal: upstream.signal,
-            delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+            delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
             heartbeatIntervalMs: Math.min(10_000, Math.max(250, stallTimeoutMs / 2)),
           });
         } catch {

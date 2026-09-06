@@ -125,6 +125,209 @@ test("context estimate provenance clears unavailable window and does not invent 
 });
 import { closeRequestHistoryIndex, requestHistoryRowById } from "../../src/routing/history/indexer";
 import { requestLogDto } from "../../src/server/management/shared";
+import { observeRequestTransport, recordRequestedReasoning } from "../../src/server/transaction-capture";
+import { recordAuthRefresh, recordAuthSend, recordRouteAuth } from "../../src/server/transaction-auth-capture";
+import { noteAttemptSend } from "../../src/server/request-log";
+import { captureRetryDelay } from "../../src/server/transaction-recovery-capture";
+import { applyClientIdentitySnapshot } from "../../src/server/transaction-client-capture";
+import { buildResponsesWsData, selectForwardHeaders } from "../../src/server/ws-bridge";
+import type { DataPlaneAdmission } from "../../src/server/auth-cors";
+
+test("reasoning and tier snapshots distinguish caller configuration and actual wire facts", () => {
+  const ctx = { requestedEffort: "high", callerServiceTier: "priority", configuredServiceTier: "flex", requestedServiceTier: "priority" } as RequestLogContext;
+  observeRequestTransport(ctx, "http");
+  recordRequestedReasoning(ctx, "high", "low");
+  ctx.requestedEffort = "high->medium";
+  ctx.effectiveEffort = "medium";
+  ctx.reasoningWireField = "reasoning.effort";
+  ctx.reasoningWireValue = "medium";
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "model", reasoning: { effort: "medium" }, service_tier: "default" }));
+  const send = ctx.activeAttempt?.sends?.[0];
+  expect(normalizeTransactionDiagnostics(ctx.diagnostics)).toMatchObject({ callerEffort: "high", configuredEffort: "low", configuredEffortSource: "local_codex_root_config" });
+  expect(send).toMatchObject({ callerEffort: "high", configuredEffort: "low", effectiveEffort: "medium", reasoningWireValue: "medium",
+    callerServiceTier: "priority", configuredServiceTier: "flex", serviceTier: "default" });
+  const normalizedSend = normalizeDiagnosticSends([send])[0];
+  expect(normalizedSend).toMatchObject({ callerEffort: "high", configuredEffort: "low", callerServiceTier: "priority", configuredServiceTier: "flex", serviceTier: "default" });
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "model" }));
+  expect(ctx.activeAttempt?.sends?.[1]?.serviceTier).toBeUndefined();
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "model", service_tier: "person@example.com" }));
+  expect(ctx.activeAttempt?.sends?.[2]?.serviceTier).toBeUndefined();
+  expect(JSON.stringify(ctx.activeAttempt?.sends)).not.toContain("person@example.com");
+  expect(ctx.diagnostics?.responseEffort).toBeUndefined();
+});
+
+test("client identity capture reads explicit headers and more specific per-request metadata", () => {
+  const ctx = {} as RequestLogContext;
+  observeRequestTransport(ctx, "http", new Request("http://localhost/v1/responses", { headers: {
+    "x-client-request-id": "client-first", "x-request-id": "client-alias",
+    "session-id": "session-one", "x-codex-parent-thread-id": "parent-header",
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread-one", turn_id: "turn-one", parent_thread_id: "parent-meta", unknown: "private-value" }),
+    "user-agent": "codex_cli_rs/0.153.0 (private-hostname /private/path)",
+  } }));
+  recordRequestShape(ctx, { client_metadata: { thread_id: "body-thread", parent_thread_id: "body-parent", root_thread_id: "invented-root" }, input: [] });
+  const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+  expect(d.clientRequestId).toBe("client-first");
+  expect(d.codexThreadId).toBe("body-thread");
+  expect(d.codexTurnId).toBe("turn-one");
+  expect(d.codexSessionId).toBe("session-one");
+  expect(d.parentThreadId).toBe("body-parent");
+  expect(d.clientProduct).toBe("codex_cli_rs");
+  expect(d.clientVersion).toBe("0.153.0");
+  expect(d.rootThreadId).toBeUndefined();
+  expect(d.fieldAvailability.rootThreadId?.status).toBe("unsupported");
+  expect(d.codexCoreVersion).toBeUndefined();
+  expect(d.desktopVersion).toBeUndefined();
+  expect(JSON.stringify(d)).not.toMatch(/private-hostname|private-value|private\/path|invented-root/);
+});
+
+test("WebSocket metadata and invalid client identifiers remain bounded and privacy safe", () => {
+  const ctx = {} as RequestLogContext;
+  observeRequestTransport(ctx, "websocket", new Request("http://localhost/v1/responses", { headers: {
+    "x-codex-parent-thread-id": "person@example.com", "user-agent": "unknown/1.2.3 private",
+    "x-codex-turn-metadata": "[1,2,3]",
+  } }));
+  recordRequestShape(ctx, { client_metadata: {
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "frame-thread", session_id: "frame-session" }),
+    agent_id: "invented-agent", client_version: "invented-version",
+  } });
+  const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+  expect(d.codexThreadId).toBe("frame-thread");
+  expect(d.codexSessionId).toBe("frame-session");
+  expect(d.parentThreadId).toBeUndefined();
+  expect(d.fieldAvailability.parentThreadId?.status).toBe("redacted");
+  expect(d.clientVersion).toBeUndefined();
+  expect(d.fieldAvailability.clientVersion?.status).toBe("not_observed");
+  expect(d.agentId).toBeUndefined();
+  expect(JSON.stringify(d)).not.toMatch(/person@example|conceal-redaction|invented-agent|invented-version/);
+  const oversized = {} as RequestLogContext;
+  observeRequestTransport(oversized, "http", new Request("http://localhost", { headers: {
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "x".repeat(17000) }),
+  } }));
+  expect(oversized.diagnostics?.codexThreadId).toBeUndefined();
+});
+
+test("WebSocket upgrade preserves sanitized identity separately from forward headers across turns", () => {
+  const headers = new Headers({ "user-agent": "codex_vscode/0.153.0 (private-machine)",
+    "x-codex-turn-id": "upgrade-turn", "x-request-id": "upgrade-request",
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread-one" }),
+  });
+  const forwarded = selectForwardHeaders(headers);
+  const socket = buildResponsesWsData(forwarded, { kind: "loopback" } as DataPlaneAdmission, undefined, undefined, headers);
+  expect(socket.headers?.has("user-agent")).toBe(false);
+  expect(socket.headers?.has("x-request-id")).toBe(false);
+  expect(JSON.stringify(socket.clientIdentitySnapshot)).not.toContain("private-machine");
+  for (const turn of ["turn-one", "turn-two"]) {
+    const ctx = {} as RequestLogContext;
+    observeRequestTransport(ctx, "websocket", new Request("http://localhost/v1/responses", { headers: forwarded }));
+    applyClientIdentitySnapshot(ctx.diagnostics, socket.clientIdentitySnapshot);
+    recordRequestShape(ctx, { client_metadata: { turn_id: turn } });
+    const d = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+    expect(d.clientProduct).toBe("codex_vscode");
+    expect(d.clientVersion).toBe("0.153.0");
+    expect(d.clientRequestId).toBe("upgrade-request");
+    expect(d.codexThreadId).toBe("thread-one");
+    expect(d.codexTurnId).toBe(turn);
+  }
+  expect(socket.clientIdentitySnapshot?.fields.codexTurnId).toBe("upgrade-turn");
+});
+
+test("recovery reasons belong to each actual dispatch, including repeated recovery kinds", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test",
+    activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+  observeRequestTransport(ctx, "http");
+  for (const reason of [undefined, "transient-5xx", "connection-reset", "transient-5xx", undefined] as const) {
+    noteAttemptSend(ctx.activeAttempt, undefined, reason);
+    recordForwardedRequest(ctx, "http");
+  }
+  expect(ctx.activeAttempt?.sends?.map(send => send.retryReason)).toEqual([
+    undefined, "transient-5xx", "connection-reset", "transient-5xx", undefined,
+  ]);
+  expect(ctx.activeAttempt?.sends?.map(send => send.recoveryReason)).toEqual([
+    undefined, "transient-5xx", "connection-reset", "transient-5xx", undefined,
+  ]);
+  expect(ctx.activeAttempt?.recoveryKinds).toEqual(["transient-5xx", "connection-reset"]);
+  expect(ctx.diagnostics?.retryDecision).toBe("retry_dispatched");
+  expect(ctx.diagnostics?.recoveryReason).toBe("transient-5xx");
+  expect(ctx.diagnostics?.retryBudgetRemaining).toBeUndefined();
+  expect(ctx.diagnostics?.fieldAvailability.retryBudgetRemaining?.status).toBe("unsupported");
+});
+
+test("scheduled retry delay and restored state require positive owner evidence", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test" };
+  observeRequestTransport(ctx, "http");
+  recordReconstructedContext(ctx, { previous_response_id: "response-prior", input: [] }, 0);
+  expect(ctx.diagnostics?.stateRestored).toBeUndefined();
+  expect(ctx.diagnostics?.fieldAvailability.stateRestored?.status).toBe("not_observed");
+  expect(captureRetryDelay(ctx, 120)).toBe(120);
+  expect(ctx.diagnostics?.retryDelayMs).toBe(120);
+  expect(ctx.diagnostics?.retryDecision).toBe("retry_wait_scheduled");
+  expect(captureRetryDelay(ctx, Number.NaN)).toBeNaN();
+  expect(ctx.diagnostics?.retryDelayMs).toBe(120);
+  recordReconstructedContext(ctx, { input: [{ role: "user", content: "private-content" }] }, 1);
+  expect(ctx.diagnostics?.stateRestored).toBe(true);
+  expect(ctx.diagnostics?.stateRestoreSource).toBe("previous_response_replay");
+  expect(ctx.diagnostics?.resumeMode).toBe("local_replay");
+  expect(JSON.stringify(normalizeTransactionDiagnostics(ctx.diagnostics))).not.toContain("private-content");
+  expect(normalizeTransactionDiagnostics(ctx.diagnostics)?.stateRestoreSource).toBe("previous_response_replay");
+});
+
+test("auth capture observes resolved facts without retaining account identities", () => {
+  const ctx = { diagnostics: createTransactionDiagnostics({ requestId: "auth-test" }) } as RequestLogContext;
+  recordRouteAuth(ctx, "forward", { kind: "pool", fixedAccount: true });
+  expect(ctx.diagnostics?.authMode).toBe("forward");
+  expect(ctx.diagnostics?.accountSelectionSource).toBe("explicit_selector");
+  expect(ctx.diagnostics?.fieldAvailability.accountAffinity?.status).toBe("not_observed");
+  expect(ctx.diagnostics?.accountPoolSelectionReason).toBeUndefined();
+  ctx.accountLogLabel = "raw-private-account";
+  recordAuthSend(ctx);
+  expect(ctx.diagnostics?.accountPseudonym).toBeUndefined();
+  recordRouteAuth(ctx, "oauth");
+  expect(ctx.diagnostics?.accountSelectionSource).toBeUndefined();
+  recordRouteAuth(ctx, "untrusted-auth-mode");
+  expect(ctx.diagnostics?.authMode).toBeUndefined();
+  recordAuthRefresh(ctx, "failed");
+  const normalized = normalizeTransactionDiagnostics(ctx.diagnostics)!;
+  expect(normalized.authRefreshOccurred).toBe(true);
+  expect(normalized.authRefreshResult).toBe("failed");
+  expect(JSON.stringify(normalized)).not.toContain("raw-private-account");
+});
+
+test("account changes require sends from distinct observed attempt owners", () => {
+  const ctx = { diagnostics: createTransactionDiagnostics({ requestId: "auth-change" }) } as RequestLogContext;
+  ctx.activeAttempt = beginRequestAttempt(1, "provider", "model", "adapter");
+  ctx.accountLogLabel = "pabcdef";
+  recordForwardedRequest(ctx, "http");
+  expect(ctx.diagnostics?.accountPseudonym).toBe("pabcdef");
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBeUndefined();
+  ctx.accountLogLabel = "p123456";
+  recordForwardedRequest(ctx, "http");
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBeUndefined();
+  ctx.activeAttempt = beginRequestAttempt(2, "provider", "model", "adapter");
+  recordForwardedRequest(ctx, "websocket");
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBe(false);
+  ctx.activeAttempt = beginRequestAttempt(3, "provider", "model", "adapter");
+  ctx.accountLogLabel = "main";
+  recordForwardedRequest(ctx, "http");
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBe(true);
+  ctx.accountLogLabel = undefined;
+  ctx.activeAttempt = beginRequestAttempt(4, "provider", "model", "adapter");
+  recordForwardedRequest(ctx, "http");
+  expect(ctx.diagnostics?.accountPseudonym).toBeUndefined();
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBe(true);
+});
+
+test("missing account observations prevent a later false no-change claim", () => {
+  const ctx = { diagnostics: createTransactionDiagnostics({ requestId: "auth-unknown" }) } as RequestLogContext;
+  ctx.activeAttempt = beginRequestAttempt(1, "provider", "model", "adapter");
+  recordAuthSend(ctx);
+  ctx.accountLogLabel = "main";
+  ctx.activeAttempt = beginRequestAttempt(2, "provider", "model", "adapter");
+  recordAuthSend(ctx);
+  ctx.activeAttempt = beginRequestAttempt(3, "provider", "model", "adapter");
+  recordAuthSend(ctx);
+  expect(ctx.diagnostics?.accountChangedBetweenAttempts).toBeUndefined();
+  expect(ctx.diagnostics?.fieldAvailability.accountChangedBetweenAttempts?.status).toBe("not_observed");
+});
 
 let home = "";
 let previousHome: string | undefined;

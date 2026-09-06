@@ -87,6 +87,10 @@ export interface DiagnosticSendV1 {
   accountLogLabel?: string;
   forwardedModel?: string;
   requestedEffort?: string;
+  callerEffort?: string;
+  configuredEffort?: string;
+  callerServiceTier?: string;
+  configuredServiceTier?: string;
   effectiveEffort?: string;
   reasoningWireField?: string;
   reasoningWireValue?: string | number | boolean;
@@ -155,6 +159,10 @@ export interface DiagnosticSendStart {
   accountLogLabel?: string;
   forwardedModel?: string;
   requestedEffort?: string;
+  callerEffort?: string;
+  configuredEffort?: string;
+  callerServiceTier?: string;
+  configuredServiceTier?: string;
   effectiveEffort?: string;
   reasoningWireField?: string;
   reasoningWireValue?: string | number | boolean;
@@ -242,7 +250,7 @@ const AVAILABILITY_SOURCES = new Set<DiagnosticAvailabilitySourceV1>([
   "persistence",
 ]);
 const DIAGNOSTIC_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
-const DIAGNOSTIC_SERVICE_TIERS = new Set(["auto", "default", "standard", "priority", "flex", "fast"]);
+const DIAGNOSTIC_SERVICE_TIERS = new Set(["auto", "default", "standard", "priority", "flex", "fast", "ultrafast"]);
 const DIAGNOSTIC_SUBSCRIPTION_PLANS = new Set(["free", "plus", "pro", "team", "business", "enterprise", "edu", "unknown"]);
 const DIAGNOSTIC_RECOVERY_REASONS = new Set([
   "transient-5xx", "connection-reset", "oauth-401", "key-401", "key-429", "rate-limit-429",
@@ -291,6 +299,7 @@ const IDENTIFIER_FIELDS = [
 ] as const;
 
 const METADATA_FIELDS = [
+  "callerEffort", "configuredEffort", "configuredEffortSource",
   "agentRole", "clientProduct", "clientVersion", "codexCoreVersion", "desktopVersion", "originator",
   "upstreamProtocol", "adapterName", "protocolVersion", "proxyVersion", "runtimeName", "runtimeVersion",
   "osPlatform", "architecture", "osVersion", "adapterVersion", "diagnosticMode", "forwardedModel",
@@ -477,11 +486,15 @@ function diagnosticMetadataResult(field: string, value: unknown): SanitizedDiagn
       accepted = DIAGNOSTIC_RECOVERY_REASONS.has(sanitized);
       break;
     case "requestedEffort":
+    case "callerEffort":
+    case "configuredEffort":
     case "effectiveEffort":
     case "responseEffort":
       accepted = DIAGNOSTIC_EFFORTS.has(sanitized);
       break;
     case "serviceTier":
+    case "callerServiceTier":
+    case "configuredServiceTier":
       accepted = DIAGNOSTIC_SERVICE_TIERS.has(sanitized);
       break;
     case "endpointClass":
@@ -969,6 +982,7 @@ export function normalizeDiagnosticSend(raw: unknown): DiagnosticSendV1 | undefi
   for (const field of [
     "endpointClass", "provider", "model", "adapter", "accountLogLabel", "forwardedModel", "requestedEffort",
     "effectiveEffort", "reasoningWireField", "serviceTier", "recoveryReason", "retryReason",
+    "callerEffort", "configuredEffort", "callerServiceTier", "configuredServiceTier",
   ] as const) {
     const sanitized = diagnosticMetadataResult(field, raw[field]);
     if (sanitized.value && sanitized.state !== "redacted") result[field] = sanitized.value;

@@ -6,6 +6,7 @@ import type { OcxConfig } from "../../types";
 import type { RouteCandidateTrace, RouteDecisionTraceV1 } from "../../routing/trace";
 import { handleResponses as handleResponsesCore } from "./core";
 import { requestPacingOverloadResponse } from "./pacing-overload";
+import { capturePolicyFallback } from "../transaction-recovery-capture";
 
 type CoreHandler = typeof handleResponsesCore;
 type CoreOptions = Parameters<CoreHandler>[3];
@@ -150,6 +151,7 @@ export async function handleResponsesWithPolicyFallback(
   const initialTrace = logCtx.routeDecision;
   const initialRequestedModel = logCtx.requestedModel;
   if (!rawBody || !isPolicyDecision(initialTrace)) return response;
+  capturePolicyFallback(logCtx, false);
 
   const tried = new Set<string>([
     candidateKey({ provider: initialTrace.selected.provider, model: initialTrace.selected.model }),
@@ -163,6 +165,7 @@ export async function handleResponsesWithPolicyFallback(
 
     finishFailedPolicyAttempt(logCtx, response.status);
     const retryRequest = requestWithCandidate(req, rawBody, next);
+    capturePolicyFallback(logCtx, true);
     try {
       try {
         response = await runCore(retryRequest, config, logCtx, coreOptions);

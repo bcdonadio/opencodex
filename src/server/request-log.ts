@@ -14,6 +14,7 @@ import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordContextTransformation, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
+import { noteRecoveryDispatch } from "./transaction-recovery-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import type { AdapterRequest } from "../adapters/base";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -697,6 +698,14 @@ export function readConfiguredCodexServiceTier(): string | undefined {
   }
 }
 
+/** Local root config provenance only; never an assertion about a remote client. */
+export function readConfiguredCodexEffort(): string | undefined {
+  try {
+    if (!existsSync(CODEX_CONFIG_PATH)) return undefined;
+    return readRootTomlString(readFileSync(CODEX_CONFIG_PATH, "utf-8"), "model_reasoning_effort") ?? undefined;
+  } catch { return undefined; }
+}
+
 export function catalogModelSupportsServiceTier(modelId: string, serviceTier: string | undefined): boolean | undefined {
   if (!serviceTier) return undefined;
   const requestTier = serviceTier.trim().toLowerCase() === "fast" ? "priority" : serviceTier.trim();
@@ -1325,6 +1334,7 @@ export function noteAttemptSend(
   recovery?: AttemptRecoveryKind,
 ): void {
   if (!attempt) return;
+  noteRecoveryDispatch(attempt, recovery);
   attempt.sendCount += 1;
   if (typeof inputTokenEstimate === "number"
     && Number.isFinite(inputTokenEstimate)

@@ -1,4 +1,5 @@
 import { observeRequestTransport, recordRequestShape, recordDeliveredOutput, recordDownstreamTerminal, recordDownstreamCancelled } from "./transaction-capture";
+import { applyClientIdentitySnapshot } from "./transaction-client-capture";
 import { markActivity } from "../lib/sidecar-tracker";
 import { knownModelIdsForProvider } from "../router";
 import {
@@ -1162,6 +1163,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             admission,
             websocketLease,
             sessionLaneIdFromRequest(req.headers),
+            req.headers,
           ),
         })) return undefined as unknown as Response;
         websocketLease.release();
@@ -2321,6 +2323,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ws.data.requestSequenceOnConnection = (ws.data.requestSequenceOnConnection ?? 0) + 1;
           observeRequestTransport(logCtx, "websocket", req, requestId, start,
             ws.data.connectionId, ws.data.requestSequenceOnConnection);
+          applyClientIdentitySnapshot(logCtx.diagnostics, ws.data.clientIdentitySnapshot);
           recordRequestShape(logCtx, payload, rawBytes);
           try {
             let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;

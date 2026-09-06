@@ -1,6 +1,6 @@
 import {
   beginDiagnosticSend, createDiagnosticAttemptId, createTransactionDiagnostics, finishDiagnosticSend,
-  normalizeTransactionDiagnostics, recordDiagnosticEvent, observeDiagnosticIdentifier,
+  normalizeTransactionDiagnostics, normalizeDiagnosticSend, recordDiagnosticEvent, observeDiagnosticIdentifier,
   MAX_DIAGNOSTIC_SENDS,
   type DiagnosticEventTypeV1, type DiagnosticSendV1, type TransactionDiagnosticsV1,
 } from "../diagnostics/transaction";
@@ -12,6 +12,9 @@ import { observeDecodedRequestBody } from "./request-decompress";
 import type { RequestPacingObserver } from "../providers/request-pacing";
 import { captureUpstreamHeaders, captureUpstreamPayloadFacts } from "./transaction-upstream-facts";
 import { summarizeRequestShape } from "./request-shape";
+import { captureClientHeaders, captureClientMetadata } from "./transaction-client-capture";
+import { initializeRecoveryAvailability, captureRecoveryDispatch, captureReplayRestoration, finishRecoveryCapture } from "./transaction-recovery-capture";
+import { recordAuthSend } from "./transaction-auth-capture";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -91,6 +94,7 @@ export function captureSafely(action: () => void): void { try { action(); } catc
 function diagnostics(ctx: RequestLogContext, requestId = "request", receivedAt = Date.now()): TransactionDiagnosticsV1 {
   if (!ctx.diagnostics) {
     ctx.diagnostics = createTransactionDiagnostics({ requestId, receivedAt, proxyVersion });
+    initializeRecoveryAvailability(ctx.diagnostics);
     recordDiagnosticEvent(ctx.diagnostics, { type: "request.received", at: receivedAt, source: "proxy", elapsedMs: 0 });
     for (const field of ["modelSwitchRequested", "modelSwitchApplied", "modelSwitchEffectiveFromRequestId",
       "settingsUpdatedAt", "settingsAppliedAt", "proxyCommit", "proxyBuildId", "modelCatalogRevision"]) {
@@ -135,6 +139,7 @@ export function recordReconstructedContext(ctx: RequestLogContext, body: unknown
     const input = (body as { input?: unknown }).input;
     const d = diagnostics(ctx);
     d.reconstructedInputCount = Array.isArray(input) ? input.length : typeof input === "string" ? 1 : 0;
+    captureReplayRestoration(d, replayedItems);
     d.replayedItemCount = replayedItems;
     d.fieldAvailability.reconstructedInputCount = { status: "observed", source: "proxy" };
     d.fieldAvailability.replayedItemCount = { status: "observed", source: "proxy" };
@@ -171,6 +176,22 @@ export function recordContextEstimate(ctx: RequestLogContext, contextWindow?: nu
       d.fieldAvailability.tokenEstimateMethod = { status: "not_observed", source: "adapter" };
     }
     if (d.contextUsageRatioEstimate === undefined) d.fieldAvailability.contextUsageRatioEstimate = { status: "not_observed", source: "derived" };
+    clean(ctx);
+  });
+}
+
+export function recordRequestedReasoning(ctx: RequestLogContext, caller: unknown, configured: unknown): void {
+  captureSafely(() => {
+    const d = diagnostics(ctx);
+    // Keep the legacy display transition string in requestedEffort untouched.
+    // This immutable copy precedes policy/clamp normalization.
+    if (d.callerEffort === undefined && typeof caller === "string") d.callerEffort = caller;
+    if (typeof configured === "string") {
+      d.configuredEffort = configured;
+      d.configuredEffortSource = "local_codex_root_config";
+    }
+    d.fieldAvailability.callerEffort = { status: typeof caller === "string" ? "observed" : "not_observed", source: "client" };
+    d.fieldAvailability.configuredEffort = { status: typeof configured === "string" ? "observed" : "not_observed", source: "proxy" };
     clean(ctx);
   });
 }
@@ -228,10 +249,7 @@ export function observeRequestTransport(ctx: RequestLogContext, transport: "http
         : path.includes("search") ? "search" : path.includes("live") ? "live"
           : path.includes("messages") ? "messages" : path.includes("chat") ? "chat" : "responses";
       d.originator = req.headers.get("originator");
-      for (const [header, field] of [["x-client-request-id", "clientRequestId"], ["x-request-id", "clientRequestId"], ["x-codex-turn-id", "codexTurnId"],
-        ["thread-id", "codexThreadId"], ["x-codex-thread-id", "codexThreadId"], ["session_id", "codexSessionId"]]) {
-        identifier(d, field!, req.headers.get(header!), "client");
-      }
+      captureClientHeaders(d, req.headers);
     }
     if (connectionId) d.connectionId = connectionId;
     if (sequence !== undefined) d.requestSequenceOnConnection = sequence;
@@ -276,12 +294,7 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
     } else {
       identifier(d, "originalPreviousResponseId", b.previous_response_id, "client");
       d.previousResponseUsed = Boolean(previous);
-      const metadata = b.client_metadata;
-      if (metadata && typeof metadata === "object") {
-        for (const [key, field] of [["thread_id", "codexThreadId"], ["turn_id", "codexTurnId"], ["session_id", "codexSessionId"]]) {
-          identifier(d, field!, (metadata as Record<string, unknown>)[key!], "client");
-        }
-      }
+      captureClientMetadata(d, b.client_metadata);
       d.deltaInputCount = typeof b.input === "string" ? 1 : Array.isArray(b.input) ? b.input.length : Array.isArray(b.messages) ? b.messages.length : 0;
       d.continuationMode = previous ? "previous_response" : "explicit_input";
       d.streamingRequested = b.stream; d.storeRequested = b.store; d.parallelToolCalls = b.parallel_tool_calls;
@@ -343,6 +356,7 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
       (ctx.attempts ??= []).push(ctx.activeAttempt);
     }
     const attempt = ctx.activeAttempt;
+    recordAuthSend(ctx);
     if (attempt) {
       attempt.upstreamTransport = attempt.upstreamTransport && attempt.upstreamTransport !== transport ? "mixed" : transport;
       let owner = sendOwners.get(attempt);
@@ -351,10 +365,13 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
         startedAt: Date.now(), upstreamTransport: transport, endpointClass: d.endpointClass as string,
         provider: ctx.provider, model: ctx.model, adapter: ctx.providerAdapter,
         accountLogLabel: ctx.accountLogLabel, requestedEffort: ctx.requestedEffort,
+        callerEffort: d.callerEffort as string | undefined, configuredEffort: d.configuredEffort as string | undefined,
+        callerServiceTier: ctx.callerServiceTier, configuredServiceTier: ctx.configuredServiceTier,
         effectiveEffort: ctx.effectiveEffort, reasoningWireField: ctx.reasoningWireField,
-        reasoningWireValue: ctx.reasoningWireValue, serviceTier: ctx.requestedServiceTier,
-        recoveryReason: attempt.recoveryKinds.at(-1),
+        reasoningWireValue: ctx.reasoningWireValue,
+        serviceTier: ctx.tierOutcome?.wireKind === "service-tier" && typeof ctx.tierOutcome.wireValue === "string" ? ctx.tierOutcome.wireValue : undefined,
       });
+      captureRecoveryDispatch(d, attempt, send);
       attempt.sends = owner.sends;
       attempt.sendCount = owner.sendCount;
       if (owner.sendCount > MAX_DIAGNOSTIC_SENDS) { d.captureTruncated = true; d.fieldAvailability.sends = { status: "truncated", source: "transport" }; }
@@ -366,7 +383,14 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
       d.forwardedRequestBytes = Buffer.byteLength(body);
       d.bytesForwarded = Number(d.bytesForwarded ?? 0) + Buffer.byteLength(body);
       if (Buffer.byteLength(body) <= 1024 * 1024) {
-        try { recordRequestShape(ctx, JSON.parse(body), Buffer.byteLength(body), true); } catch { /* non-JSON */ }
+        try {
+          const wire: unknown = JSON.parse(body);
+          recordRequestShape(ctx, wire, Buffer.byteLength(body), true);
+          const send = activeSend(ctx);
+          if (send && wire && typeof wire === "object" && !Array.isArray(wire)) {
+            send.serviceTier = normalizeDiagnosticSend({ ...send, serviceTier: (wire as Record<string, unknown>).service_tier })?.serviceTier;
+          }
+        } catch { /* non-JSON */ }
       } else {
         delete d.forwardedModel;
         d.captureTruncated = true;
@@ -605,6 +629,7 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
       if (owner) ctx.activeAttempt.sendCount = owner.sendCount;
     }
     d.terminalMappedStatus = status;
+    finishRecoveryCapture(d, status);
     d.terminalSource = ctx.terminalSource ?? (d.terminalEventType ? "upstream" : undefined);
     d.transportPhase = ctx.transportPhase;
     if (ctx.activeAttempt?.streamAborted) d.streamAborted = true;

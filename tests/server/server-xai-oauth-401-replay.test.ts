@@ -7,6 +7,7 @@ import { XAI_OAUTH_DISCOVERY_URL } from "../../src/oauth/xai";
 import { saveCredential } from "../../src/oauth/store";
 import { XAI_GROK_CLI_BASE_URL } from "../../src/providers/xai-transport";
 import { startServer } from "../../src/server";
+import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -198,6 +199,7 @@ describe("xAI OAuth Responses opt-in upstream 401 replay", () => {
   });
 
   test("401 then 200 performs one refresh and one replay", async () => {
+    clearRequestLogsForTests();
     await seedOAuth();
     saveConfig(xaiConfig());
     const observed = installOAuthFetch([401, 200]);
@@ -209,6 +211,11 @@ describe("xAI OAuth Responses opt-in upstream 401 replay", () => {
       expect(json.output?.find(item => item.type === "message")?.content?.[0]?.text).toBe("ok after refresh");
       expect(observed.counts.refresh).toBe(1);
       expect(observed.chatAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
+      const diagnostics = getRequestLogEntries().at(-1)?.diagnostics;
+      expect(diagnostics?.authMode).toBe("oauth");
+      expect(diagnostics?.authRefreshOccurred).toBe(true);
+      expect(diagnostics?.authRefreshResult).toBe("succeeded");
+      expect(diagnostics?.accountSelectionSource).toBeUndefined();
     } finally {
       await server.stop(true);
     }

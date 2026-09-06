@@ -5,6 +5,7 @@ import { RequestPacingQueueOverloadError } from "../../src/providers/request-pac
 import type { OcxConfig } from "../../src/types";
 import { beginRequestAttempt, type RequestLogContext } from "../../src/server/request-log";
 import type { RouteDecisionTraceV1 } from "../../src/routing/trace";
+import { observeRequestTransport, finalizeDiagnostics } from "../../src/server/transaction-capture";
 import {
   handleResponsesWithPolicyFallback,
   rankPolicyFallbackCandidates,
@@ -47,6 +48,34 @@ function seedAttempt(logCtx: RequestLogContext, provider: string, model: string)
 }
 
 describe("policy candidate fallback", () => {
+  test.each([200, 502])("fallback headers leave outcome unknown until finalization (%i)", async status => {
+    const trace = policyTrace();
+    const ctx: RequestLogContext = { provider: "test", model: "test", routeDecision: trace };
+    observeRequestTransport(ctx, "http");
+    let calls = 0;
+    await handleResponsesWithPolicyFallback(request(), {} as OcxConfig, ctx, {}, {
+      runCore: async () => {
+        if (++calls === 1) return Response.json({ error: { type: "rate_limit_error" } }, { status: 429 });
+        expect(ctx.diagnostics?.policyFallbackAttempted).toBe(true);
+        expect(ctx.diagnostics?.policyFallbackOutcome).toBeUndefined();
+        return new Response("data: {}\n\n", { headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    expect(calls).toBe(2);
+    expect(ctx.diagnostics?.policyFallbackOutcome).toBeUndefined();
+    finalizeDiagnostics(ctx, status, "policy-test", Date.now());
+    expect(ctx.diagnostics?.policyFallbackOutcome).toBe(status === 200 ? "succeeded" : "failed");
+  });
+
+  test("a selected policy that never hops explicitly records not attempted", async () => {
+    const ctx: RequestLogContext = { provider: "test", model: "test", routeDecision: policyTrace() };
+    observeRequestTransport(ctx, "http");
+    await handleResponsesWithPolicyFallback(request(), {} as OcxConfig, ctx, {}, {
+      runCore: async () => Response.json({ status: "completed" }),
+    });
+    expect(ctx.diagnostics?.policyFallbackAttempted).toBe(false);
+    expect(ctx.diagnostics?.policyFallbackOutcome).toBe("not_attempted");
+  });
   test("ranks only eligible untried candidates by score and stable original order", () => {
     const ranked = rankPolicyFallbackCandidates(policyTrace(), new Set(["provider-a\u0000model-a"]));
     expect(ranked.map(candidate => `${candidate.provider}/${candidate.model}`)).toEqual([
