@@ -187,24 +187,28 @@ function multipartLiveBody(
 
 test("live diagnostics classify the actual HTTP destination", async () => {
   const { handleLive } = await import("../../src/server/live");
+  const { observeRequestTransport } = await import("../../src/server/transaction-capture");
   const logCtx: import("../../src/server/request-log").RequestLogContext = { model: "", provider: "" };
   const targets: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     targets.push(input instanceof Request ? input.url : String(input));
     return new Response("v=0-answer", { status: 200 });
   }) as typeof fetch;
-  const response = await handleLive(new Request("http://localhost/v1/live", {
+  const request = new Request("http://localhost/v1/live", {
     method: "POST",
     headers: { "content-type": "application/sdp",
       authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`, "chatgpt-account-id": "acct-123" },
     body: "v=0",
-  }), forwardConfig(), logCtx);
+  });
+  observeRequestTransport(logCtx, "http", request);
+  const response = await handleLive(request, forwardConfig(), logCtx);
   expect(response.status).toBe(200);
   expect(targets).toHaveLength(1);
   expect(new URL(targets[0]!).hostname).toBe("chatgpt.com");
   expect(logCtx.diagnostics).toMatchObject({ upstreamHostname: "chatgpt", method: "POST" });
-  expect(logCtx.diagnostics?.endpointClass).toBe(undefined);
-  expect(logCtx.attempts?.[0]?.sends?.[0]?.endpointClass).toBe(undefined);
+  expect(logCtx.diagnostics?.endpointClass).toBe("live");
+  expect(logCtx.diagnostics?.fieldAvailability.endpointClass?.status).not.toBe("not_observed");
+  expect(logCtx.attempts?.[0]?.sends?.[0]?.endpointClass).toBe("live");
   expect(logCtx.attempts?.[0]?.sendCount).toBe(1);
 });
 

@@ -740,9 +740,11 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
       if (event.target) {
         const d = diagnostics(ctx);
         d.upstreamHostname = event.target.upstreamHostname;
-        d.endpointClass = event.target.endpointClass;
+        if (event.target.endpointClass !== undefined) {
+          d.endpointClass = event.target.endpointClass;
+          d.fieldAvailability.endpointClass = { status: "observed", source: "transport" };
+        }
         d.method = event.target.method;
-        d.fieldAvailability.endpointClass = { status: event.target.endpointClass ? "observed" : "not_observed", source: "transport" };
       }
       recordForwardedRequest(ctx, event.transport, event.body);
     }

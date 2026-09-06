@@ -152,24 +152,28 @@ function saveExactSearchCredentials(): void {
 
 test("search diagnostics classify the actual HTTP destination", async () => {
   const { handleSearch } = await import("../../src/server/search");
+  const { observeRequestTransport } = await import("../../src/server/transaction-capture");
   const logCtx: import("../../src/server/request-log").RequestLogContext = { model: "", provider: "" };
   const targets: string[] = [];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     targets.push(input instanceof Request ? input.url : String(input));
     return new Response(JSON.stringify({ data: [], output: "result" }), { status: 200 });
   }) as typeof fetch;
-  const response = await handleSearch(new Request("http://localhost/v1/alpha/search", {
+  const request = new Request("http://localhost/v1/alpha/search", {
     method: "POST",
     headers: { "content-type": "application/json",
       authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`, "chatgpt-account-id": "acct-123" },
     body: JSON.stringify({ id: "search-session", model: "gpt-test" }),
-  }), forwardConfig(), logCtx);
+  });
+  observeRequestTransport(logCtx, "http", request);
+  const response = await handleSearch(request, forwardConfig(), logCtx);
   expect(response.status).toBe(200);
   expect(targets).toHaveLength(1);
   expect(new URL(targets[0]!).hostname).toBe("chatgpt.com");
   expect(logCtx.diagnostics).toMatchObject({ upstreamHostname: "chatgpt", method: "POST" });
-  expect(logCtx.diagnostics?.endpointClass).toBe(undefined);
-  expect(logCtx.attempts?.[0]?.sends?.[0]?.endpointClass).toBe(undefined);
+  expect(logCtx.diagnostics?.endpointClass).toBe("search");
+  expect(logCtx.diagnostics?.fieldAvailability.endpointClass?.status).not.toBe("not_observed");
+  expect(logCtx.attempts?.[0]?.sends?.[0]?.endpointClass).toBe("search");
   expect(logCtx.attempts?.[0]?.sendCount).toBe(1);
 });
 
