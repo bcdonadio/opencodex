@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,12 +28,14 @@ import {
   appendUsageEntry,
   normalizePersistedUsageRow,
   readUsageEntries,
+  readUsageSnapshotForManagement,
   resetUsageReadCacheForTests,
   usageLogPath,
   type PersistedUsageAttempt,
   type PersistedUsageEntry,
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { closeRequestHistoryIndex, requestHistoryRowById } from "../../src/routing/history/indexer";
 import { requestLogDto } from "../../src/server/management/shared";
 
 let home = "";
@@ -48,6 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  closeRequestHistoryIndex();
   clearRequestLogsForTests();
   resetUsageReadCacheForTests();
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -95,6 +98,111 @@ test("capture acceptance: live append success does not pretend disk knows write 
   const durable = readUsageEntries()[0]!;
   expect(durable.diagnostics?.recordPersisted).toBeUndefined();
   expect(durable.diagnostics?.fieldAvailability.recordPersisted?.status).toBe("not_observed");
+});
+
+describe("durability boundary regressions", () => {
+  test("late failure survives downstream finalization and persistence at the event cap", () => {
+    const diagnostics = createTransactionDiagnostics({ requestId: "late-terminal", receivedAt: 1 });
+    for (let index = 0; index < 200; index++) recordDiagnosticEvent(diagnostics, {
+      type: "response.output_text.delta", at: index + 1, source: "upstream",
+    });
+    for (const event of [
+      { type: "response.failed", source: "upstream" },
+      { type: "downstream.terminal.sent", source: "downstream" },
+      { type: "request.finalized", source: "proxy" },
+      { type: "request.persisted", source: "proxy" },
+    ] as const) recordDiagnosticEvent(diagnostics, { ...event, at: 300 });
+    const normalized = normalizeTransactionDiagnostics(diagnostics)!;
+    expect(normalized.events).toHaveLength(64);
+    expect(normalized.events.slice(-4).map(event => event.type)).toEqual([
+      "response.failed", "downstream.terminal.sent", "request.finalized", "request.persisted",
+    ]);
+    expect(normalized.droppedDiagnosticEventCount).toBe(140);
+    expect(normalizeTransactionDiagnostics(normalized)).toEqual(normalized);
+  });
+
+  test("raw oversized collections retain tail terminals with bounded element access", () => {
+    const diagnostics = createTransactionDiagnostics({ requestId: "raw-tail", receivedAt: 1 });
+    let eventReads = 0;
+    const rawEvents = new Array(1_000_000);
+    const rawSends = new Array(1_000_000);
+    for (let index = 0; index < 64; index++) rawEvents[index] = {
+      eventSequence: index + 1, type: "response.output_text.delta", at: 1, source: "upstream",
+    };
+    rawEvents[999_997] = { eventSequence: 999_998, type: "response.failed", at: 2, source: "upstream" };
+    rawEvents[999_999] = { eventSequence: 1_000_000, type: "request.finalized", at: 3, source: "proxy" };
+    diagnostics.events = new Proxy(rawEvents, { get(target, key, receiver) {
+      if (/^\d+$/.test(String(key))) eventReads++;
+      return Reflect.get(target, key, receiver);
+    } });
+    const normalized = normalizeTransactionDiagnostics(diagnostics)!;
+    expect(eventReads).toBeLessThanOrEqual(128);
+    expect(normalized.events.slice(-2).map(event => event.type)).toEqual(["response.failed", "request.finalized"]);
+    expect(normalized.droppedDiagnosticEventCount).toBe(1_000_000 - 64);
+    for (let index = 0; index < 16; index++) rawSends[index] = {
+      sendId: `send-${index}`, sendOrdinal: index + 1, startedAt: 1,
+    };
+    rawSends[999_999] = { sendId: "last-send", sendOrdinal: 1_000_000, startedAt: 2, endedAt: 3, status: 503 };
+    let sendReads = 0;
+    const sends = normalizeDiagnosticSends(new Proxy(rawSends, { get(target, key, receiver) {
+      if (/^\d+$/.test(String(key))) sendReads++;
+      return Reflect.get(target, key, receiver);
+    } }));
+    expect(sendReads).toBeLessThanOrEqual(32);
+    expect(sends?.at(-1)).toMatchObject({ sendId: "last-send", status: 503 });
+  });
+
+  test("live finalized attempt snapshots cannot drift after a late send callback", () => {
+    const attempt = baseAttempt();
+    const send = beginDiagnosticSend(attempt, { startedAt: 1, reasoningWireField: "thinking.type", reasoningWireValue: "adaptive" });
+    finishDiagnosticSend(send, { endedAt: 2, status: 200 });
+    addRequestLog({ requestId: "snapshot", timestamp: 1, provider: "test", model: "test", status: 200,
+      durationMs: 1, usageStatus: "reported", attempts: [attempt] });
+    finishDiagnosticSend(send, { endedAt: 3, status: 503 });
+    const live = getRequestLogEntries()[0]!;
+    expect(live.attempts?.[0]?.sends?.[0]).toMatchObject({ endedAt: 2, status: 200, reasoningWireValue: "adaptive" });
+    expect(readUsageEntries()[0]?.attempts).toEqual(live.attempts);
+  });
+
+  test("reusing a live row cannot persist an earlier write outcome", () => {
+    addRequestLog({ requestId: "reused", timestamp: 1, provider: "test", model: "test", status: 200,
+      durationMs: 1, usageStatus: "unreported", diagnostics: createTransactionDiagnostics({ requestId: "reused", receivedAt: 1 }) });
+    const live = getRequestLogEntries()[0]!;
+    expect(live.diagnostics?.recordPersisted).toBe(true);
+    appendUsageEntry(live);
+    const canonical = readUsageEntries().at(-1)!.diagnostics!;
+    for (const field of ["recordPersisted", "persistedAt", "persistenceErrorCode", "persistenceLagMs"]) expect(canonical[field]).toBeUndefined();
+    expect(canonical.events.some(event => event.type === "request.persisted")).toBe(false);
+    unlinkSync(usageLogPath());
+    mkdirSync(usageLogPath());
+    expect(() => addRequestLog(live)).not.toThrow();
+    expect(getRequestLogEntries().at(-1)?.diagnostics).toMatchObject({ recordPersisted: false, persistenceErrorCode: "append_failed" });
+    expect(getRequestLogEntries().at(-1)?.diagnostics?.persistedAt).toBeUndefined();
+  });
+
+  test("management scan reports rejected lines across warm reads, append and replacement", async () => {
+    const row = { requestId: "valid", provider: "test", model: "test", timestamp: 1, status: 200, durationMs: 1, usageStatus: "unreported" };
+    writeFileSync(usageLogPath(), `\n${JSON.stringify(row)}\n{bad\n{}\n   \n`);
+    expect((await readUsageSnapshotForManagement()).invalidEntriesDropped).toBe(2);
+    expect((await readUsageSnapshotForManagement()).invalidEntriesDropped).toBe(2);
+    appendFileSync(usageLogPath(), `${JSON.stringify({ ...row, requestId: "next" })}\nnull\n`);
+    const appended = await readUsageSnapshotForManagement();
+    expect(appended.entries).toHaveLength(2);
+    expect(appended.invalidEntriesDropped).toBe(3);
+    writeFileSync(usageLogPath(), `${JSON.stringify(row)}\n`);
+    expect((await readUsageSnapshotForManagement()).invalidEntriesDropped).toBe(0);
+    const initial = `{bad\n${JSON.stringify(row)}\n${JSON.stringify({ ...row, requestId: "second" })}\n`;
+    writeFileSync(usageLogPath(), initial);
+    resetUsageReadCacheForTests();
+    const window = Buffer.byteLength(initial) + 32;
+    expect((await readUsageSnapshotForManagement(window)).invalidEntriesDropped).toBe(1);
+    appendFileSync(usageLogPath(), `${JSON.stringify({ ...row, requestId: "third" })}\n`);
+    const trimmed = await readUsageSnapshotForManagement(window);
+    expect(trimmed.invalidEntriesDropped).toBe(0);
+    expect(trimmed.truncatedPrefixBytes).toBeGreaterThan(0);
+    resetUsageReadCacheForTests();
+    expect((await readUsageSnapshotForManagement(window)).entries).toEqual(trimmed.entries);
+  });
 });
 
 describe("transaction diagnostics schema", () => {
@@ -283,6 +391,10 @@ describe("transaction diagnostics schema", () => {
       name,
       { status: "not_observed", source: "proxy" },
     ]));
+    // Later owner contributions must survive earlier unsupported/default entries.
+    diagnostics.fieldAvailability.errorMessage = { status: "redacted", source: "upstream" };
+    diagnostics.fieldAvailability.sends = { status: "truncated", source: "transport" };
+    diagnostics.fieldAvailability.upstreamResponseId = { status: "observed", source: "upstream" };
 
     const normalized = normalizeTransactionDiagnostics(diagnostics)!;
     expect(Object.keys(normalized.fieldAvailability)).toHaveLength(64);
@@ -291,6 +403,9 @@ describe("transaction diagnostics schema", () => {
       source: "persistence",
     });
     expect(normalized.captureTruncated).toBe(true);
+    expect(normalized.fieldAvailability.errorMessage?.status).toBe("redacted");
+    expect(normalized.fieldAvailability.sends?.status).toBe("truncated");
+    expect(normalized.fieldAvailability.upstreamResponseId?.status).toBe("observed");
   });
 
   test("rejects prohibited URLs, paths, environment fragments, accounts, and reasoning text", () => {
@@ -531,7 +646,7 @@ describe("transaction diagnostics persistence", () => {
       lastKnownUsageResponseId: "resp-terminal", billedUsageSource: "unknown", usageMissingCount: 0,
       requestLimit: 100, tokenLimit: 10_000, accountWindowLimit: 200, accountWindowRemaining: 199,
       accountWindowResetAt: 2_000, rateLimitReachedType: "none", spendControlReached: false,
-      quotaErrorCode: "none", logSink: "usage_jsonl", truncationReason: "none", expiresAt: 90_000,
+      quotaErrorCode: "none", logSink: "usage.jsonl", truncationReason: "none", expiresAt: 90_000,
       events: [
         { eventSequence: 1, type: "response.created", at: 1_016, elapsedMs: 16,
           source: "upstream", responseId: "resp-terminal", eventId: "event-created" },
@@ -542,6 +657,8 @@ describe("transaction diagnostics persistence", () => {
       ],
       fieldAvailability: {
         upstreamResponseId: { status: "observed", source: "upstream" },
+        recordPersisted: { status: "not_observed", source: "persistence" },
+        persistedAt: { status: "not_observed", source: "persistence" },
         connectMs: { status: "derived", source: "transport" },
         modelSwitchAppliedAt: { status: "unsupported", source: "proxy" },
         modelSwitchEffectiveFromRequestId: { status: "not_observed", source: "route" },
@@ -603,7 +720,7 @@ describe("transaction diagnostics persistence", () => {
     expect(normalizeTransactionDiagnostics(expected)).toEqual(expected);
   });
 
-  test("contract: complete row survives JSONL, cold reload and management DTO", () => {
+  test("contract: complete row survives JSONL, cold reload and management DTO", async () => {
     const expected = completeRow();
     appendUsageEntry(expected);
     const jsonl = JSON.parse(readFileSync(usageLogPath(), "utf8").trim());
@@ -616,6 +733,10 @@ describe("transaction diagnostics persistence", () => {
     expect(reloaded).toMatchObject(expected);
     const dto = JSON.parse(JSON.stringify(requestLogDto(reloaded)));
     expect(dto).toMatchObject(expected);
+    const historyRow = await requestHistoryRowById(expected.requestId);
+    expect(historyRow).toEqual(expected);
+    closeRequestHistoryIndex();
+    expect(await requestHistoryRowById(expected.requestId)).toEqual(expected);
     expect(dto.inboundTransport).toBe("websocket");
     expect(dto.upstreamTransport).toBe("http");
   });
@@ -670,11 +791,13 @@ describe("transaction diagnostics persistence", () => {
       receivedAt: 1_000, timestampSource: "proxy_wall_clock", events: [],
       droppedDiagnosticEventCount: 0, captureTruncated: true, redactionApplied: true,
       redactionVersion: 1, retentionClass: "usage_ledger",
+      logSink: "usage.jsonl",
       fieldAvailability: {
         clientRequestId: { status: "redacted", source: "client" },
         upstreamEventId: { status: "truncated", source: "upstream" },
         connectMs: { status: "derived", source: "derived" },
         recordPersisted: { status: "not_observed", source: "persistence" },
+        persistedAt: { status: "not_observed", source: "persistence" },
         modelSwitchApplied: { status: "unsupported", source: "proxy" },
         responseEffort: { status: "unknown", source: "adapter" },
       },

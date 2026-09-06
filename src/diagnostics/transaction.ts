@@ -8,7 +8,6 @@ export const MAX_DIAGNOSTIC_SENDS = 16;
 export const MAX_DIAGNOSTIC_ID_BYTES = 256;
 export const MAX_DIAGNOSTIC_ERROR_BYTES = 500;
 
-const MAX_DIAGNOSTIC_FIELD_NAME_BYTES = 64;
 const MAX_DIAGNOSTIC_METADATA_BYTES = 64;
 const MAX_DIAGNOSTIC_LIST_MEMBERS = 64;
 const DIAGNOSTIC_COLLECTION_LOOKAHEAD = 1;
@@ -354,7 +353,7 @@ const KNOWN_DIAGNOSTIC_FIELDS = new Set<string>([
   "correlationConfidence", "receivedAt", "timestampSource", "events", "fieldAvailability",
   "droppedDiagnosticEventCount", "captureTruncated", "redactionApplied", "redactionVersion", "retentionClass",
   "inboundProtocol", "inboundTransport", "upstreamTransport", "terminalSource", "transportPhase", "closeReason",
-  "policyFallbackOutcome", "requestId",
+  "policyFallbackOutcome", "requestId", "sends",
 ]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -527,36 +526,42 @@ interface NormalizedAvailability {
 
 function normalizeAvailability(raw: unknown): NormalizedAvailability {
   if (!isPlainObject(raw)) return { values: {}, truncated: false };
-  const normalized: Record<string, DiagnosticAvailabilityV1> = {};
-  let inspected = 0;
-  let overflowed = false;
-  for (const rawName in raw) {
-    if (!Object.prototype.hasOwnProperty.call(raw, rawName)) continue;
-    inspected += 1;
-    if (inspected > MAX_DIAGNOSTIC_LIST_MEMBERS) {
-      overflowed = true;
-      break;
-    }
+  const candidates: [string, DiagnosticAvailabilityV1][] = [];
+  // Iterate the fixed schema instead of caller keys. Work is bounded even when
+  // an input has a million unknown properties, and late observed evidence cannot
+  // be displaced by the defaults contributed by earlier capture owners.
+  for (const name of KNOWN_DIAGNOSTIC_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, name)) continue;
     let rawValue: unknown;
     try {
-      rawValue = raw[rawName];
+      rawValue = raw[name];
     } catch {
       continue;
     }
-    const name = sanitizedString(rawName, MAX_DIAGNOSTIC_FIELD_NAME_BYTES);
-    if (!name || !KNOWN_DIAGNOSTIC_FIELDS.has(name) || !isPlainObject(rawValue)) continue;
+    if (!isPlainObject(rawValue)) continue;
     if (typeof rawValue.status !== "string"
       || !AVAILABILITY_STATUSES.has(rawValue.status as DiagnosticAvailabilityStatusV1)) continue;
     if (rawValue.source !== undefined
       && (typeof rawValue.source !== "string"
         || !AVAILABILITY_SOURCES.has(rawValue.source as DiagnosticAvailabilitySourceV1))) continue;
-    normalized[name] = {
+    candidates.push([name, {
       status: rawValue.status as DiagnosticAvailabilityStatusV1,
       ...(rawValue.source === undefined
         ? {}
         : { source: rawValue.source as DiagnosticAvailabilitySourceV1 }),
-    };
+    }]);
   }
+  const priority = (value: DiagnosticAvailabilityV1): number => {
+    if (value.status === "redacted" || value.status === "truncated") return 0;
+    if (value.status === "observed") return 1;
+    if (value.status === "derived") return 2;
+    if (value.source === "persistence") return 3;
+    if (value.status === "unknown") return 4;
+    return 5;
+  };
+  candidates.sort((left, right) => priority(left[1]) - priority(right[1]));
+  const overflowed = candidates.length > MAX_DIAGNOSTIC_LIST_MEMBERS;
+  const normalized = Object.fromEntries(candidates.slice(0, MAX_DIAGNOSTIC_LIST_MEMBERS));
   if (overflowed) {
     if (!("fieldAvailability" in normalized)
       && Object.keys(normalized).length === MAX_DIAGNOSTIC_LIST_MEMBERS) {
@@ -605,13 +610,42 @@ interface BoundedEvents {
   eventIdState?: DiagnosticSanitizationState;
 }
 
+// Inspect a bounded head and tail, even for sparse or hostile arrays. The tail
+// carries late terminal observations without walking all omitted stream deltas.
+function boundedCollectionIndices(length: number, limit: number): number[] {
+  const indices = Array.from({ length: Math.min(length, limit) }, (_, index) => index);
+  for (let index = Math.max(limit, length - limit); index < length; index += 1) indices.push(index);
+  return indices;
+}
+
+function terminalEventPhase(event: DiagnosticEventV1): string {
+  if (event.type.startsWith("request.")) return event.type;
+  if (event.type.startsWith("downstream.")) return "downstream";
+  return event.source === "upstream" ? "upstream" : "transport";
+}
+
+function retainDiagnosticEvent(events: DiagnosticEventV1[], event: DiagnosticEventV1): void {
+  if (events.length < MAX_DIAGNOSTIC_EVENTS) {
+    events.push(event);
+    return;
+  }
+  if (!TERMINAL_EVENT_TYPES.has(event.type)) return;
+  // Keep the latest upstream, downstream and persistence transitions separately:
+  // finalization must not erase the stream failure that made the row interesting.
+  let replace = events.findIndex(candidate => TERMINAL_EVENT_TYPES.has(candidate.type)
+    && terminalEventPhase(candidate) === terminalEventPhase(event));
+  if (replace < 0) replace = events.findLastIndex(candidate => !TERMINAL_EVENT_TYPES.has(candidate.type));
+  if (replace < 0) replace = 0;
+  events.splice(replace, 1);
+  events.push(event);
+}
+
 function boundedEvents(raw: unknown): BoundedEvents {
   if (!Array.isArray(raw)) return { events: [], dropped: 0 };
   const valid: DiagnosticEventV1[] = [];
   let responseIdState: DiagnosticSanitizationState | undefined;
   let eventIdState: DiagnosticSanitizationState | undefined;
-  const scanLimit = Math.min(raw.length, MAX_DIAGNOSTIC_EVENTS + DIAGNOSTIC_COLLECTION_LOOKAHEAD);
-  for (let index = 0; index < scanLimit; index += 1) {
+  for (const index of boundedCollectionIndices(raw.length, MAX_DIAGNOSTIC_EVENTS)) {
     let candidate: unknown;
     try {
       candidate = raw[index];
@@ -619,20 +653,14 @@ function boundedEvents(raw: unknown): BoundedEvents {
       continue;
     }
     const normalized = normalizeEvent(candidate);
-    if (normalized.event) valid.push(normalized.event);
+    if (normalized.event) retainDiagnosticEvent(valid, normalized.event);
     if (normalized.responseIdState && normalized.responseIdState !== "observed") {
       responseIdState = normalized.responseIdState;
     }
     if (normalized.eventIdState && normalized.eventIdState !== "observed") eventIdState = normalized.eventIdState;
   }
-  const dropped = Math.max(0, raw.length - Math.min(valid.length, MAX_DIAGNOSTIC_EVENTS));
-  if (valid.length <= MAX_DIAGNOSTIC_EVENTS) {
-    return { events: valid, dropped, responseIdState, eventIdState };
-  }
-  const lastTerminal = valid.findLast(event => TERMINAL_EVENT_TYPES.has(event.type));
-  const retained = valid.slice(0, MAX_DIAGNOSTIC_EVENTS);
-  if (lastTerminal && !retained.includes(lastTerminal)) retained[MAX_DIAGNOSTIC_EVENTS - 1] = lastTerminal;
-  return { events: retained, dropped, responseIdState, eventIdState };
+  const dropped = Math.max(0, raw.length - valid.length);
+  return { events: valid, dropped, responseIdState, eventIdState };
 }
 
 function normalizedStringList(raw: unknown): string[] | undefined {
@@ -819,6 +847,26 @@ export function createTransactionDiagnostics(input: CreateTransactionDiagnostics
   return normalizeTransactionDiagnostics(diagnostics)!;
 }
 
+/** A canonical append cannot attest to its own completion, including on reuse. */
+export function clearDiagnosticPersistenceOutcome(diagnostics: TransactionDiagnosticsV1): void {
+  diagnostics.logSink = "usage.jsonl";
+  delete diagnostics.recordPersisted;
+  delete diagnostics.persistedAt;
+  delete diagnostics.persistenceLagMs;
+  delete diagnostics.persistenceErrorCode;
+  diagnostics.events = diagnostics.events.filter(event => event.type !== "request.persisted");
+  if (Array.isArray(diagnostics.derivedFields)) {
+    diagnostics.derivedFields = diagnostics.derivedFields.filter(field => field !== "persistenceLagMs");
+  }
+  diagnostics.fieldAvailability.recordPersisted = { status: "not_observed", source: "persistence" };
+  diagnostics.fieldAvailability.persistedAt = { status: "not_observed", source: "persistence" };
+  delete diagnostics.fieldAvailability.persistenceLagMs;
+  delete diagnostics.fieldAvailability.persistenceErrorCode;
+  const availability = normalizeAvailability(diagnostics.fieldAvailability);
+  diagnostics.fieldAvailability = availability.values;
+  diagnostics.captureTruncated ||= availability.truncated;
+}
+
 export function recordDiagnosticEvent(
   diagnostics: TransactionDiagnosticsV1,
   input: DiagnosticEventInput,
@@ -854,12 +902,11 @@ export function recordDiagnosticEvent(
     if (normalized.eventIdState === "truncated") diagnostics.captureTruncated = true;
   }
 
-  if (diagnostics.events.length < MAX_DIAGNOSTIC_EVENTS) diagnostics.events.push(event);
-  else {
+  if (diagnostics.events.length >= MAX_DIAGNOSTIC_EVENTS) {
     diagnostics.droppedDiagnosticEventCount += 1;
     diagnostics.captureTruncated = true;
-    if (TERMINAL_EVENT_TYPES.has(event.type)) diagnostics.events[MAX_DIAGNOSTIC_EVENTS - 1] = event;
   }
+  retainDiagnosticEvent(diagnostics.events, event);
 
   if (event.type === "response.created") {
     if (diagnostics.responseCreatedAt === undefined) diagnostics.responseCreatedAt = event.at;
@@ -888,6 +935,9 @@ export function recordDiagnosticEvent(
 function normalizeReasoningWireValue(field: unknown, value: unknown): string | number | boolean | undefined {
   if (typeof value === "string") {
     const sanitized = sanitizeDiagnosticMetadata(value);
+    if (field === "thinking.type") {
+      return sanitized === "enabled" || sanitized === "disabled" || sanitized === "adaptive" ? sanitized : undefined;
+    }
     return sanitized && DIAGNOSTIC_EFFORTS.has(sanitized) ? sanitized : undefined;
   }
   if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
@@ -940,8 +990,7 @@ export function normalizeDiagnosticSend(raw: unknown): DiagnosticSendV1 | undefi
 export function normalizeDiagnosticSends(raw: unknown): DiagnosticSendV1[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const valid: DiagnosticSendV1[] = [];
-  const scanLimit = Math.min(raw.length, MAX_DIAGNOSTIC_SENDS + DIAGNOSTIC_COLLECTION_LOOKAHEAD);
-  for (let index = 0; index < scanLimit; index += 1) {
+  for (const index of boundedCollectionIndices(raw.length, MAX_DIAGNOSTIC_SENDS)) {
     let candidate: unknown;
     try {
       candidate = raw[index];
@@ -949,15 +998,10 @@ export function normalizeDiagnosticSends(raw: unknown): DiagnosticSendV1[] | und
       continue;
     }
     const send = normalizeDiagnosticSend(candidate);
-    if (send) valid.push(send);
+    if (send && valid.length < MAX_DIAGNOSTIC_SENDS) valid.push(send);
+    else if (send && (send.endedAt !== undefined || send.status !== undefined)) valid[MAX_DIAGNOSTIC_SENDS - 1] = send;
   }
-  if (valid.length <= MAX_DIAGNOSTIC_SENDS) return valid;
-  const retained = valid.slice(0, MAX_DIAGNOSTIC_SENDS);
-  const overflow = valid[MAX_DIAGNOSTIC_SENDS];
-  if (overflow && (overflow.endedAt !== undefined || overflow.status !== undefined)) {
-    retained[MAX_DIAGNOSTIC_SENDS - 1] = overflow;
-  }
-  return retained;
+  return valid;
 }
 
 const cappedPendingSendOwners = new WeakMap<DiagnosticSendV1, DiagnosticSendOwner>();
