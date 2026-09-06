@@ -22,7 +22,7 @@ import { requestLogDto } from "./shared";
 import { jsonResponse } from "../auth-cors";
 import type { ManagementContext } from "./context";
 import type { PersistedUsageEntry } from "../../usage/log";
-import { readUsageEntriesForManagement } from "../../usage/log";
+import { readUsageSnapshotForManagement } from "../../usage/log";
 import {
   buildSupportExport,
   SUPPORT_EXPORT_MAX_REQUEST_IDS,
@@ -80,8 +80,12 @@ export async function handleRequestHistoryRoutes(ctx: ManagementContext): Promis
       selection = { from, to };
     }
     try {
-      const rows = await readUsageEntriesForManagement();
-      const bundle = buildSupportExport(selection, rows);
+      const snapshot = await readUsageSnapshotForManagement();
+      const bundle = buildSupportExport(selection, snapshot.entries, {
+        canonicalScanIncomplete: snapshot.truncatedPrefixBytes > 0
+          || snapshot.entriesTruncated || snapshot.entriesDropped > 0
+          || snapshot.invalidEntriesDropped > 0,
+      });
       const response = jsonResponse(bundle, 200, req, config);
       response.headers.set("Content-Disposition", 'attachment; filename="opencodex-support-export.json"');
       response.headers.set("Cache-Control", "no-store");

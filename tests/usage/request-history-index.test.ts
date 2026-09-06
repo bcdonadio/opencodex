@@ -16,6 +16,7 @@ import { ManagementRequest } from "../helpers/management-auth";
 import {
   appendUsageEntry,
   resetUsageReadCacheForTests,
+  setManagementUsageMaxEntriesForTests,
   usageLogPath,
   type PersistedUsageEntry,
 } from "../../src/usage/log";
@@ -73,6 +74,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setManagementUsageMaxEntriesForTests(null);
   closeRequestHistoryIndex();
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
@@ -380,6 +382,46 @@ describe("request-history index (RI-02)", () => {
     const body = await response.json() as { exportSchemaVersion: number; records: Array<{ requestId: string }> };
     expect(body.exportSchemaVersion).toBe(1);
     expect(body.records.map(row => row.requestId)).toEqual(["canonical-only"]);
+  });
+
+  test("support export reports canonical row-cap gaps even within the retained timestamp bounds", async () => {
+    setManagementUsageMaxEntriesForTests(2);
+    // Out-of-order timestamps mean the dropped row can lie inside the retained
+    // timestamp envelope. Bounds alone cannot establish complete log coverage.
+    for (const row of [entry("dropped", 1_500), entry("first", 1_000), entry("last", 2_000)]) {
+      appendUsageEntry(row);
+    }
+    for (const selection of ["from=1000&to=2000", "requestId=first"]) {
+      const response = await apiGet(`/api/transaction-diagnostics/export?${selection}`);
+      expect(response.status).toBe(200);
+      const body = await response.json() as { records: Array<{ requestId: string }>; gaps: Array<{ kind: string }> };
+      expect(body.records.some(row => row.requestId === "first")).toBe(true);
+      expect(body.gaps.some(gap => gap.kind === "log_coverage")).toBe(true);
+    }
+  });
+
+  test("support export reports canonical byte-window gaps for a retained request", async () => {
+    appendUsageEntry(entry("outside-window", 1_500));
+    // Grow a sparse prefix beyond the reader's 64 MiB window without allocating
+    // a huge row fixture. The newline lets its bounded read retain the final row.
+    truncateSync(usageLogPath(), 64 * 1024 * 1024 + 1);
+    appendFileSync(usageLogPath(), `\n${JSON.stringify(entry("retained", 1_000))}\n`);
+    const response = await apiGet("/api/transaction-diagnostics/export?requestId=retained");
+    expect(response.status).toBe(200);
+    const body = await response.json() as { records: Array<{ requestId: string }>; gaps: Array<{ kind: string }> };
+    expect(body.records.map(row => row.requestId)).toEqual(["retained"]);
+    expect(body.gaps.some(gap => gap.kind === "log_coverage")).toBe(true);
+  });
+
+  test("support export reports malformed canonical rows inside the retained window", async () => {
+    appendUsageEntry(entry("first", 1_000));
+    appendFileSync(usageLogPath(), '{"requestId":"torn"\n');
+    appendUsageEntry(entry("last", 2_000));
+    const response = await apiGet("/api/transaction-diagnostics/export?from=1000&to=2000");
+    expect(response.status).toBe(200);
+    const body = await response.json() as { records: Array<{ requestId: string }>; gaps: Array<{ kind: string }> };
+    expect(body.records.map(row => row.requestId)).toEqual(["first", "last"]);
+    expect(body.gaps.some(gap => gap.kind === "log_coverage")).toBe(true);
   });
 
   test("support export rejects empty, mixed, partial, and over-wide selectors", async () => {
