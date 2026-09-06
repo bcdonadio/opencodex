@@ -15,6 +15,62 @@ const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSe
 const activeSends = new WeakMap<object, DiagnosticSendV1>();
 const sendState = new WeakMap<DiagnosticSendV1, { responseId?: string; terminalType?: string; terminalObserver?: object; directTypes: Set<string>; syntheticTypes: Set<string> }>();
 const requestShapes = new WeakSet<RequestLogContext>();
+const completedCompactions = new WeakSet<RequestLogContext>();
+
+const transformationKinds = new Set([
+  "previous_response_replay", "developer_guidance", "synthetic_compaction",
+  "media_tool_bridge", "web_search_tool_bridge", "plaintext_encrypted_rewrite",
+  "adapter_context_truncation", "adapter_tool_result_truncation", "adapter_message_injection",
+  "adapter_normalization", "instruction_injection", "context_pruning",
+]);
+const transformationCountKeys = ["message", "developer", "instruction", "tool", "tool_definition", "tool_result", "image", "audio", "file", "reasoning", "input_item", "compaction_trigger"] as const;
+type TransformationCounts = Partial<Record<typeof transformationCountKeys[number], number>>;
+
+/** Counts are supplied by the owner of the operation, never inferred from a net body-size change. */
+export function recordContextTransformation(ctx: RequestLogContext, observation: {
+  kind: string; injected?: TransformationCounts; dropped?: TransformationCounts; truncated?: TransformationCounts;
+}): void {
+  captureSafely(() => {
+    if (!transformationKinds.has(observation.kind)) return;
+    const d = diagnostics(ctx);
+    const source = ["adapter_normalization", "instruction_injection", "context_pruning"].includes(observation.kind) ? "adapter" : "proxy";
+    d.contextTransformationKinds = [...new Set([...(Array.isArray(d.contextTransformationKinds) ? d.contextTransformationKinds as string[] : []), observation.kind])];
+    for (const [key, field] of [["injected", "locallyInjectedItemCounts"], ["dropped", "droppedItemCounts"], ["truncated", "truncatedItemCounts"]] as const) {
+      const input = observation[key];
+      if (!input) continue;
+      const counts = (d[field] ?? {}) as Record<string, number>;
+      for (const name of transformationCountKeys) {
+        const count = input[name];
+        if (typeof count === "number" && Number.isSafeInteger(count) && count > 0) {
+          counts[name] = Math.min(Number.MAX_SAFE_INTEGER, (counts[name] ?? 0) + count);
+        }
+      }
+      if (Object.keys(counts).length) {
+        d[field] = counts;
+        d.fieldAvailability[field] = { status: "observed", source };
+      }
+    }
+    d.fieldAvailability.contextTransformationKinds = { status: "observed", source };
+    clean(ctx);
+  });
+}
+
+/** A completed compact output is one logical compaction, even if observed by both bridge and relay. */
+export function recordCompletedCompaction(ctx: RequestLogContext, source: "proxy" | "upstream" = "proxy"): void {
+  captureSafely(() => {
+    if (completedCompactions.has(ctx)) return;
+    completedCompactions.add(ctx);
+    const d = diagnostics(ctx);
+    d.compactionOccurred = true;
+    d.compactionCount = 1;
+    d.lastCompactionAt = Date.now();
+    recordDiagnosticEvent(d, { type: "context.compacted", at: d.lastCompactionAt as number, source });
+    for (const field of ["compactionOccurred", "compactionCount", "lastCompactionAt"]) {
+      d.fieldAvailability[field] = { status: "observed", source };
+    }
+    clean(ctx);
+  });
+}
 
 /** Diagnostics never share exception handling with dispatch/admission. */
 export function captureSafely(action: () => void): void { try { action(); } catch { /* optional observation */ } }
@@ -67,9 +123,11 @@ export function recordReconstructedContext(ctx: RequestLogContext, body: unknown
     const d = diagnostics(ctx);
     d.reconstructedInputCount = Array.isArray(input) ? input.length : typeof input === "string" ? 1 : 0;
     d.replayedItemCount = replayedItems;
+    d.fieldAvailability.reconstructedInputCount = { status: "observed", source: "proxy" };
+    d.fieldAvailability.replayedItemCount = { status: "observed", source: "proxy" };
     if (replayedItems > 0) {
       d.continuationMode = "local_replay";
-      d.contextTransformationKinds = ["previous_response_replay"];
+      recordContextTransformation(ctx, { kind: "previous_response_replay" });
     }
     clean(ctx);
   });
@@ -78,16 +136,28 @@ export function recordReconstructedContext(ctx: RequestLogContext, body: unknown
 export function recordContextEstimate(ctx: RequestLogContext, contextWindow?: number): void {
   captureSafely(() => {
     const d = diagnostics(ctx);
-    if (contextWindow !== undefined) d.contextWindowTokens = contextWindow;
-    else d.fieldAvailability.contextWindowTokens = { status: "not_observed", source: "adapter" };
+    const knownWindow = typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0;
+    delete d.contextUsageRatioEstimate;
+    if (knownWindow) {
+      d.contextWindowTokens = contextWindow;
+      d.fieldAvailability.contextWindowTokens = { status: "observed", source: "adapter" };
+    } else {
+      delete d.contextWindowTokens;
+      d.fieldAvailability.contextWindowTokens = { status: "not_observed", source: "adapter" };
+    }
     const estimate = ctx.usageLogInputTokens ?? ctx.activeAttempt?.inputTokenEstimate;
     if (typeof estimate === "number" && Number.isFinite(estimate) && estimate >= 0) {
       d.tokenEstimateMethod = "adapter_input_estimate";
-      if (contextWindow && contextWindow > 0) {
+      d.fieldAvailability.tokenEstimateMethod = { status: "observed", source: "adapter" };
+      if (knownWindow) {
         d.contextUsageRatioEstimate = estimate / contextWindow;
         d.fieldAvailability.contextUsageRatioEstimate = { status: "derived", source: "derived" };
       }
+    } else {
+      delete d.tokenEstimateMethod;
+      d.fieldAvailability.tokenEstimateMethod = { status: "not_observed", source: "adapter" };
     }
+    if (d.contextUsageRatioEstimate === undefined) d.fieldAvailability.contextUsageRatioEstimate = { status: "not_observed", source: "derived" };
     clean(ctx);
   });
 }
@@ -355,6 +425,14 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
       if (state.syntheticTypes.size < 64 && type.length <= 64) state.syntheticTypes.add(type);
     }
     const response = p.response && typeof p.response === "object" ? p.response : p;
+    // A caller trigger is a request, never evidence that compaction completed.
+    // Observe only the completed output contract, with bounded inspection and no payload retention.
+    if ((type === "response.completed" && Array.isArray(response.output)
+      && response.output.slice(0, 1024).some((item: unknown) => !!item && typeof item === "object"
+        && (item as { type?: unknown }).type === "compaction"))
+      || (type === "response.output_item.done" && p.item?.type === "compaction" && p.item.status === "completed")) {
+      recordCompletedCompaction(ctx, synthetic ? "proxy" : "upstream");
+    }
     const responseId = synthetic ? undefined : identifier(d, "upstreamResponseId", response.id ?? p.response_id, "upstream", true);
     if (responseId && state?.responseId && state.responseId !== responseId) d.responseIdMismatch = true;
     if (responseId && state) state.responseId ??= responseId;

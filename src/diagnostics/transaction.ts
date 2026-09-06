@@ -62,7 +62,8 @@ export type DiagnosticEventTypeV1 =
   | "downstream.terminal.sent"
   | "downstream.closed"
   | "request.finalized"
-  | "request.persisted";
+  | "request.persisted"
+  | "context.compacted";
 
 export interface DiagnosticEventV1 {
   eventSequence: number;
@@ -189,6 +190,7 @@ const TRANSPORTS = new Set<DiagnosticTransportV1>(["http", "websocket", "mixed"]
 const PROTOCOLS = new Set<DiagnosticProtocolV1>(["responses", "chat", "messages"]);
 const EVENT_SOURCES = new Set<DiagnosticEventSourceV1>(["client", "proxy", "transport", "upstream", "downstream"]);
 const EVENT_TYPES = new Set<DiagnosticEventTypeV1>([
+  "context.compacted",
   "request.received",
   "request.admitted",
   "route.selected",

@@ -34,6 +34,53 @@ import {
   type PersistedUsageEntry,
 } from "../../src/usage/log";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { recordContextTransformation, recordCompletedCompaction, recordReconstructedContext, recordContextEstimate,
+  recordProtocolEvent, recordRequestShape } from "../../src/server/transaction-capture";
+import type { RequestLogContext } from "../../src/server/request-log";
+
+test("context observations preserve operation provenance and reject arbitrary counter labels", () => {
+  const ctx = {} as RequestLogContext;
+  recordContextTransformation(ctx, { kind: "developer_guidance", injected: { developer: 1, ...{ secret_prompt: 42 } } });
+  recordReconstructedContext(ctx, { input: [{ role: "user" }] }, 3);
+  recordContextTransformation(ctx, { kind: "media_tool_bridge", dropped: { tool_definition: 2 }, injected: { tool_definition: 1 } });
+  recordContextTransformation(ctx, { kind: "raw_prompt_secret", injected: { message: 3 } });
+  expect(ctx.diagnostics?.contextTransformationKinds).toEqual(["developer_guidance", "previous_response_replay", "media_tool_bridge"]);
+  expect(ctx.diagnostics?.locallyInjectedItemCounts).toEqual({ developer: 1, tool_definition: 1 });
+  expect(ctx.diagnostics?.droppedItemCounts).toEqual({ tool_definition: 2 });
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("secret");
+  expect(ctx.diagnostics?.reconstructedInputCount).toBe(1);
+  expect(ctx.diagnostics?.replayedItemCount).toBe(3);
+});
+
+test("compaction telemetry requires completed output and deduplicates bridge and relay", () => {
+  const ctx = {} as RequestLogContext;
+  recordRequestShape(ctx, { input: [{ type: "compaction_trigger" }] });
+  expect(ctx.diagnostics?.compactionOccurred).toBeUndefined();
+  recordProtocolEvent(ctx, { type: "response.failed", response: { output: [{ type: "compaction" }] } });
+  expect(ctx.diagnostics?.compactionOccurred).toBeUndefined();
+  const before = Date.now();
+  recordProtocolEvent(ctx, { type: "response.completed", response: { output: [{ type: "compaction", encrypted_content: "never-retain-this" }] } });
+  recordCompletedCompaction(ctx, "upstream");
+  expect(ctx.diagnostics?.compactionOccurred).toBe(true);
+  expect(ctx.diagnostics?.compactionCount).toBe(1);
+  expect(Number(ctx.diagnostics?.lastCompactionAt)).toBeGreaterThanOrEqual(before);
+  expect(ctx.diagnostics?.events.filter(event => event.type === "context.compacted")).toHaveLength(1);
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("never-retain-this");
+});
+
+test("context estimate provenance clears unavailable window and does not invent billing", () => {
+  const ctx = { usageLogInputTokens: 50 } as RequestLogContext;
+  recordContextEstimate(ctx, 100);
+  expect(ctx.diagnostics?.contextUsageRatioEstimate).toBe(0.5);
+  expect(ctx.diagnostics?.fieldAvailability.contextWindowTokens).toEqual({ status: "observed", source: "adapter" });
+  recordContextEstimate(ctx);
+  expect(ctx.diagnostics?.contextWindowTokens).toBeUndefined();
+  expect(ctx.diagnostics?.contextUsageRatioEstimate).toBeUndefined();
+  delete ctx.usageLogInputTokens;
+  recordContextEstimate(ctx, 100);
+  expect(ctx.diagnostics?.tokenEstimateMethod).toBeUndefined();
+  expect(ctx.diagnostics?.billedUsageSource).toBeUndefined();
+});
 
 let home = "";
 let previousHome: string | undefined;
