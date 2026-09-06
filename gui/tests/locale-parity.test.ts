@@ -2,6 +2,20 @@ import { expect, test } from "bun:test";
 
 const LOCALES = ["en", "de", "fr", "ja", "ko", "ru", "tr", "zh", "zh-TW"] as const;
 
+test("every locale translates diagnostics disclosure, states and export feedback", async () => {
+  const english = await readDict("en");
+  const keys = [...english.keys()].filter(key => key.startsWith("logs.diagnostics."));
+  expect(keys.length).toBeGreaterThan(0);
+  for (const locale of LOCALES.filter(locale => locale !== "en")) {
+    const dict = await readDict(locale);
+    for (const key of keys) {
+      expect(dict.get(key)?.trim().length, `${locale}:${key}`).toBeGreaterThan(0);
+      // French “Non” differs from “No”; all diagnostics copy here has a local translation.
+      expect(dict.get(key), `${locale}:${key}`).not.toBe(english.get(key));
+    }
+  }
+});
+
 async function readDict(locale: string): Promise<Map<string, string>> {
   const src = await Bun.file(new URL(`../src/i18n/${locale}.ts`, import.meta.url)).text();
   const out = new Map<string, string>();

@@ -1,4 +1,4 @@
-import { transportObserver, recordRequestShape, recordSyntheticTerminal } from "../transaction-capture";
+import { transportObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext } from "../transaction-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -45,6 +45,7 @@ import {
   markBodyNonPersistable,
   previousResponseProviderState,
   previousResponseReplayFailure,
+  previousResponseReplayPrefixLength,
   previousResponseScopeMismatch,
   rememberResponseState,
 } from "../../responses/state";
@@ -2185,6 +2186,7 @@ async function applyFinalRouteRequestNormalization(args: {
   logCtx.provider = route.providerName;
   logCtx.providerAdapter = route.provider.adapter;
   logCtx.routeDecision = route.routeDecision;
+  recordSelectedRoute(logCtx);
   if (route.routeReason === "model-alias" || route.modelId !== responseModelId && responseModelId.includes("/")) logCtx.requestedAlias = responseModelId;
 
   if (responsesUpstreamStreaming === false && route.provider.adapter === "openai-responses") {
@@ -2338,6 +2340,7 @@ export async function handleComboResponses(
   // imageInput is disabled (and so targets see the full replayed input).
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
   const body = expandPreviousResponseInput(rawBody, inboundClientThreadId);
+  recordReconstructedContext(logCtx, body, previousResponseReplayPrefixLength(body));
   const scopeMismatch = previousResponseScopeMismatch(body);
   if (scopeMismatch) {
     console.warn("[opencodex] dropped a previous_response_id with a mismatched client task scope; continuing fresh");
@@ -2941,6 +2944,7 @@ async function handleResponsesInner(
   const previousResponseInputExpanded = options.comboReplaySnapshot?.previousResponseInputExpanded
     ?? (body !== originalBody
       && typeof (body as { previous_response_id?: unknown }).previous_response_id === "string");
+  recordReconstructedContext(logCtx, body, previousResponseReplayPrefixLength(body));
 
   // Spawn-message compatibility (both directions): agent_message task payloads ride in
   // encrypted_content slots as plaintext. Rewrite them to input_text on the RAW body BEFORE
@@ -3112,6 +3116,7 @@ async function handleResponsesInner(
     if (parsed._compactionRequest === true) parsed._cursorIsolateConversation = true;
     route = shadowRoute ?? resolveRoute(parsed.modelId);
     logCtx.routeDecision = route.routeDecision;
+    recordSelectedRoute(logCtx);
   } catch (err) {
     if (err instanceof NoAvailableComboTargetsError) {
       return comboUnavailable(err.comboId);
@@ -3753,6 +3758,7 @@ async function handleResponsesInner(
     logCtx.conversationId = normalizeLogConversationId(parsed._cursorConversationId);
   }
   logCtx.providerAdapter = adapter.name;
+  recordSelectedRoute(logCtx);
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
   if (!options.comboAttempt && !logCtx.activeAttempt) {

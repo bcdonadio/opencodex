@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -68,6 +68,33 @@ function baseAttempt(overrides: Partial<PersistedUsageAttempt> = {}): PersistedU
     ...overrides,
   };
 }
+
+test("capture acceptance: append failure remains live, bounded and nonfatal", () => {
+  mkdirSync(usageLogPath(), { recursive: true });
+  expect(() => addRequestLog({ requestId: "append-failure", timestamp: Date.now(), model: "test", provider: "test",
+    status: 200, durationMs: 1, usageStatus: "unreported",
+    diagnostics: createTransactionDiagnostics({ requestId: "append-failure", receivedAt: Date.now() }),
+  })).not.toThrow();
+  const row = getRequestLogEntries()[0]!;
+  expect(row.diagnostics?.recordPersisted).toBe(false);
+  expect(row.diagnostics?.persistenceErrorCode).toBe("append_failed");
+  expect(row.diagnostics?.persistedAt).toBeUndefined();
+  expect(JSON.stringify(row)).not.toContain(home);
+});
+
+test("capture acceptance: live append success does not pretend disk knows write completion", () => {
+  addRequestLog({ requestId: "append-success", timestamp: Date.now(), model: "test", provider: "test",
+    status: 200, durationMs: 1, usageStatus: "unreported",
+    diagnostics: createTransactionDiagnostics({ requestId: "append-success", receivedAt: Date.now() }),
+  });
+  const row = getRequestLogEntries()[0]!;
+  expect(row.diagnostics?.recordPersisted).toBe(true);
+  expect(row.diagnostics?.persistedAt).toBeNumber();
+  expect(row.diagnostics?.persistenceLagMs).toBeUndefined(); // No finalized transition on direct insertion.
+  const durable = readUsageEntries()[0]!;
+  expect(durable.diagnostics?.recordPersisted).toBeUndefined();
+  expect(durable.diagnostics?.fieldAvailability.recordPersisted?.status).toBe("not_observed");
+});
 
 describe("transaction diagnostics schema", () => {
   test("derives response-created correlation through the v1 lifecycle builder", () => {
@@ -553,7 +580,10 @@ describe("transaction diagnostics persistence", () => {
     expect(inMemory.upstreamError).toContain("[REDACTED]");
     expect(Buffer.byteLength(inMemory.upstreamError!, "utf8"))
       .toBeLessThanOrEqual(MAX_DIAGNOSTIC_ERROR_BYTES);
-    expect(inMemory.diagnostics).toEqual(persisted.diagnostics);
+    expect(inMemory.diagnostics?.clientRequestId).toEqual(persisted.diagnostics?.clientRequestId);
+    expect(inMemory.diagnostics?.fieldAvailability.clientRequestId).toEqual(persisted.diagnostics?.fieldAvailability.clientRequestId);
+    expect(inMemory.diagnostics?.recordPersisted).toBe(true);
+    expect(persisted.diagnostics?.recordPersisted).toBeUndefined();
     expect(inMemory.diagnostics?.clientRequestId).toBeUndefined();
     expect(inMemory.diagnostics?.fieldAvailability.clientRequestId).toEqual({
       status: "redacted",
