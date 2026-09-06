@@ -386,7 +386,14 @@ export function addRequestLog(entry: RequestLogEntry) {
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
   const upstreamError = sanitizeDiagnosticError(entry.upstreamError);
   const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
-  const diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
+  let diagnostics: TransactionDiagnosticsV1 | undefined;
+  try {
+    diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
+  } catch {
+    // Diagnostics are optional observation only. A hostile getter, corrupt row, or
+    // normalization defect must not prevent the canonical request log from completing.
+    diagnostics = undefined;
+  }
   const retained: RequestLogEntry = { ...entry };
   if (shadowCallRewrittenFrom) retained.shadowCallRewrittenFrom = shadowCallRewrittenFrom;
   else delete retained.shadowCallRewrittenFrom;

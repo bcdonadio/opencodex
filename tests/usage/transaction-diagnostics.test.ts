@@ -10,6 +10,7 @@ import {
   beginDiagnosticSend,
   createTransactionDiagnostics,
   finishDiagnosticSend,
+  normalizeDiagnosticSends,
   normalizeTransactionDiagnostics,
   recordDiagnosticEvent,
   sanitizeDiagnosticIdentifier,
@@ -198,6 +199,177 @@ describe("transaction diagnostics schema", () => {
     });
     expect(normalizeTransactionDiagnostics({ ...valid, schemaVersion: 2 } as never)).toBeUndefined();
   });
+
+  test("marks redacted and truncated response IDs unavailable for direct correlation", () => {
+    const redacted = createTransactionDiagnostics({ requestId: "ocx-redacted-id", receivedAt: 1_000 });
+    recordDiagnosticEvent(redacted, {
+      type: "response.created",
+      at: 1_001,
+      source: "upstream",
+      responseId: "sk-abcdefghijklmnopqrstuvwxyz",
+    });
+    expect(redacted.upstreamResponseId).toBeUndefined();
+    expect(redacted.events[0]?.responseId).toBeUndefined();
+    expect(redacted.fieldAvailability.upstreamResponseId).toEqual({
+      status: "redacted",
+      source: "upstream",
+    });
+    expect(redacted.correlationConfidence).toBe("unknown");
+
+    const truncated = createTransactionDiagnostics({ requestId: "ocx-truncated-id", receivedAt: 2_000 });
+    recordDiagnosticEvent(truncated, {
+      type: "response.created",
+      at: 2_001,
+      source: "upstream",
+      responseId: `resp_${"😀".repeat(100)}`,
+    });
+    expect(truncated.upstreamResponseId).toBeUndefined();
+    expect(truncated.events[0]?.responseId).toBeUndefined();
+    expect(truncated.fieldAvailability.upstreamResponseId).toEqual({
+      status: "truncated",
+      source: "upstream",
+    });
+    expect(truncated.correlationConfidence).toBe("unknown");
+    expect(truncated.captureTruncated).toBe(true);
+  });
+
+  test("reports availability-map truncation within the map and envelope", () => {
+    const diagnostics = createTransactionDiagnostics({ requestId: "ocx-availability-cap", receivedAt: 1_000 });
+    const fieldNames = [
+      "parentRequestId", "retryOfRequestId", "replayOfRequestId", "codexThreadId", "codexTurnId",
+      "codexSessionId", "rootThreadId", "rootTurnId", "parentThreadId", "agentId", "parentAgentId",
+      "clientRequestId", "clientResponseId", "upstreamResponseId", "previousResponseId",
+      "originalPreviousResponseId", "forwardedPreviousResponseId", "upstreamRequestId",
+      "upstreamConversationId", "upstreamSessionId", "upstreamEventId", "policyEventId", "traceId",
+      "spanId", "parentSpanId", "connectionId", "upstreamConnectionId", "proxyCommit", "proxyBuildId",
+      "proxyInstanceId", "configRevision", "routeConfigRevision", "modelCatalogRevision", "routeDecisionId",
+      "selectedCandidate", "settingsRevision", "requestSettingsRevision", "modelSwitchEffectiveFromRequestId",
+      "lastKnownUsageResponseId", "agentRole", "clientProduct", "clientVersion", "codexCoreVersion",
+      "desktopVersion", "originator", "upstreamProtocol", "adapterName", "protocolVersion", "proxyVersion",
+      "runtimeName", "runtimeVersion", "osPlatform", "architecture", "osVersion", "adapterVersion",
+      "diagnosticMode", "forwardedModel", "responseModel", "responseEffort", "routeKind", "fallbackReason",
+      "rewriteReason", "authMode", "accountPseudonym", "accountSelectionSource", "accountAffinity",
+      "accountPoolSelectionReason", "subscriptionPlan",
+    ];
+    diagnostics.fieldAvailability = Object.fromEntries(fieldNames.map(name => [
+      name,
+      { status: "not_observed", source: "proxy" },
+    ]));
+
+    const normalized = normalizeTransactionDiagnostics(diagnostics)!;
+    expect(Object.keys(normalized.fieldAvailability)).toHaveLength(64);
+    expect(normalized.fieldAvailability.fieldAvailability).toEqual({
+      status: "truncated",
+      source: "persistence",
+    });
+    expect(normalized.captureTruncated).toBe(true);
+  });
+
+  test("rejects prohibited URLs, paths, environment fragments, accounts, and reasoning text", () => {
+    const diagnostics = createTransactionDiagnostics({ requestId: "ocx-prohibited", receivedAt: 1_000 });
+    Object.assign(diagnostics, {
+      upstreamHostname: "https://provider.example/v1?token=secret",
+      accountPseudonym: "person@example.com",
+      subscriptionPlan: "HOME=/home/person",
+      errorParam: "/home/person/private.json",
+      cancellationReason: "analysis: hidden chain of thought",
+      errorMessage: "failed reading /home/person/private.json",
+    });
+
+    const normalized = normalizeTransactionDiagnostics(diagnostics)!;
+    for (const field of [
+      "upstreamHostname",
+      "accountPseudonym",
+      "subscriptionPlan",
+      "errorParam",
+      "cancellationReason",
+      "errorMessage",
+    ]) expect(normalized).not.toHaveProperty(field);
+
+    const attempt = baseAttempt();
+    const send = beginDiagnosticSend(attempt, {
+      startedAt: 1_001,
+      upstreamTransport: "http",
+      accountLogLabel: "person@example.com",
+      model: "https://provider.example/model",
+      adapter: "/home/person/adapter.ts",
+      requestedEffort: "analysis: reveal private reasoning",
+      effectiveEffort: "PATH=/usr/local/bin",
+      serviceTier: "project/person-secret",
+      recoveryReason: "chain of thought says retry",
+    });
+    expect(send).toEqual(expect.objectContaining({
+      sendId: expect.stringMatching(/^ocx-send-/),
+      sendOrdinal: 1,
+      startedAt: 1_001,
+      upstreamTransport: "http",
+    }));
+    for (const field of [
+      "accountLogLabel",
+      "model",
+      "adapter",
+      "requestedEffort",
+      "effectiveEffort",
+      "serviceTier",
+      "recoveryReason",
+    ]) expect(send).not.toHaveProperty(field);
+  });
+
+  test("normalizes only bounded event and send prefixes", () => {
+    const diagnostics = createTransactionDiagnostics({ requestId: "ocx-work-cap", receivedAt: 1_000 });
+    const event = (eventSequence: number) => ({
+      eventSequence,
+      type: "response.output_item.added",
+      at: 1_000 + eventSequence,
+      source: "upstream",
+    });
+    const events = new Array(1_000_000);
+    for (let index = 0; index <= MAX_DIAGNOSTIC_EVENTS; index += 1) events[index] = event(index + 1);
+    Object.defineProperty(events, MAX_DIAGNOSTIC_EVENTS + 1, {
+      get: () => { throw new Error("event traversal escaped bounded prefix"); },
+    });
+    diagnostics.events = events;
+    expect(() => normalizeTransactionDiagnostics(diagnostics)).not.toThrow();
+
+    const sends = new Array(1_000_000);
+    for (let index = 0; index <= MAX_DIAGNOSTIC_SENDS; index += 1) {
+      sends[index] = { sendId: `ocx-send-${index}`, sendOrdinal: index + 1, startedAt: index + 1 };
+    }
+    Object.defineProperty(sends, MAX_DIAGNOSTIC_SENDS + 1, {
+      get: () => { throw new Error("send traversal escaped bounded prefix"); },
+    });
+    expect(() => normalizeDiagnosticSends(sends)).not.toThrow();
+  });
+
+  test("keeps the previous terminal send until a capped in-flight send finishes", () => {
+    const attempt = baseAttempt();
+    for (let index = 0; index < MAX_DIAGNOSTIC_SENDS; index += 1) {
+      const retained = beginDiagnosticSend(attempt, { startedAt: 1_000 + index });
+      finishDiagnosticSend(retained, { endedAt: 2_000 + index, status: 200 });
+    }
+    const priorTerminalId = attempt.sends?.at(-1)?.sendId;
+
+    const inFlight = beginDiagnosticSend(attempt, { startedAt: 3_000 });
+    expect(attempt.sends?.at(-1)?.sendId).toBe(priorTerminalId);
+    expect(attempt.sends?.some(send => send.sendId === inFlight.sendId)).toBe(false);
+
+    finishDiagnosticSend(inFlight, { endedAt: 4_000, status: 503 });
+    expect(attempt.sends?.at(-1)).toMatchObject({ sendId: inFlight.sendId, status: 503 });
+  });
+
+  test("never duplicates a retained send when overflow follows an earlier terminal", () => {
+    const sends = Array.from({ length: MAX_DIAGNOSTIC_SENDS + 1 }, (_, index) => ({
+      sendId: `ocx-send-${index + 1}`,
+      sendOrdinal: index + 1,
+      startedAt: 1_000 + index,
+      ...(index === 1 ? { endedAt: 2_000, status: 200 } : {}),
+    }));
+
+    const normalized = normalizeDiagnosticSends(sends)!;
+    expect(normalized).toHaveLength(MAX_DIAGNOSTIC_SENDS);
+    expect(new Set(normalized.map(send => send.sendId)).size).toBe(normalized.length);
+    expect(normalized.some(send => send.sendId === "ocx-send-2")).toBe(true);
+  });
 });
 
 describe("transaction diagnostics persistence", () => {
@@ -336,9 +508,11 @@ describe("transaction diagnostics persistence", () => {
     expect(Buffer.byteLength(inMemory.upstreamError!, "utf8"))
       .toBeLessThanOrEqual(MAX_DIAGNOSTIC_ERROR_BYTES);
     expect(inMemory.diagnostics).toEqual(persisted.diagnostics);
-    expect(inMemory.diagnostics?.clientRequestId).not.toContain("\n");
-    expect(Buffer.byteLength(inMemory.diagnostics?.clientRequestId as string, "utf8"))
-      .toBeLessThanOrEqual(MAX_DIAGNOSTIC_ID_BYTES);
+    expect(inMemory.diagnostics?.clientRequestId).toBeUndefined();
+    expect(inMemory.diagnostics?.fieldAvailability.clientRequestId).toEqual({
+      status: "redacted",
+      source: "client",
+    });
     expect(inMemory.diagnostics).not.toHaveProperty("inboundTransport");
     expect(inMemory.diagnostics).not.toHaveProperty("unknownInjectedField");
   });
@@ -357,5 +531,40 @@ describe("transaction diagnostics persistence", () => {
 
     expect(row?.requestId).toBe("ocx-malformed-diagnostics");
     expect(row?.diagnostics).toBeUndefined();
+  });
+
+  test("addRequestLog cannot be interrupted by a throwing diagnostics object", () => {
+    const throwingDiagnostics = new Proxy({}, {
+      get: () => { throw new Error("hostile diagnostics getter"); },
+    });
+
+    expect(() => addRequestLog({
+      requestId: "ocx-throwing-diagnostics",
+      timestamp: 1,
+      provider: "openai",
+      model: "gpt-test",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "reported",
+      diagnostics: throwingDiagnostics as TransactionDiagnosticsV1,
+    })).not.toThrow();
+    expect(getRequestLogEntries()[0]?.diagnostics).toBeUndefined();
+    expect(readUsageEntries()[0]?.requestId).toBe("ocx-throwing-diagnostics");
+  });
+
+  test("direct upstream errors with prohibited local context are not persisted", () => {
+    addRequestLog({
+      requestId: "ocx-prohibited-error",
+      timestamp: 1,
+      provider: "openai",
+      model: "gpt-test",
+      status: 502,
+      durationMs: 1,
+      usageStatus: "unreported",
+      upstreamError: "failed at /home/person/private.json with person@example.com",
+    });
+
+    expect(getRequestLogEntries()[0]?.upstreamError).toBeUndefined();
+    expect(readUsageEntries()[0]?.upstreamError).toBeUndefined();
   });
 });
