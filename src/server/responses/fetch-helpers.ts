@@ -70,7 +70,7 @@ export type TransportObservation =
   | { kind: "send"; transport: "http" | "websocket"; body?: unknown }
   | { kind: "response"; transport: "http" | "websocket"; response: Response }
   | { kind: "event"; payload: unknown; bytes: number }
-  | { kind: "connect" | "open" | "close" | "mismatch"; connectionId?: string; reused?: boolean; code?: number; sequence?: number; generation?: number; ageMs?: number };
+  | { kind: "connect" | "open" | "connection" | "close" | "mismatch"; connectionId?: string; reused?: boolean; code?: number; sequence?: number; generation?: number; ageMs?: number };
 
 export function notifyTransport(observer: ProviderFetchOptions["observeTransport"], event: TransportObservation): void {
   try { observer?.(event); } catch { /* diagnostics cannot alter dispatch or fallback */ }

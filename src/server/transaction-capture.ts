@@ -533,6 +533,16 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
     else if (event.kind === "event") recordProtocolEvent(ctx, event.payload, event.bytes, true);
     else {
       const d = diagnostics(ctx);
+      const previousConnectionId = d.upstreamConnectionId;
+      if (event.kind === "connect") {
+        // Count replacements observed within this transaction, never infer a
+        // reconnect from unrelated process-wide connection generations.
+        d.reconnectCount = Number(d.reconnectCount ?? 0)
+          + (previousConnectionId && previousConnectionId !== event.connectionId ? 1 : 0);
+        for (const field of ["websocketHandshakeStatus", "upstreamConnectedAt", "handshakeCompletedAt", "connectMs", "handshakeMs",
+          "connectionReused", "upstreamRequestSequenceOnConnection", "connectionAgeMs", "websocketCloseCode", "closedBy"]) delete d[field];
+        d.fieldAvailability.websocketHandshakeStatus = { status: "not_observed", source: "transport" };
+      }
       if (event.connectionId) d.upstreamConnectionId = event.connectionId;
       if (event.reused !== undefined) d.connectionReused = event.reused;
       if (event.sequence !== undefined) d.upstreamRequestSequenceOnConnection = event.sequence;
@@ -545,11 +555,24 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
         recordDiagnosticEvent(d, { type: "upstream.connect.started", at: Date.now(), source: "transport" });
       }
       if (event.kind === "open") {
-        d.websocketHandshakeStatus = 101; d.upstreamConnectedAt = Date.now(); d.handshakeCompletedAt = Date.now();
-        recordDiagnosticEvent(d, { type: "upstream.connected", at: Date.now(), source: "transport" });
-        recordDiagnosticEvent(d, { type: "upstream.handshake.completed", at: Date.now(), source: "transport" });
-        derived(d, "connectMs", performance.now(), clocks.get(d)!.connect);
-        derived(d, "handshakeMs", performance.now(), clocks.get(d)!.connect);
+        // A retained socket proves its original successful upgrade, but does
+        // not perform a second handshake for this transaction.
+        d.websocketHandshakeStatus = 101;
+        d.fieldAvailability.websocketHandshakeStatus = { status: "observed", source: "transport" };
+        if (!event.reused) {
+          d.upstreamConnectedAt = Date.now(); d.handshakeCompletedAt = Date.now();
+          recordDiagnosticEvent(d, { type: "upstream.connected", at: Date.now(), source: "transport" });
+          recordDiagnosticEvent(d, { type: "upstream.handshake.completed", at: Date.now(), source: "transport" });
+          derived(d, "connectMs", performance.now(), clocks.get(d)!.connect);
+          derived(d, "handshakeMs", performance.now(), clocks.get(d)!.connect);
+        }
+      }
+      if (event.kind === "connection") {
+        const send = activeSend(ctx);
+        if (send?.upstreamTransport === "websocket") {
+          send.websocketHandshakeStatus = 101;
+          send.connectionReused = event.reused;
+        }
       }
       if (event.kind === "close") { d.websocketCloseCode = event.code; d.closedBy = "upstream"; recordDiagnosticEvent(d, { type: "upstream.closed", at: Date.now(), source: "transport" }); }
       clean(ctx);

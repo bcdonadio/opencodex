@@ -86,7 +86,47 @@ test("diagnostics retain upstream connection sequence and individual sends acros
   expect(contexts.map(ctx => ctx.activeAttempt?.sends?.length)).toEqual([1, 1, 1]);
   expect(contexts.every(ctx => ctx.diagnostics?.httpStatus === undefined)).toBe(true);
   expect(contexts.every(ctx => ctx.diagnostics?.websocketHandshakeStatus === 101)).toBe(true);
+  expect(contexts.map(ctx => ctx.activeAttempt?.sends?.[0]?.connectionReused)).toEqual([false, true, false]);
+  expect(contexts.every(ctx => ctx.activeAttempt?.sends?.[0]?.websocketHandshakeStatus === 101)).toBe(true);
+  expect(contexts[0]!.diagnostics?.handshakeMs).toBeGreaterThanOrEqual(0);
+  expect(contexts[0]!.diagnostics?.upstreamConnectStartedAt).toBeNumber();
+  expect(contexts[1]!.diagnostics?.handshakeMs).toBeUndefined();
+  expect(contexts[1]!.diagnostics?.upstreamConnectedAt).toBeUndefined();
+  expect(contexts[1]!.diagnostics?.handshakeCompletedAt).toBeUndefined();
+  expect(contexts[1]!.diagnostics?.events.some(event => event.type === "upstream.handshake.completed")).toBe(false);
+  expect(contexts[0]!.diagnostics?.connectionGeneration).toBe(contexts[1]!.diagnostics?.connectionGeneration);
+  expect(contexts[2]!.diagnostics?.connectionGeneration).not.toBe(contexts[1]!.diagnostics?.connectionGeneration);
+  expect(contexts.every(ctx => Number(ctx.diagnostics?.connectionAgeMs) >= 0)).toBe(true);
   expect(contexts.map(ctx => ctx.diagnostics?.upstreamResponseId)).toEqual(["response-1", "response-2", "response-3"]);
+});
+
+test("connection replacements count only within the observed transaction and never borrow HTTP status", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test" };
+  const observe = transportObserver(ctx);
+  observe({ kind: "connect", connectionId: "ws_first", generation: 500 });
+  observe({ kind: "open", connectionId: "ws_first", reused: false });
+  expect(ctx.diagnostics?.reconnectCount).toBe(0);
+  observe({ kind: "connect", connectionId: "ws_second", generation: 900 });
+  expect(ctx.diagnostics?.reconnectCount).toBe(1);
+  expect(ctx.diagnostics?.websocketHandshakeStatus).toBeUndefined();
+  expect(ctx.diagnostics?.handshakeMs).toBeUndefined();
+  observe({ kind: "send", transport: "http", body: "{}" });
+  observe({ kind: "response", transport: "http", response: new Response(null, { status: 403 }) });
+  expect(ctx.diagnostics?.httpStatus).toBe(403);
+  expect(ctx.diagnostics?.websocketHandshakeStatus).toBeUndefined();
+  expect(ctx.diagnostics?.fieldAvailability.websocketHandshakeStatus).toEqual({ status: "not_observed", source: "transport" });
+  expect(ctx.activeAttempt?.sends?.[0]?.websocketHandshakeStatus).toBeUndefined();
+  expect(ctx.activeAttempt?.sends?.[0]?.connectionReused).toBeUndefined();
+});
+
+test("throwing native connection diagnostics cannot change dispatch or reuse", async () => {
+  for (let i = 0; i < 2; i++) {
+    const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", undefined, undefined,
+      () => { throw new Error("diagnostic failure"); });
+    expect(await response.text()).toContain("response.completed");
+  }
+  expect(Socket.all).toHaveLength(1);
+  expect(Socket.all[0]!.frames).toHaveLength(2);
 });
 function bodyWith(fields: Record<string, unknown>) {
   const options = init();
