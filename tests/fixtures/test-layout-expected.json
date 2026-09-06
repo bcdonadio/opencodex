@@ -613,6 +613,7 @@
   "loop.test.ts": "images",
   "loopback-listener-admission.test.ts": "server",
   "loopback-listener-integration.test.ts": "server",
+  "macos-serial-lanes.test.ts": "ci-workflows",
   "management-api-logs-metrics.test.ts": "server",
   "main-account-hard-lock-auth.test.ts": "codex-integration",
   "main-account-hard-lock-policy.test.ts": "codex-integration",

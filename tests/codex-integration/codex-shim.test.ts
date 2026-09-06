@@ -106,7 +106,8 @@ function withInstalledShim(run: (paths: {
       writeFileSync(wrapper, process.platform === "win32" ? `real ${wrapper}\n` : "#!/bin/sh\necho real\n", "utf8");
       if (process.platform !== "win32") chmodSync(wrapper, 0o755);
     }
-    expect(installCodexShim().installed).toBe(true);
+    const installed = installCodexShim();
+    expect(installed.installed, installed.message).toBe(true);
     const statePath = join(home, "codex-shim.json");
     const state = JSON.parse(readFileSync(statePath, "utf8")) as { wrappers: Array<{ wrapperPath: string; backupPath: string }> };
     run({
