@@ -25,6 +25,7 @@ import {
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
   isValidReasoningWireValue,
+  normalizeUsageAttempts,
   readRecentUsageEntries,
   usageForFinalLog,
   usageStatusForFinalLog,
@@ -48,6 +49,7 @@ import { inferCursorContextWindow } from "../adapters/cursor/discovery";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { modelRecordValue } from "../reasoning-effort";
 import {
+  clearDiagnosticPersistenceOutcome,
   createDiagnosticAttemptId,
   normalizeTransactionDiagnostics,
   sanitizeUpstreamDisplayError,
@@ -411,6 +413,15 @@ export function addRequestLog(entry: RequestLogEntry) {
     diagnostics = undefined;
   }
   const retained: RequestLogEntry = { ...entry };
+  if (entry.attempts !== undefined) {
+    try {
+      // The finalized ring row owns a snapshot, not handles still writable by
+      // late transport callbacks after usage.jsonl has already been appended.
+      retained.attempts = normalizeUsageAttempts(entry.attempts);
+    } catch {
+      delete retained.attempts;
+    }
+  }
   if (shadowCallRewrittenFrom) retained.shadowCallRewrittenFrom = shadowCallRewrittenFrom;
   else delete retained.shadowCallRewrittenFrom;
   if (upstreamError) retained.upstreamError = upstreamError;
@@ -425,9 +436,7 @@ export function addRequestLog(entry: RequestLogEntry) {
   entry = retained;
   captureSafely(() => {
     if (entry.diagnostics) {
-      entry.diagnostics.logSink = "usage.jsonl";
-      entry.diagnostics.fieldAvailability.recordPersisted = { status: "not_observed", source: "persistence" };
-      entry.diagnostics.fieldAvailability.persistedAt = { status: "not_observed", source: "persistence" };
+      clearDiagnosticPersistenceOutcome(entry.diagnostics);
     }
   });
   try {

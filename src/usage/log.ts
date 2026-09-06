@@ -10,6 +10,8 @@ import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import {
+  clearDiagnosticPersistenceOutcome,
+  MAX_DIAGNOSTIC_SENDS,
   normalizeDiagnosticSends,
   normalizeTransactionDiagnostics,
   sanitizeUpstreamDisplayError,
@@ -440,6 +442,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     durationMs: attempt.durationMs,
     // Absent by default; only the literal `true` marker survives the round trip.
     ...(attempt.streamAborted === true ? { streamAborted: true } : {}),
+    ...(attempt.locallyAnswered === true ? { locallyAnswered: true } : {}),
     ...(isNonNegativeFiniteNumber(attempt.firstOutputMs)
       ? { firstOutputMs: attempt.firstOutputMs }
       : {}),
@@ -494,7 +497,7 @@ export function isValidReasoningWireValue(
     || (wireField === "reasoning.enabled" && typeof wireValue === "boolean");
 }
 
-function normalizedAttempts(raw: unknown): PersistedUsageAttempt[] {
+export function normalizeUsageAttempts(raw: unknown): PersistedUsageAttempt[] {
   if (!Array.isArray(raw)) return [];
   return raw.map(normalizeUsageAttempt)
     .filter((attempt): attempt is PersistedUsageAttempt => attempt !== null);
@@ -511,7 +514,7 @@ export function normalizeUsageEntryForTest(entry: PersistedUsageEntry): Persiste
 }
 
 function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
-  const attempts = normalizedAttempts(entry.attempts);
+  const attempts = normalizeUsageAttempts(entry.attempts);
   const tierOutcome = entry.tierOutcome ? normalizeAttemptTierOutcome(entry.tierOutcome) : undefined;
   const callerServiceTier = sanitizeLogMetadataString(entry.callerServiceTier);
   const responseServiceTier = sanitizeLogMetadataString(entry.responseServiceTier);
@@ -520,6 +523,13 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
   const diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
+  if (diagnostics && Array.isArray(entry.attempts) && entry.attempts.some(attempt =>
+    attempt && (attempt.sendCount > MAX_DIAGNOSTIC_SENDS
+      || (Array.isArray(attempt.sends) && attempt.sends.length > MAX_DIAGNOSTIC_SENDS)))) {
+    diagnostics.captureTruncated = true;
+    diagnostics.fieldAvailability.sends = { status: "truncated", source: "transport" };
+    diagnostics.fieldAvailability = normalizeTransactionDiagnostics(diagnostics)!.fieldAvailability;
+  }
   const upstreamError = sanitizeUpstreamDisplayError(entry.upstreamError);
   const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
   return {
@@ -546,6 +556,9 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+    ...(sanitizeLogMetadataString(entry.requestedAlias)
+      ? { requestedAlias: sanitizeLogMetadataString(entry.requestedAlias) }
+      : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),
     ...(typeof entry.requestedEffort === "string" && entry.requestedEffort
       ? { requestedEffort: capMetadataString(entry.requestedEffort) }
@@ -625,7 +638,9 @@ function ensureUsageLogDir(): void {
 export function appendUsageEntry(entry: PersistedUsageEntry): void {
   ensureUsageLogDir();
   const path = usageLogPath();
-  appendFileSync(path, `${JSON.stringify(normalizeUsageEntry(entry))}\n`, { encoding: "utf-8", mode: 0o600 });
+  const normalized = normalizeUsageEntry(entry);
+  if (normalized.diagnostics) clearDiagnosticPersistenceOutcome(normalized.diagnostics);
+  appendFileSync(path, `${JSON.stringify(normalized)}\n`, { encoding: "utf-8", mode: 0o600 });
   try { chmodSync(path, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
 }
 
@@ -660,6 +675,8 @@ export interface ManagementUsageSnapshot {
   truncatedPrefixBytes: number;
   entriesTruncated: boolean;
   entriesDropped: number;
+  /** Nonblank lines rejected by parsing/row normalization in the bounded read. */
+  invalidEntriesDropped: number;
   /** Digest of the covered prefix, used to detect an in-place rewrite before reuse. */
   prefixDigest: string;
   /**
@@ -730,6 +747,7 @@ interface RetainedUsageSnapshot {
   entries: PersistedUsageEntry[];
   entriesTruncated: boolean;
   entriesDropped: number;
+  invalidEntriesDropped: number;
   revision: UsageLogRevision;
   retainedAt: number;
   approxBytes: number;
@@ -880,6 +898,7 @@ export function currentUsageLogRevision(): UsageLogRevision | null {
 async function parseUsageTextCooperatively(text: string, signal: AbortSignal): Promise<{
   entries: PersistedUsageEntry[];
   entriesDropped: number;
+  invalidEntriesDropped: number;
   entryLengths: number[];
   /** Bytes of unparseable lines after the final accepted row. */
   trailingSkippedBytes: number;
@@ -904,6 +923,7 @@ async function parseUsageTextCooperatively(text: string, signal: AbortSignal): P
   // summing those lengths -- would consume extra rows to reach the window start,
   // silently hiding history and desynchronizing truncatedPrefixBytes.
   let pendingSkippedBytes = 0;
+  let invalidEntriesDropped = 0;
   for (let offset = 0; offset < lines.length; offset += batchSize) {
     if (signal.aborted) throw signal.reason;
     const batch = lines.slice(offset, offset + batchSize);
@@ -914,6 +934,7 @@ async function parseUsageTextCooperatively(text: string, signal: AbortSignal): P
       const lineBytes = Buffer.byteLength(line, "utf-8") + (isLastLine && line === "" ? 0 : 1);
       const parsed = parseUsageLines([line]);
       if (parsed.length === 0) {
+        if (line.trim()) invalidEntriesDropped += 1;
         pendingSkippedBytes += lineBytes;
         continue;
       }
@@ -931,12 +952,13 @@ async function parseUsageTextCooperatively(text: string, signal: AbortSignal): P
   // separately; the trim arithmetic adds them back to keep lengths summing to the span.
   const trailingSkippedBytes = pendingSkippedBytes;
   if (entries.length <= MANAGEMENT_USAGE_MAX_ENTRIES) {
-    return { entries, entriesDropped: 0, entryLengths, trailingSkippedBytes, cappedPrefixBytes: 0 };
+    return { entries, entriesDropped: 0, invalidEntriesDropped, entryLengths, trailingSkippedBytes, cappedPrefixBytes: 0 };
   }
   const entriesDropped = entries.length - MANAGEMENT_USAGE_MAX_ENTRIES;
   return {
     entries: entries.slice(-MANAGEMENT_USAGE_MAX_ENTRIES),
     entriesDropped,
+    invalidEntriesDropped,
     entryLengths: entryLengths.slice(-MANAGEMENT_USAGE_MAX_ENTRIES),
     trailingSkippedBytes,
     // Bytes of the rows the cap removed. The caller adds them to its skipped prefix so
@@ -1000,6 +1022,7 @@ async function readUsageEntriesFullCooperatively(
       truncatedPrefixBytes,
       entriesTruncated: parsed.entriesDropped > 0,
       entriesDropped: parsed.entriesDropped,
+      invalidEntriesDropped: parsed.invalidEntriesDropped,
       prefixDigest,
       entryLengths: parsed.entryLengths,
       trailingSkippedBytes: parsed.trailingSkippedBytes,
@@ -1055,6 +1078,7 @@ async function readUsageEntriesIncrementally(
     let appendedEntries: PersistedUsageEntry[] = [];
     let appendedLengths: number[] = [];
     let appendedDropped = 0;
+    let appendedInvalidDropped = 0;
     let appendedTrailingSkipped = retained.trailingSkippedBytes;
     if (size > retained.coveredThroughBytes) {
       // The covered offset must land immediately after a newline, or the retained rows
@@ -1076,6 +1100,7 @@ async function readUsageEntriesIncrementally(
       appendedEntries = appended.entries;
       appendedLengths = appended.entryLengths;
       appendedDropped = appended.entriesDropped;
+      appendedInvalidDropped = appended.invalidEntriesDropped;
       // A capped appended chunk is not joinable: its dropped rows sit between the
       // retained rows and the kept ones, so the lengths no longer describe a contiguous
       // span. Fall back to a full read.
@@ -1120,6 +1145,9 @@ async function readUsageEntriesIncrementally(
     // still balanced. Re-anchor with a full read instead.
     if (rowsBeginAtBytes < windowStart) return null;
     if (dropIndex > 0) {
+      // Rejected lines share row byte spans. Re-anchor instead of guessing how
+      // many rejected lines remain in a newly trimmed byte window.
+      if (retained.invalidEntriesDropped + appendedInvalidDropped > 0) return null;
       entries = entries.slice(dropIndex);
       lengths = lengths.slice(dropIndex);
     }
@@ -1158,6 +1186,7 @@ async function readUsageEntriesIncrementally(
       // would make a byte-truncated read claim rows were dropped when none were.
       entriesTruncated: entriesDropped > 0,
       entriesDropped,
+      invalidEntriesDropped: retained.invalidEntriesDropped + appendedInvalidDropped,
       // The digest must describe exactly the region the returned rows came from, which
       // is the post-trim window, not the pre-trim one.
       prefixDigest: usageRegionDigest(fd, rowsBeginAtBytes, size) ?? "",
@@ -1183,10 +1212,11 @@ export async function readUsageSnapshotForManagement(maxReadBytes = MANAGEMENT_U
   truncatedPrefixBytes: number;
   entriesTruncated: boolean;
   entriesDropped: number;
+  invalidEntriesDropped: number;
 }> {
   if (!Number.isSafeInteger(maxReadBytes) || maxReadBytes <= 0) throw new RangeError("management usage max read bytes must be positive");
   const path = usageLogPath();
-  if (!existsSync(path)) return { entries: [], revision: null, truncatedPrefixBytes: 0, entriesTruncated: false, entriesDropped: 0 };
+  if (!existsSync(path)) return { entries: [], revision: null, truncatedPrefixBytes: 0, entriesTruncated: false, entriesDropped: 0, invalidEntriesDropped: 0 };
   const observed = currentUsageLogRevision();
   const key = `${usageLogIdentityKey(observed)}\0${maxReadBytes}`;
   const observedSize = observed?.size ?? 0;
@@ -1234,6 +1264,7 @@ export async function readUsageSnapshotForManagement(maxReadBytes = MANAGEMENT_U
       entries: snapshot.entries,
       entriesTruncated: snapshot.entriesTruncated,
       entriesDropped: snapshot.entriesDropped,
+      invalidEntriesDropped: snapshot.invalidEntriesDropped,
       revision: snapshot.revision,
       retainedAt: Date.now(),
       approxBytes: retainedUsageSnapshotBytes(snapshot.entries),
