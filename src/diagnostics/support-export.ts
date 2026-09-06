@@ -25,7 +25,7 @@ export type SupportExportSelection =
   | { from: number; to: number };
 
 export interface SupportExportGapV1 {
-  kind: "request_not_found" | "field_unavailable" | "record_limit" | "byte_limit" | "log_coverage";
+  kind: "request_not_found" | "field_unavailable" | "record_limit" | "byte_limit" | "record_validation" | "log_coverage";
   requestId?: string;
   field?: string;
   omittedRecordCount: number;
@@ -61,6 +61,8 @@ export interface TransactionSupportExportV1 {
 export interface BuildSupportExportOptions {
   generatedAt?: number;
   pseudonymKey?: Uint8Array;
+  /** The bounded canonical reader skipped bytes, entries, or unreadable input. */
+  canonicalScanIncomplete?: boolean;
 }
 
 type ExportObject = Record<string, unknown>;
@@ -70,6 +72,8 @@ interface Pseudonymizer {
 }
 
 const SAFE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:+/@ -]*$/;
+const REQUEST_ID_HEADER_NAMES = new Set(["x-request-id", "openai-request-id", "request-id"]);
+const TRACE_HEADER_NAMES = new Set(["x-trace-id", "x-span-id", "traceparent"]);
 const PRIVATE_DIAGNOSTIC_ID_FIELDS = [
   "codexThreadId", "codexTurnId", "codexSessionId", "rootThreadId", "rootTurnId",
   "parentThreadId", "agentId", "parentAgentId", "clientRequestId", "clientResponseId",
@@ -77,6 +81,9 @@ const PRIVATE_DIAGNOSTIC_ID_FIELDS = [
   "forwardedPreviousResponseId", "upstreamRequestId", "upstreamConversationId",
   "upstreamSessionId", "upstreamEventId", "policyEventId", "traceId", "spanId",
   "parentSpanId", "connectionId", "upstreamConnectionId", "lastKnownUsageResponseId",
+  "proxyCommit", "proxyBuildId", "proxyInstanceId", "configRevision", "routeConfigRevision",
+  "modelCatalogRevision", "routeDecisionId", "selectedCandidate", "settingsRevision",
+  "requestSettingsRevision",
 ] as const;
 const RETAINED_DIAGNOSTIC_ID_FIELDS = [
   "parentRequestId", "retryOfRequestId", "replayOfRequestId", "modelSwitchEffectiveFromRequestId",
@@ -103,13 +110,18 @@ const DIAGNOSTIC_NUMBER_FIELDS = [
   "handshakeCompletedAt", "upstreamRequestSentAt", "upstreamHeadersAt", "responseCreatedAt",
   "firstEventAt", "lastEventAt", "upstreamTerminalAt", "downstreamTerminalSentAt",
   "downstreamClosedAt", "finalizedAt", "persistedAt", "settingsUpdatedAt", "settingsAppliedAt",
-  "entitlementObservedAt", "usageReportedAt", "lastCompactionAt", "expiresAt", "queueMs",
+  "entitlementObservedAt", "usageReportedAt", "modelSwitchAppliedAt", "lastCompactionAt", "expiresAt", "queueMs",
   "connectMs", "handshakeMs", "upstreamTimeToFirstEventMs", "firstOutputMs", "upstreamDurationMs",
   "downstreamDeliveryLagMs", "finalizationLagMs", "persistenceLagMs", "idleBeforeFailureMs",
   "requestBytes", "forwardedRequestBytes", "inputItemCount", "messageCount", "toolDefinitionCount",
   "toolCallCount", "toolResultCount", "imageCount", "audioCount", "fileCount", "encryptedItemCount",
   "reasoningItemCount", "conversationItemCount", "attachmentBytes", "toolResultBytes",
-  "largestToolResultBytes", "contextWindowTokens", "maxOutputTokens", "deltaInputCount",
+  "forwardedInputItemCount", "forwardedConversationItemCount", "forwardedMessageCount",
+  "forwardedToolDefinitionCount", "forwardedToolCallCount", "forwardedToolResultCount",
+  "forwardedReasoningItemCount", "forwardedEncryptedItemCount", "forwardedImageCount",
+  "forwardedAudioCount", "forwardedFileCount", "forwardedAttachmentBytes",
+  "forwardedToolResultBytes", "forwardedLargestToolResultBytes",
+  "largestToolResultBytes", "contextWindowTokens", "contextUsageRatioEstimate", "maxOutputTokens", "deltaInputCount",
   "reconstructedInputCount", "replayedItemCount", "compactionCount", "httpStatus",
   "websocketHandshakeStatus", "terminalMappedStatus", "lastEventSequence", "streamEventCount",
   "bytesReceived", "bytesForwarded", "websocketCloseCode", "connectionAgeMs", "reconnectCount",
@@ -341,7 +353,9 @@ function exportDiagnostics(source: TransactionDiagnosticsV1, state: Pseudonymize
   for (const field of PRIVATE_DIAGNOSTIC_ID_FIELDS) setPseudonym(result, field, source[field], state);
   setPseudonym(result, "accountPseudonym", source.accountPseudonym, state);
   setPseudonym(result, "accountAffinity", source.accountAffinity, state);
-  setPseudonym(result, "requestIdHeader", source.requestIdHeader, state);
+  if (typeof source.requestIdHeader === "string" && REQUEST_ID_HEADER_NAMES.has(source.requestIdHeader)) {
+    result.requestIdHeader = source.requestIdHeader;
+  }
   for (const field of DIAGNOSTIC_METADATA_FIELDS) setToken(result, field, source[field], 64);
   for (const field of DIAGNOSTIC_NUMBER_FIELDS) setNumber(result, field, source[field]);
   for (const field of DIAGNOSTIC_BOOLEAN_FIELDS) setBoolean(result, field, source[field]);
@@ -356,6 +370,10 @@ function exportDiagnostics(source: TransactionDiagnosticsV1, state: Pseudonymize
     const raw = source[field];
     if (!Array.isArray(raw)) continue;
     result[field] = raw.map(value => safeToken(value, 64)).filter((value): value is string => Boolean(value));
+  }
+  if (Array.isArray(source.upstreamTraceHeaders)) {
+    result.upstreamTraceHeaders = source.upstreamTraceHeaders
+      .filter((value): value is string => typeof value === "string" && TRACE_HEADER_NAMES.has(value));
   }
   for (const field of DIAGNOSTIC_COUNTER_FIELDS) {
     const map = exportCounterMap(source[field]);
@@ -479,7 +497,8 @@ function hasField(value: unknown, field: string): boolean {
   if (Array.isArray(value)) return value.some(item => hasField(item, field));
   const record = value as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(record, field)) return true;
-  return Object.values(record).some(item => hasField(item, field));
+  return Object.entries(record).some(([key, item]) =>
+    key !== "fieldAvailability" && hasField(item, field));
 }
 
 function bundleBytes(bundle: TransactionSupportExportV1): number {
@@ -515,6 +534,7 @@ export function buildSupportExport(
   let windowStart: number | undefined;
   let windowEnd: number | undefined;
   const gaps: SupportExportGapV1[] = [];
+  if (options.canonicalScanIncomplete) gaps.push({ kind: "log_coverage", omittedRecordCount: 0 });
 
   if ("requestIds" in selection) {
     selectionIds = [...selection.requestIds];
@@ -532,7 +552,9 @@ export function buildSupportExport(
       && entry.timestamp >= selection.from && entry.timestamp <= selection.to);
     if (logCoverageStart === undefined || logCoverageEnd === undefined
       || logCoverageStart > selection.from || logCoverageEnd < selection.to) {
-      gaps.push({ kind: "log_coverage", omittedRecordCount: 0 });
+      if (!gaps.some(gap => gap.kind === "log_coverage")) {
+        gaps.push({ kind: "log_coverage", omittedRecordCount: 0 });
+      }
     }
   }
 
@@ -573,10 +595,11 @@ export function buildSupportExport(
   const emptyBundleBytes = bundleBytes(bundle);
   let recordsArrayBytes = 2;
   let byteOmitted = 0;
+  let validationOmitted = 0;
   for (let index = 0; index < selected.length; index += 1) {
     const exported = exportRecord(selected[index]!, pseudonymizer);
     if (!exported) {
-      byteOmitted += 1;
+      validationOmitted += 1;
       continue;
     }
     const recordBytes = Buffer.byteLength(JSON.stringify(exported), "utf8");
@@ -589,6 +612,7 @@ export function buildSupportExport(
     recordsArrayBytes = nextRecordsArrayBytes;
   }
   if (byteOmitted > 0) gaps.push({ kind: "byte_limit", omittedRecordCount: byteOmitted });
+  if (validationOmitted > 0) gaps.push({ kind: "record_validation", omittedRecordCount: validationOmitted });
 
   bundle.unavailableFields = IMPORTANT_AVAILABILITY_FIELDS.filter(field =>
     !bundle.records.some(record => hasField(record, field)));
@@ -599,6 +623,8 @@ export function buildSupportExport(
     if (byteGap) byteGap.omittedRecordCount += 1;
     else gaps.push({ kind: "byte_limit", omittedRecordCount: 1 });
     bundle.exportCompleteness = "partial";
+    bundle.unavailableFields = IMPORTANT_AVAILABILITY_FIELDS.filter(field =>
+      !bundle.records.some(record => hasField(record, field)));
   }
   return bundle;
 }
