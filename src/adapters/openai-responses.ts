@@ -1,6 +1,6 @@
 import { isOpenCodeGo, normalizeOpenCodeGoAgentMessages } from "./opencode-go";
 import { createHash } from "node:crypto";
-import type { IncomingMeta, ProviderAdapter } from "./base";
+import type { AdapterRequest, IncomingMeta, ProviderAdapter } from "./base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../types";
 import { catalogModelSupportsReasoningSummaries } from "../codex/catalog";
 import { applyCodexRoutingHint, CODEX_RESPONSES_LITE_HEADER, CODEX_ROUTING_HINT_HEADER } from "../codex/forward-transport-headers";
@@ -2514,6 +2514,13 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         actualServiceTier,
       );
       const body = JSON.stringify(finalBody);
+      // All wire rewrites have settled. Parsed intent may differ from this body,
+      // and an absent emitted field must not acquire an inferred effective effort.
+      const wireEffort = isPlainObject(finalBody) && isPlainObject(finalBody.reasoning)
+        ? finalBody.reasoning.effort : undefined;
+      const reasoningLog: AdapterRequest["reasoningLog"] = typeof wireEffort === "string" && wireEffort.length > 0
+        ? { effectiveEffort: wireEffort, wireField: "reasoning.effort", wireValue: wireEffort }
+        : undefined;
       const releaseBodyObservation = translatorBudget.observeExternallyCapped(
         "passthrough_serialization",
         new TextEncoder().encode(body).byteLength,
@@ -2529,6 +2536,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         ...(convertedRoutedToolSearchNames ? { convertedRoutedToolSearchNames } : {}),
         ...(convertedRoutedNamespaceToolAliases ? { convertedRoutedNamespaceToolAliases } : {}),
         ...(tierLog ? { tierLog } : {}),
+        ...(reasoningLog ? { reasoningLog } : {}),
       };
     },
 

@@ -33,6 +33,36 @@ const provider = {
   authMode: "forward" as const,
 };
 
+describe("serialized Responses reasoning diagnostics", () => {
+  test("observes native forward effort from the actual body, not parsed options", () => {
+    const parsed = parseRequest({ model: "gpt-5.6-sol", input: "hello", reasoning: { effort: "low" } });
+    parsed.options.reasoning = "high";
+    const request = createResponsesPassthroughAdapter(provider).buildRequest(parsed);
+    expect(JSON.parse(request.body).reasoning.effort).toBe("low");
+    expect(request.reasoningLog).toEqual({ effectiveEffort: "low", wireField: "reasoning.effort", wireValue: "low" });
+  });
+
+  test("observes the final routed effort after provider ladder mapping", () => {
+    const routed = { adapter: "openai-responses", baseUrl: "https://api.example.com/v1", authMode: "key" as const,
+      reasoningEfforts: ["low", "medium", "high"] };
+    const parsed = parseRequest({ model: "custom-model", input: "hello", reasoning: { effort: "max" } });
+    const request = createResponsesPassthroughAdapter(routed).buildRequest(parsed);
+    const wire = JSON.parse(request.body);
+    expect(wire.reasoning.effort).toBe("high");
+    expect(request.reasoningLog).toEqual({ effectiveEffort: "high", wireField: "reasoning.effort", wireValue: "high" });
+  });
+
+  test.each([undefined, { summary: "auto" }, { effort: 42 }, { effort: "" }])(
+    "omits effort metadata when no nonempty effort string is emitted %#", (reasoning) => {
+      const parsed = parseRequest({ model: "gpt-5.6-sol", input: "hello" });
+      parsed._rawBody = { model: "gpt-5.6-sol", input: "hello", ...(reasoning ? { reasoning } : {}) };
+      parsed.options.reasoning = "high";
+      const request = createResponsesPassthroughAdapter(provider).buildRequest(parsed);
+      expect(request.reasoningLog).toBeUndefined();
+    },
+  );
+});
+
 describe("native routed code-mode result visibility", () => {
   const routed = { adapter: "openai-responses", baseUrl: "https://api.x.ai/v1", authMode: "key" as const };
   const exec = { type: "custom", name: "exec", description: "Run JavaScript in a V8 isolate." };
