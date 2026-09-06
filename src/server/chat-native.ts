@@ -37,6 +37,8 @@ import {
   transientRetryPolicyFor,
 } from "../providers/key-failover";
 import { fastPolicyForModel } from "../providers/service-tier";
+import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../providers/api-key-selection";
+import type { OcxProviderTransport } from "../providers/xai-transport";
 import type { RouteResult } from "../router";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel } from "./responses/fetch-helpers";
@@ -47,6 +49,7 @@ import {
   noteAttemptSend,
   observeRequestTransport,
   recordFirstOutput,
+  recordAttemptCredentialSource,
   sealRequestAttemptIdentity,
   type RequestLogContext,
 } from "./request-log";
@@ -184,14 +187,17 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     translatorBudget.chargeRetained(bytes, { kind: "request_copies" });
     retainedRequestBytes = bytes;
   };
-  const buildActiveRequest = () => buildOpenAIChatPassthroughRequest(
-    activeProvider,
-    options.chatBody,
-    route.modelId,
-    requestedStream,
-    fastPolicyForModel(activeProvider, route.modelId, route.providerName, "chat"),
-    config.fastMode,
-  );
+  const buildActiveRequest = () => {
+    recordAttemptCredentialSource(attempt, route.providerName, activeProvider, activeAdapter.name);
+    return buildOpenAIChatPassthroughRequest(
+      activeProvider,
+      options.chatBody,
+      route.modelId,
+      requestedStream,
+      fastPolicyForModel(activeProvider, route.modelId, route.providerName, "chat"),
+      config.fastMode,
+    );
+  };
   try {
     activeRequest = buildActiveRequest();
     retainRequest(activeRequest);
@@ -225,7 +231,6 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
       const fetchWithPolicy = requestTransientPolicy ? fetchWithTransientRetry : fetchWithResetRetry;
       return await fetchWithPolicy(
         (transportRecovery?: UpstreamSendRecovery) => {
-          noteAttemptSend(attempt, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
           return fetchWithHeaderTimeout(
             request.url,
             applyUpstreamRecoveryInit({
@@ -240,6 +245,34 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
               providerName: route.providerName,
               modelId: route.modelId,
               onTransport: transport => observeRequestTransport(logCtx, transport),
+              dispatchOverride: async (_input, init, execute, onHttpDispatch) => {
+                if (!providerApiKeySelectionIsCurrent(config, route.providerName, activeProvider)) {
+                  const current = resolveCurrentProviderApiKeyTransport(config, route.providerName, activeProvider);
+                  if (!current || !isNativeChatRouteEligible({ ...route, provider: current }, options.chatBody)) {
+                    throw new Error("Provider key selection is no longer available for native Chat");
+                  }
+                  activeProvider = current;
+                  activeAdapter = createOpenAIChatAdapter(current);
+                  activeRequest.releaseBodyObservation?.();
+                  releaseRetainedRequest();
+                  activeRequest = buildActiveRequest();
+                  try { retainRequest(activeRequest); }
+                  catch (error) { activeRequest.releaseBodyObservation?.(); throw error; }
+                }
+                // The retry closure may still hold a pre-pacing request. Replace its entire
+                // wire shape, not just Authorization, and retain transport recovery flags.
+                request = activeRequest;
+                const headers = new Headers(request.headers);
+                const encoding = new Headers(init.headers).get("accept-encoding");
+                if (!headers.has("accept-encoding") && encoding) headers.set("accept-encoding", encoding);
+                if (init.signal?.aborted) throw init.signal.reason;
+                noteAttemptSend(attempt, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
+                const fetchImpl = (activeProvider as OcxProviderTransport).fetch ?? execute;
+                onHttpDispatch();
+                return fetchImpl(request.url, applyUpstreamRecoveryInit({
+                  ...init, method: request.method, headers, body: request.body,
+                }, transportRecovery));
+              },
             }),
           );
         },
@@ -284,6 +317,7 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
         retryAfter: response.headers.get("retry-after"),
         now: Date.now(),
         attemptedKey: activeProvider.apiKey,
+        attemptedSelection: activeProvider._apiKeyAttempt,
         promptCacheKey: typeof options.chatBody.prompt_cache_key === "string" ? options.chatBody.prompt_cache_key : undefined,
       });
       if (!rotated) break;
@@ -304,6 +338,9 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     cleanupAbort();
     upstream.abort();
     if (req.signal.aborted) return fail(499, "Client cancelled request", "client_cancelled");
+    if (isTranslatorBudgetExceededError(error)) {
+      return fail(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
+    }
     return fail(502, error instanceof Error ? error.message : String(error), "server_error");
   }
   releaseRetainedRequest();
@@ -469,15 +506,22 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     attempt.usage = usage;
   }
   if (logIds) recordFirstOutput(logCtx, logIds.start);
-  finishLog(200);
-  if (requestedStream) {
-    return new Response(jsonCompletionSse(completion, requestedModel), {
+  try {
+    const serialized = requestedStream
+      ? jsonCompletionSse(completion, requestedModel, translatorBudget)
+      : JSON.stringify(completion);
+    if (!requestedStream) translatorBudget.chargeRetained(Buffer.byteLength(serialized) * 2, { kind: "live_transient" });
+    finishLog(200);
+    return new Response(serialized, {
       status: 200,
-      headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" },
+      headers: requestedStream
+        ? { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" }
+        : { "Content-Type": "application/json" },
     });
+  } catch (error) {
+    if (isTranslatorBudgetExceededError(error)) {
+      return fail(502, "upstream translation buffer exceeded the safe limit", "upstream_error", "translation_buffer_limit");
+    }
+    throw error;
   }
-  return new Response(JSON.stringify(completion), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
 }

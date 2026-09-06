@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmodSync, constants as fsConstants, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, constants as fsConstants, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import * as z from "zod/v4";
@@ -123,6 +123,7 @@ export {
   type AtomicWriteIO,
 } from "./config/atomic-write";
 import { getConfigDir, getConfigPath, hardenConfigDir } from "./config/paths";
+import { InitialConfigPublicationError, publishInitialConfigNoReplace, type InitialConfigPublicationIO } from "./config/initialize";
 import {
   describeProxyForLog,
   readWindowsSystemProxy,
@@ -932,6 +933,15 @@ const clientIntegrationsSchema = z.object({
   "claude-desktop": z.boolean().optional().catch(undefined),
 }).passthrough();
 
+const asideProfileSyncSchema = z.object({
+  allProfiles: z.boolean().optional(),
+  profiles: z.record(
+    z.string().regex(/^(0|[1-9][0-9]*)$/).refine(value => Number.isSafeInteger(Number(value))),
+    z.boolean(),
+  ).optional(),
+  legacyProfileId: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+}).passthrough();
+
 const agentTaskRecoverySchema = z.object({
   enabled: z.boolean().optional(),
   model: z.string().trim().min(1).optional(),
@@ -1134,7 +1144,10 @@ const configSchema = z.object({
   subagentModelsVersion: z.number().int().positive().optional().catch(undefined),
   subagentModels: z.array(z.string().min(1)).optional().catch(undefined),
   clientIntegrations: clientIntegrationsSchema.optional().catch(undefined),
+  // A malformed profile policy must not fall back to legacy all-profile activation.
+  asideProfileSync: asideProfileSyncSchema.optional().catch({ allProfiles: false }),
   providerContextCaps: z.record(z.string(), z.number().int().positive()).optional(),
+  providerContextCapValues: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
   // Invalid optional recovery config must not discard unrelated provider/account state.
@@ -2799,6 +2812,16 @@ export function readConfigDiagnostics(): ConfigDiagnostics {
   return readConfigFileSnapshot().diagnostics;
 }
 
+/** Read-only init preflight. Occupied unsafe entries are never treated as absence. */
+export function observeInitialConfigState(): "missing" | "exists" | "invalid" {
+  try {
+    if (!lstatSync(getConfigPath()).isFile()) return "invalid";
+  } catch (error) {
+    return isMissingPathError(error) ? "missing" : "invalid";
+  }
+  return readConfigFileSnapshot().diagnostics.source === "file" ? "exists" : "invalid";
+}
+
 /**
  * The persisted config, plus a digest of the EXACT bytes it was parsed from.
  *
@@ -3109,6 +3132,44 @@ function persistConfigUnlocked(config: OcxConfig): boolean {
   // write cannot leave estimates reflecting configuration never persisted.
   refreshUserCostOverlays(persisted);
   return true;
+}
+
+export type PersistedConfigInitializationOutcome = "created" | "exists" | "invalid";
+
+/** Initialize only a missing config; ordinary explicit updates still use saveConfig. */
+export function initializePersistedConfigIfMissing(
+  config: OcxConfig,
+  io?: Partial<InitialConfigPublicationIO>,
+): PersistedConfigInitializationOutcome {
+  assertNotRealHomeUnderTest(getConfigDir());
+  const before = observeInitialConfigState();
+  if (before !== "missing") return before;
+  let published = false;
+  try {
+    const persisted = withConfigMutationLockSync((): OcxConfig | "exists" | "invalid" => {
+      const current = observeInitialConfigState();
+      if (current !== "missing") return current;
+      const projected = projectCustomModelCatalogMigration(undefined, projectConfigRebaseProvenance(config));
+      if (!validateConfigCandidate(projected).ok) throw new Error("Initial configuration is invalid.");
+      if (!publishInitialConfigNoReplace(getConfigPath(), JSON.stringify(projected, null, 2) + "\n", io)) {
+        return observeInitialConfigState() === "exists" ? "exists" : "invalid";
+      }
+      published = true;
+      recordOwnedConfigPath(getConfigDir(), getConfigPath());
+      bumpGenerationForCooperatingConfigWrite();
+      return projected;
+    });
+    if (typeof persisted === "string") return persisted;
+    adoptCustomModelCatalogMigration(config, persisted);
+    if (persisted.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+    else config.configRebaseProvenance = structuredClone(persisted.configRebaseProvenance);
+    clearPendingConfigTopLevelDeletions(config);
+    refreshUserCostOverlays(persisted);
+    return "created";
+  } catch (cause) {
+    if (published) throw new InitialConfigPublicationError("published", false, false, { cause });
+    throw cause;
+  }
 }
 
 /** Persist `config` to config.json under the config-mutation lock. */
@@ -3738,11 +3799,12 @@ function warnProxyConfigDiscardOnce(kind: "proxy" | "noProxy" | "noProxyElements
 }
 
 /**
- * Mirror `config.proxy` into HTTP(S)_PROXY env vars so Bun's native fetch routes every outbound
- * provider call through the proxy — no per-callsite changes (verified: Bun honors these plus
- * NO_PROXY). User-set env vars always win; localhost/127.0.0.1 are appended to NO_PROXY so the
- * CLI's own health checks and running-proxy API calls stay direct. Call once per process entry
- * that makes outbound provider requests (server start, catalog sync).
+ * Mirror `config.proxy` into HTTP(S)_PROXY env vars. Bun fetch consumes them natively; transports
+ * such as the ChatGPT upstream WebSocket select the same environment explicitly. User-set HTTP(S)_PROXY
+ * variables win; config fills missing scheme proxies, which take precedence over ALL_PROXY for WS.
+ * localhost/127.0.0.1 are appended to NO_PROXY so the CLI's own health checks and
+ * running-proxy API calls stay direct. Call once per process entry that makes outbound provider
+ * requests (server start, catalog sync).
  */
 export function applyProxyEnv(config: OcxConfig): void {
   applyProxyEnvWith(config);

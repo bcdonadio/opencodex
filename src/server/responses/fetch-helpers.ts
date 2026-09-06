@@ -63,6 +63,13 @@ export interface ProviderFetchOptions {
   beforeDispatch?: (headers: Headers) => void;
   /** Called only after a primary request is actually dispatched on the wire. */
   onTransport?: (transport: "http" | "websocket") => void;
+  /** Revalidate/rebuild a queued request at its physical send boundary, after pacing. */
+  dispatchOverride?: (
+    input: Parameters<typeof globalThis.fetch>[0],
+    init: RequestInit,
+    execute: typeof globalThis.fetch,
+    onHttpDispatch: () => void,
+  ) => Promise<Response>;
 }
 
 export function providerFetch(
@@ -78,7 +85,13 @@ export function providerFetch(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
       options.beforeDispatch?.(new Headers(dispatchInit.headers ?? (input instanceof Request ? input.headers : undefined)));
-      try { options.onTransport?.("http"); } catch { /* telemetry is observational */ }
+      const onHttpDispatch = (): void => {
+        try { options.onTransport?.("http"); } catch { /* telemetry is observational */ }
+      };
+      if (options.dispatchOverride) {
+        return options.dispatchOverride(input, dispatchInit, base, onHttpDispatch);
+      }
+      onHttpDispatch();
       return base(input, dispatchInit);
     },
     { preconnect },

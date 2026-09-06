@@ -25,6 +25,7 @@ import { toolSearchDescription, toolSearchParameters } from "./tool-search-compa
 import { isObj, inputContentParts, outputTextOf, outputToToolResultContent, toolOutputContainsEncryptedContent } from "./parser-content";
 import { mapToolChoice, buildTools, customToolNamespaces } from "./parser-tools";
 import { parseTextFormat } from "./parser-text-format";
+import { externalTaskInputContent } from "./task-input";
 
 /**
  * Wrap a remembered proxy-side signature as provider metadata for a replayed tool call.
@@ -50,30 +51,6 @@ function ensureAssistantPlaceholder(messages: OcxMessage[], modelId: string, now
   messages.push(placeholder);
   return placeholder;
 }
-
-const CODEX_APP_DELEGATION_TOOLS = new Set(["create_thread", "send_message_to_thread"]);
-const CODEX_OUTPUT_ITEM_ID = /^fco_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CODEX_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * Codex app-server represents a GUI-created task (and a later message to it) as a synthetic
- * `function_call_output` carrying the delegation body but no originating function call or
- * `call_id`. Native ChatGPT understands that private history shape. Translating adapters cannot:
- * they would treat it as an unpaired tool result. Recognize only the exact app-owned carrier and
- * expose its body as user text; arbitrary call-id-less tool outputs still reach the strict guard.
- */
-function codexAppDelegationCarrierText(item: Record<string, unknown>): string | undefined {
-  if (Object.hasOwn(item, "call_id")) return undefined;
-  if (item.namespace !== "codex_app" || !CODEX_APP_DELEGATION_TOOLS.has(String(item.name))) {
-    return undefined;
-  }
-  if (typeof item.id !== "string" || !CODEX_OUTPUT_ITEM_ID.test(item.id)) return undefined;
-  if (typeof item.output !== "string") return undefined;
-  const match = /^<codex_delegation>\r?\n\s*<source_thread_id>([^<]+)<\/source_thread_id>\r?\n\s*<input>[\s\S]*<\/input>\r?\n<\/codex_delegation>$/.exec(item.output);
-  if (!match || !CODEX_THREAD_ID.test(match[1]!)) return undefined;
-  return item.output;
-}
-
 
 function findToolById(messages: OcxMessage[], callId: string): { name: string; namespace?: string } {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -169,6 +146,7 @@ export function parseRequest(
       const item = data.input[inputIndex];
       const effectiveType = (item as { type?: string }).type ?? ("role" in item ? "message" : undefined);
       const itemRole = (item as { role?: string }).role;
+      const externalTaskInput = effectiveType === "function_call_output" ? externalTaskInputContent(item) : undefined;
       // Raw protocol items do not map one-to-one onto context messages. Capture the boundary while
       // both representations are available so later metadata can stay before conversation in both.
       if (
@@ -177,6 +155,7 @@ export function parseRequest(
         && continuationConversationMessageIndex === undefined
         && (
           effectiveType === "agent_message"
+          || externalTaskInput !== undefined
           || (effectiveType === "message" && (itemRole === "user" || itemRole === "assistant"))
         )
       ) {
@@ -452,10 +431,9 @@ export function parseRequest(
       }
 
       if (effectiveType === "function_call_output") {
-        const delegation = codexAppDelegationCarrierText(item);
-        if (delegation !== undefined) {
+        if (externalTaskInput !== undefined) {
           pendingReasoning.length = 0;
-          messages.push({ role: "user", content: delegation, timestamp: now });
+          messages.push({ role: "user", content: externalTaskInput, timestamp: now });
           continue;
         }
         const output = item as { call_id: string; output?: string | unknown[] };
