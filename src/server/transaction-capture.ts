@@ -7,8 +7,10 @@ import {
 import type { RequestLogContext } from "./request-log";
 import type { TransportObservation } from "./responses/fetch-helpers";
 import { httpStatusFromTerminalError } from "../lib/errors";
+import { version as proxyVersion } from "../../package.json";
+import { observeDecodedRequestBody } from "./request-decompress";
 
-const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; lastSend?: DiagnosticSendV1 }>();
+const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
 const activeSends = new WeakMap<object, DiagnosticSendV1>();
 const sendState = new WeakMap<DiagnosticSendV1, { responseId?: string; terminalType?: string; terminalObserver?: object; directTypes: Set<string>; syntheticTypes: Set<string> }>();
@@ -18,9 +20,76 @@ const requestShapes = new WeakSet<RequestLogContext>();
 export function captureSafely(action: () => void): void { try { action(); } catch { /* optional observation */ } }
 
 function diagnostics(ctx: RequestLogContext, requestId = "request", receivedAt = Date.now()): TransactionDiagnosticsV1 {
-  if (!ctx.diagnostics) ctx.diagnostics = createTransactionDiagnostics({ requestId, receivedAt });
+  if (!ctx.diagnostics) {
+    ctx.diagnostics = createTransactionDiagnostics({ requestId, receivedAt, proxyVersion });
+    recordDiagnosticEvent(ctx.diagnostics, { type: "request.received", at: receivedAt, source: "proxy", elapsedMs: 0 });
+    for (const field of ["modelSwitchRequested", "modelSwitchApplied", "modelSwitchEffectiveFromRequestId",
+      "settingsUpdatedAt", "settingsAppliedAt", "proxyCommit", "proxyBuildId", "modelCatalogRevision"]) {
+      ctx.diagnostics.fieldAvailability[field] = { status: "unsupported", source: "proxy" };
+    }
+    for (const field of ["subscriptionPlan", "entitlementSource", "cyberAccessStatus", "cyberAccessProgram",
+      "modelAccessStatus", "policyEventId", "policyRuleId", "billedUsageSource"]) {
+      ctx.diagnostics.fieldAvailability[field] = { status: "unknown", source: "upstream" };
+    }
+  }
   if (!clocks.has(ctx.diagnostics)) clocks.set(ctx.diagnostics, { start: performance.now() });
   return ctx.diagnostics;
+}
+
+function derived(d: TransactionDiagnosticsV1, field: string, end: number, start?: number): void {
+  if (start === undefined) return;
+  d[field] = Math.max(0, end - start);
+  d.derivedFields = [...new Set([...(Array.isArray(d.derivedFields) ? d.derivedFields as string[] : []), field])];
+  d.fieldAvailability[field] = { status: "derived", source: "derived" };
+}
+
+/** Called when a handler has selected its route; the send hook refreshes snapshots. */
+export function recordSelectedRoute(ctx: RequestLogContext): void {
+  captureSafely(() => {
+    const d = diagnostics(ctx);
+    if (d.routeSelectedAt === undefined) {
+      d.routeSelectedAt = Date.now();
+      recordDiagnosticEvent(d, { type: "route.selected", at: Date.now(), source: "proxy" });
+    }
+    d.adapterName = ctx.providerAdapter ?? ctx.activeAttempt?.adapter;
+    const protocols: Record<string, string> = { "openai-responses": "responses", "openai-chat": "chat", anthropic: "messages", gemini: "gemini" };
+    d.upstreamProtocol = protocols[String(d.adapterName)];
+    if (d.upstreamProtocol) d.fieldAvailability.upstreamProtocol = { status: "observed", source: "adapter" };
+    if (!d.upstreamProtocol) d.fieldAvailability.upstreamProtocol = { status: "not_observed", source: "adapter" };
+    clean(ctx);
+  });
+}
+
+export function recordReconstructedContext(ctx: RequestLogContext, body: unknown, replayedItems: number): void {
+  captureSafely(() => {
+    if (!body || typeof body !== "object") return;
+    const input = (body as { input?: unknown }).input;
+    const d = diagnostics(ctx);
+    d.reconstructedInputCount = Array.isArray(input) ? input.length : typeof input === "string" ? 1 : 0;
+    d.replayedItemCount = replayedItems;
+    if (replayedItems > 0) {
+      d.continuationMode = "local_replay";
+      d.contextTransformationKinds = ["previous_response_replay"];
+    }
+    clean(ctx);
+  });
+}
+
+export function recordContextEstimate(ctx: RequestLogContext, contextWindow?: number): void {
+  captureSafely(() => {
+    const d = diagnostics(ctx);
+    if (contextWindow !== undefined) d.contextWindowTokens = contextWindow;
+    else d.fieldAvailability.contextWindowTokens = { status: "not_observed", source: "adapter" };
+    const estimate = ctx.usageLogInputTokens ?? ctx.activeAttempt?.inputTokenEstimate;
+    if (typeof estimate === "number" && Number.isFinite(estimate) && estimate >= 0) {
+      d.tokenEstimateMethod = "adapter_input_estimate";
+      if (contextWindow && contextWindow > 0) {
+        d.contextUsageRatioEstimate = estimate / contextWindow;
+        d.fieldAvailability.contextUsageRatioEstimate = { status: "derived", source: "derived" };
+      }
+    }
+    clean(ctx);
+  });
 }
 
 function activeSend(ctx: RequestLogContext): DiagnosticSendV1 | undefined {
@@ -64,8 +133,13 @@ export function observeRequestTransport(ctx: RequestLogContext, transport: "http
     ctx.inboundTransport = transport;
     d.inboundTransport = transport;
     d.inboundProtocol = ctx.inboundProtocol;
+    if (ctx.admissionKind && d.admittedAt === undefined) {
+      d.admittedAt = Date.now();
+      recordDiagnosticEvent(d, { type: "request.admitted", at: Date.now(), source: "proxy" });
+    }
     d.method = req?.method;
     if (req) {
+      observeDecodedRequestBody(req, (body, bytes) => recordRequestShape(ctx, body, bytes));
       const path = new URL(req.url).pathname;
       d.endpointClass = path.endsWith("/compact") ? "compact" : path.includes("images") ? "images"
         : path.includes("search") ? "search" : path.includes("live") ? "live"
@@ -99,6 +173,10 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
     if (forwarded) {
       if (previous) d.forwardedPreviousResponseId = previous;
       d.forwardedModel = b.model;
+      if (d.originalPreviousResponseId !== undefined) {
+        d.previousResponseRewriteApplied = d.originalPreviousResponseId !== previous;
+        d.fieldAvailability.previousResponseRewriteApplied = { status: "derived", source: "derived" };
+      }
     } else {
       identifier(d, "originalPreviousResponseId", b.previous_response_id, "client");
       d.previousResponseUsed = Boolean(previous);
@@ -109,15 +187,26 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
         }
       }
       const items = Array.isArray(b.input) ? b.input : Array.isArray(b.messages) ? b.messages : [];
-      d.inputItemCount = items.length;
+      d.inputItemCount = typeof b.input === "string" ? 1 : items.length;
+      d.conversationItemCount = d.inputItemCount;
+      d.deltaInputCount = d.inputItemCount;
+      d.continuationMode = previous ? "previous_response" : "explicit_input";
       d.toolDefinitionCount = Array.isArray(b.tools) ? b.tools.length : 0;
       let messages = 0, calls = 0, results = 0, reasoning = 0, images = 0, audio = 0, files = 0, encrypted = 0;
       let remaining = 2048;
+      let toolBytes = 0, largestToolBytes = 0, toolBytesComplete = true;
       for (const item of items.slice(0, 1024)) {
         if (!item || typeof item !== "object") continue;
         if (item.type === "message" || item.role) messages++;
         if (item.type === "function_call" || item.type === "custom_tool_call") calls++;
+        if (Array.isArray(item.tool_calls)) calls += item.tool_calls.length;
         if (item.type === "function_call_output" || item.type === "custom_tool_call_output" || item.role === "tool") results++;
+        if (item.type === "function_call_output" || item.type === "custom_tool_call_output" || item.role === "tool") {
+          const value = item.output ?? item.content;
+          if (typeof value === "string" && value.length <= 1024 * 1024 - toolBytes) {
+            const length = Buffer.byteLength(value); toolBytes += length; largestToolBytes = Math.max(largestToolBytes, length);
+          } else toolBytesComplete = false;
+        }
         if (item.type === "reasoning") reasoning++;
         if (item.encrypted_content !== undefined) encrypted++;
         if (Array.isArray(item.content)) for (const part of item.content) {
@@ -130,8 +219,20 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
       }
       d.messageCount = messages; d.toolCallCount = calls; d.toolResultCount = results; d.reasoningItemCount = reasoning;
       d.imageCount = images; d.audioCount = audio; d.fileCount = files; d.encryptedItemCount = encrypted;
+      if (toolBytesComplete && items.length <= 1024) {
+        d.toolResultBytes = toolBytes; d.largestToolResultBytes = largestToolBytes;
+      } else {
+        d.fieldAvailability.toolResultBytes = { status: "not_observed", source: "client" };
+        d.fieldAvailability.largestToolResultBytes = { status: "not_observed", source: "client" };
+      }
+      d.fieldAvailability.attachmentBytes = { status: "not_observed", source: "client" };
       if (remaining < 0) { d.captureTruncated = true; d.fieldAvailability.imageCount = { status: "truncated", source: "client" }; }
-      if (items.length > 1024) { d.captureTruncated = true; d.fieldAvailability.inputItemCount = { status: "truncated", source: "client" }; }
+      if (items.length > 1024) {
+        d.captureTruncated = true;
+        for (const field of ["messageCount", "toolCallCount", "toolResultCount", "reasoningItemCount", "imageCount", "audioCount", "fileCount", "encryptedItemCount"]) {
+          d.fieldAvailability[field] = { status: "truncated", source: "client" };
+        }
+      }
       d.streamingRequested = b.stream; d.storeRequested = b.store; d.parallelToolCalls = b.parallel_tool_calls;
       d.maxOutputTokens = b.max_output_tokens ?? b.max_tokens;
       d.truncationMode = b.truncation;
@@ -143,11 +244,16 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
 
 export function recordForwardedRequest(ctx: RequestLogContext, transport: "http" | "websocket", body?: unknown): void {
   captureSafely(() => {
+    recordSelectedRoute(ctx);
     const d = diagnostics(ctx);
     const clock = clocks.get(d)!;
     if (clock.lastSend) finishDiagnosticSend(clock.lastSend, { endedAt: clock.lastSend.endedAt ?? Date.now(),
       ...(clock.lastSend.status === undefined && clock.lastSend.httpStatus !== undefined ? { status: clock.lastSend.httpStatus } : {}) });
     delete clock.terminal;
+    clock.sent = performance.now();
+    delete clock.firstEvent;
+    delete clock.event;
+    for (const field of ["upstreamTimeToFirstEventMs", "upstreamDurationMs", "idleBeforeFailureMs"]) delete d[field];
     delete d.responseIdMismatch;
     delete d.duplicateTerminalSuppressed;
     delete d.terminalEventType;
@@ -190,6 +296,7 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
     }
     if (typeof body === "string") {
       d.forwardedRequestBytes = Buffer.byteLength(body);
+      d.bytesForwarded = Number(d.bytesForwarded ?? 0) + Buffer.byteLength(body);
       if (Buffer.byteLength(body) <= 1024 * 1024) {
         try { recordRequestShape(ctx, JSON.parse(body), Buffer.byteLength(body), true); } catch { /* non-JSON */ }
       } else {
@@ -253,8 +360,10 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
     if (responseId && state) state.responseId ??= responseId;
     if (type) {
       d.streamEventCount = Number(d.streamEventCount ?? 0) + 1;
-      if (d.streamEventCount === 1) d.firstEventAt = Date.now();
-      d.lastEventAt = Date.now();
+      if (!synthetic) {
+        d.firstEventAt ??= Date.now();
+        d.lastEventAt = Date.now();
+      }
     }
     if (bytes > 0) d.bytesReceived = Number(d.bytesReceived ?? 0) + bytes;
     d.lastEventType = type;
@@ -263,6 +372,19 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
     if (response.reasoning?.effort) d.responseEffort = response.reasoning.effort;
     if (response.usage) { d.usageSource = "upstream"; d.usageReportedAt = Date.now(); if (responseId) d.lastKnownUsageResponseId = responseId; }
     const terminal = ["response.completed", "response.failed", "response.incomplete", "error"].includes(type);
+    const clock = clocks.get(d)!;
+    const now = performance.now();
+    if (!synthetic && type) {
+      if (clock.firstEvent === undefined) {
+        clock.firstEvent = now;
+        derived(d, "upstreamTimeToFirstEventMs", now, clock.sent);
+      }
+      if (terminal) {
+        derived(d, "upstreamDurationMs", now, clock.sent);
+        if (type !== "response.completed") derived(d, "idleBeforeFailureMs", now, clock.event ?? clock.sent);
+      }
+      clock.event = now;
+    }
     if (terminal) {
       if (!synthetic && state?.terminalType) d.duplicateTerminalSuppressed = true;
       else {
@@ -302,6 +424,26 @@ export function recordDeliveredOutput(ctx: RequestLogContext): void {
   captureSafely(() => { diagnostics(ctx); clocks.get(diagnostics(ctx))!.output ??= performance.now(); });
 }
 
+/** Successful append is live evidence only: the completed write cannot encode its end. */
+export function diagnosticFinalizedClock(d: TransactionDiagnosticsV1 | undefined): number | undefined {
+  return d ? clocks.get(d)?.finalized : undefined;
+}
+
+export function recordPersistenceOutcome(d: TransactionDiagnosticsV1 | undefined, success: boolean, started?: number): void {
+  captureSafely(() => {
+    if (!d) return;
+    d.recordPersisted = success;
+    d.logSink = "usage.jsonl";
+    d.fieldAvailability.recordPersisted = { status: "observed", source: "persistence" };
+    if (success) {
+      d.persistedAt = Date.now();
+      d.fieldAvailability.persistedAt = { status: "observed", source: "persistence" };
+      derived(d, "persistenceLagMs", performance.now(), started);
+      recordDiagnosticEvent(d, { type: "request.persisted", at: Date.now(), source: "proxy" });
+    } else d.persistenceErrorCode = "append_failed";
+  });
+}
+
 export function recordReceivedBytes(ctx: RequestLogContext, bytes: number): void {
   captureSafely(() => {
     const send = activeSend(ctx);
@@ -324,6 +466,12 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
     d.transportPhase = ctx.transportPhase;
     if (ctx.activeAttempt?.streamAborted) d.streamAborted = true;
     d.finalizedAt = Date.now();
+    // A positive legacy send count without an observed send is incomplete evidence.
+    if (d.upstreamCallMade !== true) {
+      if (!(ctx.attempts ?? []).some(attempt => attempt.sendCount > 0) && !(ctx.activeAttempt?.sendCount)) d.upstreamCallMade = false;
+      else d.fieldAvailability.upstreamCallMade = { status: "not_observed", source: "transport" };
+    }
+    d.logSink = "usage.jsonl";
     d.usageSource ??= ctx.usageFromBridge ? "adapter" : ctx.usage ? "upstream" : undefined;
     if (!ctx.usage) d.usageMissingReason = "not_reported";
     d.fieldAvailability.terminalMappedStatus = { status: "derived", source: "derived" };
@@ -334,13 +482,17 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
         recordDiagnosticEvent(d, { type: "downstream.terminal.sent", at: Date.now(), source: "downstream" });
       } else d.fieldAvailability.downstreamTerminalSentAt = { status: "not_observed", source: "transport" };
     }
-    if (status === 499) { d.streamAborted = true; d.cancellationReason = "client_cancel"; d.downstreamClosedAt = Date.now(); }
+    if (status === 499) { d.streamAborted = true; d.cancellationReason = "client_cancel"; d.downstreamClosedAt = Date.now();
+      recordDiagnosticEvent(d, { type: "downstream.closed", at: Date.now(), source: "downstream" }); }
     const clock = clocks.get(diagnostics(ctx))!;
     if (status >= 400) {
       d.outputDeliveredBeforeFailure = clock.output !== undefined || ctx.firstOutputMs !== undefined;
       d.fieldAvailability.outputDeliveredBeforeFailure = { status: "derived", source: "derived" };
     }
-    if (clock.terminal !== undefined) { d.finalizationLagMs = Math.max(0, performance.now() - clock.terminal); d.derivedFields = ["finalizationLagMs"]; }
+    clock.finalized = performance.now();
+    derived(d, "finalizationLagMs", clock.finalized, clock.terminal);
+    if (d.downstreamTerminalSentAt !== undefined) derived(d, "downstreamDeliveryLagMs", clock.finalized, clock.terminal);
+    d.clockAnomaly = Date.now() < Number(d.receivedAt);
     recordDiagnosticEvent(d, { type: "request.finalized", at: Date.now(), source: "proxy", elapsedMs: performance.now() - clock.start });
     const send = activeSend(ctx);
     if (send) finishDiagnosticSend(send, { endedAt: Date.now(), status, streamAborted: status === 499 || d.streamAborted === true });
@@ -367,12 +519,16 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
       if (event.ageMs !== undefined) d.connectionAgeMs = event.ageMs;
       if (event.kind === "mismatch") d.correlationMismatch = true;
       if (event.kind === "connect") {
+        clocks.get(d)!.connect = performance.now();
         d.upstreamConnectStartedAt = Date.now();
         recordDiagnosticEvent(d, { type: "upstream.connect.started", at: Date.now(), source: "transport" });
       }
       if (event.kind === "open") {
         d.websocketHandshakeStatus = 101; d.upstreamConnectedAt = Date.now(); d.handshakeCompletedAt = Date.now();
         recordDiagnosticEvent(d, { type: "upstream.connected", at: Date.now(), source: "transport" });
+        recordDiagnosticEvent(d, { type: "upstream.handshake.completed", at: Date.now(), source: "transport" });
+        derived(d, "connectMs", performance.now(), clocks.get(d)!.connect);
+        derived(d, "handshakeMs", performance.now(), clocks.get(d)!.connect);
       }
       if (event.kind === "close") { d.websocketCloseCode = event.code; d.closedBy = "upstream"; recordDiagnosticEvent(d, { type: "upstream.closed", at: Date.now(), source: "transport" }); }
       clean(ctx);

@@ -15,7 +15,8 @@ import { relaySseEagerBounded, type EagerRelayHooks } from "../../src/server/rel
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import type { RequestLogContext } from "../../src/server/request-log";
 import { beginRequestAttempt, addFinalRequestLog, noteAttemptSend } from "../../src/server/request-log";
-import { observeRequestTransport, recordRequestShape, transportObserver, recordProtocolEvent, recordForwardedRequest, recordUpstreamResponse, finalizeDiagnostics } from "../../src/server/transaction-capture";
+import { observeRequestTransport, recordRequestShape, transportObserver, recordProtocolEvent, recordForwardedRequest, recordUpstreamResponse, finalizeDiagnostics, recordReconstructedContext, recordContextEstimate } from "../../src/server/transaction-capture";
+import { readJsonRequestBody, observeDecodedRequestBody } from "../../src/server/request-decompress";
 import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../../src/server/sse-frame-buffer";
 
@@ -97,6 +98,69 @@ test("physical HTTP diagnostics snapshot each model without retaining body or se
   expect(ctx.diagnostics?.codexThreadId).toBe("explicit-thread");
   expect(ctx.diagnostics?.httpStatus).toBe(200);
   expect(JSON.stringify(ctx.diagnostics)).not.toMatch(/private-|opaque-not-a-thread/);
+});
+
+test("capture acceptance: local completion, lifecycle and bounded request facts", () => {
+  const ctx: RequestLogContext = { model: "model-one", provider: "test", admissionKind: "loopback" };
+  observeRequestTransport(ctx, "http", new Request("http://localhost/v1/responses"), "local", Date.now());
+  recordRequestShape(ctx, { input: "private-input", tools: [], stream: false });
+  finalizeDiagnostics(ctx, 400, "local", Date.now());
+  expect(ctx.diagnostics?.upstreamCallMade).toBe(false);
+  expect(ctx.diagnostics?.firstEventAt).toBeUndefined();
+  expect(ctx.diagnostics?.inputItemCount).toBe(1);
+  expect(ctx.diagnostics?.proxyVersion).toBeString();
+  expect(ctx.diagnostics?.admittedAt).toBeNumber();
+  expect(ctx.diagnostics?.events.map(event => event.type)).toContain("request.received");
+  expect(ctx.diagnostics?.fieldAvailability.modelSwitchApplied?.status).toBe("unsupported");
+  expect(ctx.diagnostics?.fieldAvailability.subscriptionPlan?.status).toBe("unknown");
+});
+
+test("capture acceptance: original decoded request bytes and chat shape precede translation", async () => {
+  const raw = ' {"messages":[{"role":"assistant","tool_calls":[{},{}]},{"role":"tool","content":"é"}]} ';
+  const req = new Request("http://localhost/v1/chat/completions", { method: "POST", body: raw });
+  const ctx: RequestLogContext = { model: "test", provider: "test" };
+  observeRequestTransport(ctx, "http", req);
+  await readJsonRequestBody(req);
+  recordRequestShape(ctx, { input: [] });
+  expect(ctx.diagnostics?.requestBytes).toBe(Buffer.byteLength(raw));
+  expect(ctx.diagnostics?.toolCallCount).toBe(2);
+  expect(ctx.diagnostics?.toolResultBytes).toBe(2);
+  expect(ctx.diagnostics?.largestToolResultBytes).toBe(2);
+  expect(ctx.diagnostics?.inputItemCount).toBe(2);
+  const throwing = new Request("http://localhost", { method: "POST", body: "{}" });
+  observeDecodedRequestBody(throwing, () => { throw new Error("observer"); });
+  expect(await readJsonRequestBody(throwing)).toEqual({});
+});
+
+test("capture acceptance: physical event timing derives monotonic durations", () => {
+  const ctx: RequestLogContext = { model: "model-one", provider: "test", providerAdapter: "openai-responses" };
+  observeRequestTransport(ctx, "http", undefined, "timing", Date.now());
+  recordForwardedRequest(ctx, "http", '{"model":"model-one","input":[]}');
+  recordProtocolEvent(ctx, { type: "response.created", response: { id: "timed-response" } });
+  recordProtocolEvent(ctx, { type: "response.failed", response: { id: "timed-response", error: { code: "server_error" } } });
+  finalizeDiagnostics(ctx, 502, "timing", Date.now());
+  expect(ctx.diagnostics?.upstreamTimeToFirstEventMs).toBeNumber();
+  expect(ctx.diagnostics?.upstreamDurationMs).toBeNumber();
+  expect(ctx.diagnostics?.idleBeforeFailureMs).toBeNumber();
+  expect(ctx.diagnostics?.derivedFields).toContain("upstreamDurationMs");
+  expect(ctx.diagnostics?.derivedFields).toContain("finalizationLagMs");
+  expect(ctx.diagnostics?.adapterName).toBe("openai-responses");
+  expect(ctx.diagnostics?.upstreamProtocol).toBe("responses");
+});
+
+test("capture acceptance: replay counts and estimates retain their source semantics", () => {
+  const ctx: RequestLogContext = { model: "test", provider: "test", usageLogInputTokens: 50 };
+  recordRequestShape(ctx, { previous_response_id: "previous", input: [{ role: "user", content: "private" }] });
+  recordReconstructedContext(ctx, { input: [{}, {}, {}] }, 2);
+  recordContextEstimate(ctx, 100);
+  recordForwardedRequest(ctx, "http", '{"model":"test","input":[{},{},{}]}');
+  expect(ctx.diagnostics?.deltaInputCount).toBe(1);
+  expect(ctx.diagnostics?.reconstructedInputCount).toBe(3);
+  expect(ctx.diagnostics?.replayedItemCount).toBe(2);
+  expect(ctx.diagnostics?.contextTransformationKinds).toEqual(["previous_response_replay"]);
+  expect(ctx.diagnostics?.contextUsageRatioEstimate).toBe(0.5);
+  expect(ctx.diagnostics?.previousResponseRewriteApplied).toBe(true);
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("private");
 });
 
 test("diagnostic observer exceptions preserve HTTP response and semantic admission rejection", async () => {

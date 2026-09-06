@@ -320,7 +320,7 @@ const NON_NEGATIVE_NUMBER_FIELDS = [
   "idleBeforeFailureMs", "requestBytes", "forwardedRequestBytes", "inputItemCount", "messageCount",
   "toolDefinitionCount", "toolCallCount", "toolResultCount", "imageCount", "audioCount", "fileCount",
   "encryptedItemCount", "reasoningItemCount", "conversationItemCount", "attachmentBytes", "toolResultBytes",
-  "largestToolResultBytes", "contextWindowTokens", "maxOutputTokens", "deltaInputCount",
+  "largestToolResultBytes", "contextWindowTokens", "contextUsageRatioEstimate", "maxOutputTokens", "deltaInputCount",
   "reconstructedInputCount", "replayedItemCount", "compactionCount", "httpStatus",
   "websocketHandshakeStatus", "terminalMappedStatus", "lastEventSequence", "streamEventCount", "bytesReceived",
   "bytesForwarded", "websocketCloseCode", "connectionAgeMs", "reconnectCount", "idleTimeoutMs", "bodyStallMs",
@@ -874,8 +874,11 @@ export function recordDiagnosticEvent(
       diagnostics.correlationConfidence = "direct";
     }
   }
-  if (diagnostics.firstEventAt === undefined) diagnostics.firstEventAt = event.at;
-  diagnostics.lastEventAt = event.at;
+  // Request/route/persistence bookkeeping is not an upstream stream event.
+  if (event.source === "upstream" && (event.type.startsWith("response.") || event.type === "upstream.error")) {
+    if (diagnostics.firstEventAt === undefined) diagnostics.firstEventAt = event.at;
+    diagnostics.lastEventAt = event.at;
+  }
   if (TERMINAL_EVENT_TYPES.has(event.type) && diagnostics.upstreamTerminalAt === undefined
     && (event.source === "upstream" || event.source === "transport")) {
     diagnostics.upstreamTerminalAt = event.at;

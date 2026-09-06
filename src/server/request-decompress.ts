@@ -1,6 +1,12 @@
 import { gunzipSync, inflateRawSync, inflateSync, zstdDecompressSync } from "node:zlib";
 import type { TranslatorBudget } from "../lib/translator-budget";
 
+const bodyObservers = new WeakMap<Request, (body: unknown, rawBytes: number) => void>();
+/** Observation attaches to the original caller request, never a translated replay. */
+export function observeDecodedRequestBody(req: Request, observer: (body: unknown, rawBytes: number) => void): void {
+  bodyObservers.set(req, observer);
+}
+
 /**
  * Request-body decompression for the /v1/responses data plane.
  *
@@ -224,6 +230,7 @@ export async function readBoundedJsonRequestBody(
       return options.emptyBodyFallback;
     }
     const parsed = JSON.parse(text);
+    try { bodyObservers.get(req)?.(parsed, raw.byteLength); } catch { /* optional diagnostics */ }
     budget?.observeAcceptedRequestCopy(new TextEncoder().encode(JSON.stringify(parsed)).byteLength);
     return parsed;
   } finally {

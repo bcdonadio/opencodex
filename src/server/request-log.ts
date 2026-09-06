@@ -13,7 +13,7 @@ import {
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
-import { finalizeDiagnostics, finishAttemptDiagnostics, recordDeliveredOutput, recordProtocolEvent } from "./transaction-capture";
+import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordDeliveredOutput, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import type { AdapterRequest } from "../adapters/base";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -401,7 +401,9 @@ export function addRequestLog(entry: RequestLogEntry) {
   const upstreamError = sanitizeUpstreamDisplayError(entry.upstreamError);
   const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
   let diagnostics: TransactionDiagnosticsV1 | undefined;
+  let persistenceStarted: number | undefined;
   try {
+    persistenceStarted = diagnosticFinalizedClock(entry.diagnostics);
     diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
   } catch {
     // Diagnostics are optional observation only. A hostile getter, corrupt row, or
@@ -421,7 +423,13 @@ export function addRequestLog(entry: RequestLogEntry) {
   delete retained.upstreamTransport;
   Object.assign(retained, diagnosticTransports(diagnostics));
   entry = retained;
-  retainRequestLogEntry(entry);
+  captureSafely(() => {
+    if (entry.diagnostics) {
+      entry.diagnostics.logSink = "usage.jsonl";
+      entry.diagnostics.fieldAvailability.recordPersisted = { status: "not_observed", source: "persistence" };
+      entry.diagnostics.fieldAvailability.persistedAt = { status: "not_observed", source: "persistence" };
+    }
+  });
   try {
     // Terminal provenance is diagnostic evidence on successful and failed rows alike.
     // Keeping it only for failures makes a restart erase the comparison baseline.
@@ -482,9 +490,12 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.terminalSource ? { terminalSource: entry.terminalSource } : {}),
       ...(entry.routeDecision ? { routeDecision: entry.routeDecision } : {}),
     });
+    recordPersistenceOutcome(entry.diagnostics, true, persistenceStarted);
   } catch {
+    recordPersistenceOutcome(entry.diagnostics, false, persistenceStarted);
     /* request logging must never fail a user request */
   }
+  retainRequestLogEntry(entry);
 }
 
 export function nextRequestLogId(_timestamp = Date.now()): string {
@@ -991,6 +1002,7 @@ export function addFinalRequestLog(
     ? 499
     : status;
   finalizeDiagnostics(logCtx, effectiveStatus, requestId, start, meta?.closeReason === "terminal");
+  captureSafely(() => recordContextEstimate(logCtx, contextWindowForModel(logCtx.providerAdapter ?? logCtx.provider, logCtx.model)));
   // A locally assigned code wins: it names a refusal this proxy made itself, which no
   // status-plus-upstream-message classification can reconstruct.
   const errorCode = logCtx.errorCode ?? requestLogErrorCode(
