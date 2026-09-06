@@ -550,6 +550,41 @@ describe("isWin32EagerRewrite", () => {
 });
 
 describe("codexWsUpstreamFetch", () => {
+  test("stream failures expose fixed classifications without raw error or close text", async () => {
+    for (const reason of ["upstream_close", "transport_error", "frame_overflow"] as const) {
+      installFake(ws => {
+        ws.emit("open", {});
+        if (reason === "upstream_close") ws.emit("close", { code: 1006, reason: "private close detail" });
+        if (reason === "transport_error") ws.emit("error", { message: "private error detail" });
+        if (reason === "frame_overflow") ws.emit("message", { data: "x".repeat(MAX_CODEX_WS_FRAME_BYTES + 1) });
+      });
+      const failures: unknown[] = [];
+      const response = await rawCodexWsUpstreamFetch(CODEX_URL, streamingInit(),
+        (async () => { throw new Error("fallback forbidden"); }) as typeof fetch,
+        BOUNDED_WS_RUNTIME, undefined, undefined,
+        event => { if (event.kind === "stream_failure") failures.push(event); });
+      await expect(response.text()).rejects.toThrow();
+      expect(failures).toEqual([{ kind: "stream_failure", reason }]);
+      expect(JSON.stringify(failures)).not.toContain("private");
+    }
+  });
+
+  test("request abort is observed exactly once and keeps the original abort error", async () => {
+    const opened = Promise.withResolvers<void>();
+    installFake(ws => { ws.emit("open", {}); opened.resolve(); });
+    const controller = new AbortController();
+    const failures: unknown[] = [];
+    const pending = rawCodexWsUpstreamFetch(CODEX_URL, { ...streamingInit(), signal: controller.signal },
+      (async () => { throw new Error("fallback forbidden"); }) as typeof fetch,
+      BOUNDED_WS_RUNTIME, undefined, undefined,
+      event => { if (event.kind === "stream_failure") failures.push(event); });
+    await opened.promise;
+    controller.abort(new Error("private abort detail"));
+    const response = await pending;
+    await expect(response.text()).rejects.toThrow("private abort detail");
+    expect(failures).toEqual([{ kind: "stream_failure", reason: "request_abort" }]);
+  });
+
   test("diagnostics distinguish pre-open HTTP fallback from a sent WS policy error without usage", async () => {
     installFake(ws => ws.close());
     const ctx: RequestLogContext = { provider: "test", model: "test", activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };

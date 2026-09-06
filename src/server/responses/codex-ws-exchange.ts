@@ -48,6 +48,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       start(c) { controller = c; },
       cancel() {
         if (terminal) return;
+        observe({ kind: "stream_failure", reason: "client_cancel" });
         terminal = true;
         cleanup();
         session.dispose();
@@ -80,8 +81,11 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       resolve(response);
     };
 
-    const failStream = (error: unknown) => {
+    const failStream = (error: unknown,
+      reason: "request_abort" | "owner_cancel" | "prelude_timeout" | "frame_overflow" | "queue_overflow" | "transport_error" | "upstream_close" | "stream_closed" | "protocol_error",
+      evidence?: { bytes?: number; timeoutMs?: number }) => {
       if (terminal) return;
+      observe({ kind: "stream_failure", reason, ...evidence });
       terminal = true;
       // A frame may already be executing upstream. Settle as a body failure,
       // never a fetch rejection/5xx that the pre-stream wrapper could resend.
@@ -99,9 +103,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       resolve(sseFallback(url, init));
     }, UPGRADE_DEADLINE_MS);
 
-    const cancelExchange = (reason: unknown) => {
+    const cancelExchange = (reason: unknown, source: "request_abort" | "owner_cancel") => {
       if (terminal || settledPreOpen) return;
       if (!sent) {
+        observe({ kind: "stream_failure", reason: source });
         settledPreOpen = true;
         terminal = true;
         cleanup();
@@ -109,9 +114,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         reject(reason);
         return;
       }
-      failStream(reason);
+      failStream(reason, source);
     };
-    const onAbort = () => cancelExchange(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+    const onAbort = () => cancelExchange(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"), "request_abort");
     signal?.addEventListener("abort", onAbort, { once: true });
 
     const onOpen = () => {
@@ -149,7 +154,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       } catch {
         if (received || responseCommitted) {
           if (terminal) session.dispose();
-          failStream("codex websocket send failed after response activity");
+          failStream("codex websocket send failed after response activity", "transport_error");
           return;
         }
         // send() throwing means the frame never left, so no upstream turn
@@ -165,7 +170,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       }
       if (!metadata) commitResponse();
       else if (!responseCommitted && !terminal) {
-        preludeTimer = setTimeout(() => failStream("codex websocket response prelude timed out"), CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS);
+        preludeTimer = setTimeout(() => failStream("codex websocket response prelude timed out", "prelude_timeout",
+          { timeoutMs: CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS }), CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS);
       }
     };
 
@@ -178,12 +184,12 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       // cheap lower bound before parsing so an obviously oversized frame does
       // not create another large object graph.
       if (text.length > MAX_CODEX_WS_FRAME_BYTES) {
-        failStream("codex websocket frame exceeds the response size limit");
+        failStream("codex websocket frame exceeds the response size limit", "frame_overflow");
         return;
       }
       const rawEncodedText = encoder.encode(text);
       if (rawEncodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
-        failStream("codex websocket frame exceeds the response size limit");
+        failStream("codex websocket frame exceeds the response size limit", "frame_overflow", { bytes: rawEncodedText.byteLength });
         return;
       }
       const normalized = normalizeResponsesWsRelayEvent(text);
@@ -199,19 +205,19 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             controlFrame = true;
           }
         } catch (error) {
-          failStream(error);
+          failStream(error, "protocol_error");
           return;
         }
       }
       const encodedText = relayText === text ? rawEncodedText : encoder.encode(relayText);
       if (encodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
-        failStream("codex websocket frame exceeds the response size limit");
+        failStream("codex websocket frame exceeds the response size limit", "frame_overflow", { bytes: encodedText.byteLength });
         return;
       }
       if (!controlFrame && !type.startsWith("response.") && type !== "error") return;
       if (!controlFrame) {
         rejectedCorrelation = false;
-        try { correlation?.accept(normalized.payload); } catch (error) { failStream(error); return; }
+        try { correlation?.accept(normalized.payload); } catch (error) { failStream(error, "protocol_error"); return; }
         if (!rejectedCorrelation) observe({ kind: "event", payload: normalized.payload, bytes: rawEncodedText.byteLength });
         commitResponse();
       }
@@ -219,12 +225,12 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const suffix = encoder.encode("\n\n");
       const frameBytes = prefix.byteLength + encodedText.byteLength + suffix.byteLength;
       if (frameBytes > MAX_CLIENT_SSE_FRAME_BYTES) {
-        failStream("codex websocket frame exceeds the response size limit");
+        failStream("codex websocket frame exceeds the response size limit", "frame_overflow", { bytes: frameBytes });
         return;
       }
       const availableBytes = controller.desiredSize ?? 0;
       if (frameBytes > availableBytes) {
-        failStream("codex websocket response exceeded the buffered queue limit");
+        failStream("codex websocket response exceeded the buffered queue limit", "queue_overflow", { bytes: frameBytes });
         return;
       }
       const sseFrame = new Uint8Array(frameBytes);
@@ -234,7 +240,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       try {
         controller.enqueue(sseFrame);
       } catch {
-        failStream("codex websocket response stream closed while enqueueing");
+        failStream("codex websocket response stream closed while enqueueing", "stream_closed");
         return;
       }
       if (type === "response.completed" || type === "response.failed" || type === "response.incomplete" || type === "error") {
@@ -258,7 +264,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         resolve(sseFallback(url, init));
         return;
       }
-      if (sent && !terminal) failStream(closedBeforeTerminalMessage(event));
+      if (sent && !terminal) failStream(closedBeforeTerminalMessage(event), "upstream_close");
     };
 
     const onError = () => {
@@ -269,9 +275,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         cleanup();
         session.dispose();
         resolve(sseFallback(url, init));
-      } else failStream("codex websocket transport error");
+      } else failStream("codex websocket transport error", "transport_error");
     };
-    detachOwner = session.bindOwner(reason => cancelExchange(reason));
+    detachOwner = session.bindOwner(reason => cancelExchange(reason, "owner_cancel"));
     ws.addEventListener("open", onOpen);
     ws.addEventListener("message", onMessage);
     ws.addEventListener("close", onClose);

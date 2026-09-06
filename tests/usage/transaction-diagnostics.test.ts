@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { captureUpstreamHeaders, captureUpstreamPayloadFacts } from "../../src/server/transaction-upstream-facts";
 import {
   MAX_DIAGNOSTIC_ERROR_BYTES,
   MAX_DIAGNOSTIC_EVENTS,
@@ -44,6 +45,44 @@ test("upstream hostname normalization accepts only closed diagnostic classes", (
     expect(normalizeTransactionDiagnostics({ ...base, upstreamHostname: host })?.upstreamHostname).toBeUndefined();
   }
   expect(normalizeTransactionDiagnostics({ ...base, upstreamHostname: "custom" })?.upstreamHostname).toBe("custom");
+});
+
+test("stream facts separate event IDs, acceptance and delivery evidence", async () => {
+  const { recordForwardedRequest, recordProtocolEvent, finalizeDiagnostics, recordDeliveredOutput,
+    recordDownstreamTerminal } = await import("../../src/server/transaction-capture");
+  const ctx: import("../../src/server/request-log").RequestLogContext = { provider: "openai", model: "test" };
+  recordForwardedRequest(ctx, "websocket");
+  recordProtocolEvent(ctx, { type: "response.created", id: "event-not-response", event_id: "evt-created",
+    sequence_number: 0, response: { id: "resp-accepted" } }, 0, true);
+  expect(ctx.diagnostics?.upstreamRequestAccepted).toBe(true);
+  expect(ctx.diagnostics?.upstreamResponseId).toBe("resp-accepted");
+  expect(ctx.diagnostics?.upstreamEventId).toBe("evt-created");
+  expect(ctx.diagnostics?.events.at(-1)?.eventId).toBe("evt-created");
+  expect(ctx.activeAttempt?.sends?.[0]?.upstreamEventId).toBe("evt-created");
+  recordProtocolEvent(ctx, { type: "response.failed", response: { id: "resp-accepted" } }, 0, true);
+  ctx.firstOutputMs = 2; // Upstream TTFT is not downstream delivery.
+  finalizeDiagnostics(ctx, 400, "failure", Date.now(), true);
+  expect(ctx.diagnostics?.outputDeliveredBeforeFailure).toBeUndefined();
+  expect(ctx.diagnostics?.downstreamTerminalSentAt).toBeUndefined();
+  recordDeliveredOutput(ctx, "response.output_text.delta");
+  recordDownstreamTerminal(ctx);
+  finalizeDiagnostics(ctx, 400, "failure", Date.now(), true);
+  expect(ctx.diagnostics?.outputDeliveredBeforeFailure).toBe(true);
+  expect(ctx.diagnostics?.lastOutputKind).toBe("text");
+  expect(ctx.diagnostics?.downstreamTerminalSentAt).toBeNumber();
+});
+
+test("stream facts reject unknown event values and synthetic IDs", async () => {
+  const { recordForwardedRequest, recordProtocolEvent } = await import("../../src/server/transaction-capture");
+  const ctx: import("../../src/server/request-log").RequestLogContext = { provider: "openai", model: "test" };
+  recordForwardedRequest(ctx, "http");
+  recordProtocolEvent(ctx, { type: "untrusted-private-text", id: "event-only", sequence_number: -2 }, 0, true);
+  expect(ctx.diagnostics?.upstreamResponseId).toBeUndefined();
+  expect(ctx.diagnostics?.protocolEventType).toBe("unknown");
+  expect(ctx.diagnostics?.lastEventSequence).toBeUndefined();
+  recordProtocolEvent(ctx, { type: "response.failed", event_id: "synthetic-id" }, 0, false, true);
+  expect(ctx.diagnostics?.upstreamEventId).toBeUndefined();
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("untrusted-private-text");
 });
 
 beforeEach(() => {
@@ -450,6 +489,75 @@ describe("transaction diagnostics schema", () => {
     expect(normalized).toHaveLength(MAX_DIAGNOSTIC_SENDS);
     expect(new Set(normalized.map(send => send.sendId)).size).toBe(normalized.length);
     expect(normalized.some(send => send.sendId === "ocx-send-2")).toBe(true);
+  });
+});
+
+describe("bounded upstream facts", () => {
+  const fresh = () => createTransactionDiagnostics({ requestId: "facts-test", receivedAt: 1 });
+
+  test("captures approved header identities and explicit finite limits only", () => {
+    const d = fresh();
+    captureUpstreamHeaders(d, new Headers({
+      "x-request-id": "req_facts", "x-ratelimit-limit-requests": "42",
+      "x-ratelimit-limit-tokens": "Infinity", "retry-after": "1.5",
+      traceparent: "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+      "x-private-header": "private-header-value", authorization: "private-auth-value",
+    }));
+    expect(normalizeTransactionDiagnostics(d)).toMatchObject({ upstreamRequestId: "req_facts",
+      requestIdHeader: "x-request-id", requestLimit: 42, retryAfterMs: 1500,
+      traceId: "0123456789abcdef0123456789abcdef", spanId: "0123456789abcdef",
+      upstreamTraceHeaders: ["traceparent"] });
+    expect(d.tokenLimit).toBeUndefined();
+    expect(JSON.stringify(d)).not.toContain("private");
+  });
+
+  test("redacts unsafe IDs and rejects freeform error values and parameter names", () => {
+    const d = fresh();
+    captureUpstreamHeaders(d, new Headers({ "x-request-id": "sk-" + "abcdefghijklmnopqrstuvwxyz" }));
+    captureUpstreamPayloadFacts(d, { response: { error: { code: "cyber_policy", type: "server_error",
+      param: "private_field", message: "private-body-text", retryable: false,
+      retry_after_ms: 125, request_limit: 3, mystery: { secret: "private-value" } } } });
+    expect(d).toMatchObject({ upstreamErrorCode: "cyber_policy", errorType: "server_error",
+      errorEnvelopeSchema: "response.error", retryable: false, retryAfterMs: 125, requestLimit: 3,
+      unknownErrorFieldNames: ["mystery"] });
+    expect(d.upstreamRequestId).toBeUndefined();
+    expect(d.errorMessage).toBeUndefined();
+    captureUpstreamPayloadFacts(d, { error: { message: "😀".repeat(126) } });
+    expect(d.errorMessageTruncated).toBe(true);
+    expect(d.errorMessage).toBeUndefined();
+    expect(d.errorParam).toBeUndefined();
+    expect(JSON.stringify(d)).not.toContain("private");
+    captureUpstreamPayloadFacts(d, { error: { code: "arbitrary_private_token", type: "arbitrary_private_token" } });
+    expect(d.upstreamErrorCode).toBeUndefined();
+    expect(d.errorType).toBeUndefined();
+  });
+
+  test("bounds unknown key inspection and never reads unknown values or getters", () => {
+    const d = fresh();
+    const error: Record<string, unknown> = {};
+    for (let i = 0; i < 1000; i++) Object.defineProperty(error, `field_${i}`, {
+      enumerable: true, get: () => { throw new Error("unknown value read"); },
+    });
+    Object.defineProperty(error, "message", { get: () => { throw new Error("message read"); } });
+    expect(() => captureUpstreamPayloadFacts(d, { error })).not.toThrow();
+    expect(d.unknownErrorFieldNames).toHaveLength(64);
+    expect(d.captureTruncated).toBe(true);
+  });
+
+  test("usage completeness reflects valid counters, including zero, without billing claims", () => {
+    const d = fresh();
+    captureUpstreamPayloadFacts(d, { type: "response.created" });
+    expect(d.usagePartial).toBeUndefined();
+    captureUpstreamPayloadFacts(d, { usage: { input_tokens: 0 } });
+    expect(d).toMatchObject({ usagePartial: true, usageMissingCount: 1, usageSource: "upstream" });
+    captureUpstreamPayloadFacts(d, { usage: { prompt_tokens: 0, completion_tokens: 0 } });
+    expect(d).toMatchObject({ usagePartial: false, usageMissingCount: 0 });
+    expect(d.usageMissingReason).toBeUndefined();
+    captureUpstreamPayloadFacts(d, { type: "response.failed", response: { usage: { input_tokens: -1, output_tokens: "5" } } });
+    expect(d).toMatchObject({ usagePartial: false, usageMissingCount: 2 });
+    expect(d.billedUsageSource).toBeUndefined();
+    expect(d.subscriptionPlan).toBeUndefined();
+    expect(d.cyberAccessStatus).toBeUndefined();
   });
 });
 

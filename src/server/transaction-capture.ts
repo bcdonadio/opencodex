@@ -10,6 +10,7 @@ import { httpStatusFromTerminalError } from "../lib/errors";
 import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
 import type { RequestPacingObserver } from "../providers/request-pacing";
+import { captureUpstreamHeaders, captureUpstreamPayloadFacts } from "./transaction-upstream-facts";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -258,6 +259,11 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
     delete d.responseIdMismatch;
     delete d.duplicateTerminalSuppressed;
     delete d.terminalEventType;
+    for (const field of ["usageSource", "usageReportedAt", "usagePartial", "usageMissingCount", "usageMissingReason",
+      "lastKnownUsageResponseId", "errorOrigin", "upstreamErrorCode", "errorType", "errorParam", "errorEnvelopeSchema",
+      "retryable", "retryAfterMs", "unknownErrorFieldNames", "incompleteReason", "errorMessageTruncated"]) {
+      delete d[field]; delete d.fieldAvailability[field];
+    }
     ctx.upstreamTransport = ctx.upstreamTransport && ctx.upstreamTransport !== transport ? "mixed" : transport;
     d.upstreamTransport = ctx.upstreamTransport;
     d.upstreamCallMade = true;
@@ -335,6 +341,7 @@ export function recordUpstreamResponse(ctx: RequestLogContext, response: Respons
     d.upstreamHeadersAt = Date.now();
     d.upstreamContentType = response.headers.get("content-type")?.split(";")[0];
     const id = identifier(d, "upstreamRequestId", response.headers.get("x-request-id") ?? response.headers.get("openai-request-id"), "upstream");
+    captureUpstreamHeaders(d, response.headers);
     for (const [header, field] of [["x-ratelimit-limit-requests", "requestLimit"], ["x-ratelimit-limit-tokens", "tokenLimit"]]) {
       const value = response.headers.get(header!);
       if (value !== null && /^\d+(?:\.\d+)?$/.test(value)) d[field!] = Number(value);
@@ -350,6 +357,11 @@ export function recordUpstreamResponse(ctx: RequestLogContext, response: Respons
 
 const eventTypes = new Set(["response.created", "response.output_item.added", "response.output_text.delta",
   "response.completed", "response.failed", "response.incomplete"]);
+const protocolTypes = new Set([...eventTypes, "error", "response.in_progress", "response.output_item.done",
+  "response.content_part.added", "response.content_part.done", "response.output_text.done",
+  "response.function_call_arguments.delta", "response.function_call_arguments.done",
+  "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+  "response.refusal.delta", "response.refusal.done"]);
 
 export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, bytes = 0, direct = false, fromProxy = false, observer?: object): void {
   captureSafely(() => {
@@ -371,7 +383,11 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
       if (state.syntheticTypes.size < 64 && type.length <= 64) state.syntheticTypes.add(type);
     }
     const response = p.response && typeof p.response === "object" ? p.response : p;
-    const responseId = synthetic ? undefined : identifier(d, "upstreamResponseId", response.id ?? p.response_id, "upstream", true);
+    // Event IDs are not response IDs. Only an explicit response object or JSON
+    // response carries its ID here; standalone events use response_id.
+    const responseId = synthetic ? undefined : identifier(d, "upstreamResponseId",
+      p.response ? response.id : (!type || p.object === "response") ? p.id : p.response_id, "upstream", true);
+    const eventId = synthetic ? undefined : identifier(d, "upstreamEventId", p.event_id, "upstream");
     if (responseId && state?.responseId && state.responseId !== responseId) d.responseIdMismatch = true;
     if (responseId && state) state.responseId ??= responseId;
     if (type) {
@@ -381,12 +397,24 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
         d.lastEventAt = Date.now();
       }
     }
-    if (bytes > 0) d.bytesReceived = Number(d.bytesReceived ?? 0) + bytes;
-    d.lastEventType = type;
-    if (typeof p.sequence_number === "number") d.lastEventSequence = p.sequence_number;
+    if (bytes > 0) {
+      d.bytesReceived = Number(d.bytesReceived ?? 0) + bytes;
+      if (send) send.bytesReceived = Number(send.bytesReceived ?? 0) + bytes;
+    }
+    if (!synthetic && type) {
+      d.lastEventType = protocolTypes.has(type) ? type : "unknown";
+      d.protocolEventType = d.lastEventType;
+      if (Number.isSafeInteger(p.sequence_number) && p.sequence_number >= 0) d.lastEventSequence = p.sequence_number;
+    }
+    if (!synthetic && type === "response.created") d.upstreamRequestAccepted = true;
     if (response.model) d.responseModel = response.model;
     if (response.reasoning?.effort) d.responseEffort = response.reasoning.effort;
-    if (response.usage) { d.usageSource = "upstream"; d.usageReportedAt = Date.now(); if (responseId) d.lastKnownUsageResponseId = responseId; }
+    if (!synthetic) {
+      captureUpstreamPayloadFacts(d, payload);
+      if (response.usage && d.usageSource === "upstream") {
+        d.usageReportedAt = Date.now(); if (responseId) d.lastKnownUsageResponseId = responseId;
+      }
+    }
     const terminal = ["response.completed", "response.failed", "response.incomplete", "error"].includes(type);
     const clock = clocks.get(d)!;
     const now = performance.now();
@@ -407,14 +435,8 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
         if (!synthetic && state) { state.terminalType = type; state.terminalObserver = observer; }
         d.terminalEventType = type; clocks.get(diagnostics(ctx))!.terminal = performance.now();
       }
-      if (type !== "response.completed") d.outputDeliveredBeforeFailure = clocks.get(diagnostics(ctx))!.output !== undefined;
+      if (type !== "response.completed" && clocks.get(d)!.output !== undefined) d.outputDeliveredBeforeFailure = true;
     }
-    const error = response.error ?? p.error;
-    if (error && typeof error === "object" && !d.errorOrigin) {
-      d.errorOrigin = "upstream"; d.upstreamErrorCode = error.code; d.errorType = error.type;
-      d.errorParam = error.param; d.errorMessage = error.message; d.errorEnvelopeSchema = p.response ? "response.error" : "error";
-    }
-    if (response.incomplete_details) d.incompleteReason = response.incomplete_details.reason;
     if (type === "response.output_item.added" && p.item?.type) {
       const known = ["message", "reasoning", "function_call", "custom_tool_call", "web_search_call", "image_generation_call"];
       const kind = known.includes(p.item.type) ? p.item.type : "unknown";
@@ -423,9 +445,11 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
     }
     if (eventTypes.has(type) || type === "error") recordDiagnosticEvent(d, {
       type: (type === "error" ? "upstream.error" : type) as DiagnosticEventTypeV1,
-      at: Date.now(), source: synthetic ? "proxy" : "upstream", responseId, elapsedMs: performance.now() - clocks.get(diagnostics(ctx))!.start,
+      at: Date.now(), source: synthetic ? "proxy" : "upstream", responseId, eventId, elapsedMs: performance.now() - clocks.get(diagnostics(ctx))!.start,
     });
     if (send && responseId) send.upstreamResponseId ??= responseId;
+    if (send && eventId) send.upstreamEventId = eventId;
+    if (send && !synthetic && type === "response.created") send.upstreamRequestAccepted = true;
     if (send && terminal) finishDiagnosticSend(send, { endedAt: Date.now(), status: type === "response.completed" ? 200
       : type === "response.incomplete" ? 502 : httpStatusFromTerminalError(response.error ?? p.error) });
     clean(ctx);
@@ -436,8 +460,42 @@ export function recordSyntheticTerminal(ctx: RequestLogContext, type: "response.
   recordProtocolEvent(ctx, { type }, 0, false, true);
 }
 
-export function recordDeliveredOutput(ctx: RequestLogContext): void {
-  captureSafely(() => { diagnostics(ctx); clocks.get(diagnostics(ctx))!.output ??= performance.now(); });
+export function recordDeliveredOutput(ctx: RequestLogContext, kind?: string): void {
+  captureSafely(() => {
+    const d = diagnostics(ctx);
+    clocks.get(d)!.output ??= performance.now();
+    const known: Record<string, string> = { text: "text", reasoning: "reasoning", tool_call: "tool_call", refusal: "refusal", audio: "audio", image: "image",
+      "response.output_text.delta": "text", "response.reasoning_summary_text.delta": "reasoning",
+      "response.function_call_arguments.delta": "tool_call", "response.refusal.delta": "refusal" };
+    if (kind && Object.hasOwn(known, kind)) d.lastOutputKind = known[kind];
+    clean(ctx);
+  });
+}
+
+/** Called only after the downstream owner accepts the terminal write. */
+export function recordDownstreamTerminal(ctx: RequestLogContext): void {
+  captureSafely(() => {
+    const d = diagnostics(ctx);
+    if (d.downstreamTerminalSentAt !== undefined) return;
+    d.downstreamTerminalSentAt = Date.now();
+    derived(d, "downstreamDeliveryLagMs", performance.now(), clocks.get(d)!.terminal);
+    recordDiagnosticEvent(d, { type: "downstream.terminal.sent", at: Date.now(), source: "downstream" });
+    clean(ctx);
+  });
+}
+
+export function recordDownstreamCancelled(ctx: RequestLogContext, reason: "client_disconnect" | "turn_replaced"): void {
+  captureSafely(() => {
+    const d = diagnostics(ctx);
+    d.streamAborted = true;
+    d.cancellationSource = "client";
+    d.cancellationReason = reason;
+    if (reason === "client_disconnect") {
+      d.downstreamClosedAt = Date.now();
+      recordDiagnosticEvent(d, { type: "downstream.closed", at: Date.now(), source: "downstream" });
+    }
+    clean(ctx);
+  });
 }
 
 /** Successful append is live evidence only: the completed write cannot encode its end. */
@@ -489,25 +547,23 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
     }
     d.logSink = "usage.jsonl";
     d.usageSource ??= ctx.usageFromBridge ? "adapter" : ctx.usage ? "upstream" : undefined;
-    if (!ctx.usage) d.usageMissingReason = "not_reported";
+    if (!ctx.usage && d.usageSource === undefined) d.usageMissingReason ??= "not_reported";
     d.fieldAvailability.terminalMappedStatus = { status: "derived", source: "derived" };
-    if (terminal) {
-      // HTTP inspectors observe an upstream branch and cannot prove socket delivery.
-      if (ctx.inboundTransport === "websocket") {
-        d.downstreamTerminalSentAt = Date.now();
-        recordDiagnosticEvent(d, { type: "downstream.terminal.sent", at: Date.now(), source: "downstream" });
-      } else d.fieldAvailability.downstreamTerminalSentAt = { status: "not_observed", source: "transport" };
+    if (terminal && d.downstreamTerminalSentAt === undefined)
+      d.fieldAvailability.downstreamTerminalSentAt = { status: "not_observed", source: "transport" };
+    if (status === 499) {
+      d.streamAborted = true;
+      d.cancellationReason ??= "client_cancel";
+      // A replaced turn can yield 499 while the client's socket stays open.
+      // Only the downstream close owner records downstreamClosedAt.
     }
-    if (status === 499) { d.streamAborted = true; d.cancellationReason = "client_cancel"; d.downstreamClosedAt = Date.now();
-      recordDiagnosticEvent(d, { type: "downstream.closed", at: Date.now(), source: "downstream" }); }
     const clock = clocks.get(diagnostics(ctx))!;
     if (status >= 400) {
-      d.outputDeliveredBeforeFailure = clock.output !== undefined || ctx.firstOutputMs !== undefined;
-      d.fieldAvailability.outputDeliveredBeforeFailure = { status: "derived", source: "derived" };
+      if (clock.output !== undefined) d.outputDeliveredBeforeFailure = true;
+      else { delete d.outputDeliveredBeforeFailure; d.fieldAvailability.outputDeliveredBeforeFailure = { status: "not_observed", source: "transport" }; }
     }
     clock.finalized = performance.now();
     derived(d, "finalizationLagMs", clock.finalized, clock.terminal);
-    if (d.downstreamTerminalSentAt !== undefined) derived(d, "downstreamDeliveryLagMs", clock.finalized, clock.terminal);
     d.clockAnomaly = Date.now() < Number(d.receivedAt);
     recordDiagnosticEvent(d, { type: "request.finalized", at: Date.now(), source: "proxy", elapsedMs: performance.now() - clock.start });
     const send = activeSend(ctx);
@@ -555,6 +611,20 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
     }
     else if (event.kind === "response") recordUpstreamResponse(ctx, event.response, event.transport);
     else if (event.kind === "event") recordProtocolEvent(ctx, event.payload, event.bytes, true);
+    else if (event.kind === "stream_failure") {
+      const d = diagnostics(ctx);
+      d.streamAborted = true;
+      d.errorOrigin = "transport";
+      d.cancellationReason = event.reason;
+      d.cancellationSource = event.reason === "client_cancel" ? "client"
+        : event.reason === "owner_cancel" ? "proxy" : "transport";
+      if (event.reason === "frame_overflow" || event.reason === "queue_overflow") d.bodyOverflowBytes = event.bytes;
+      // A prelude timer is not an idle-between-events timer.
+      if (event.reason === "prelude_timeout") d.fieldAvailability.idleTimeoutMs = { status: "not_observed", source: "transport" };
+      const send = activeSend(ctx);
+      if (send) send.streamAborted = true;
+      clean(ctx);
+    }
     else {
       const d = diagnostics(ctx);
       const previousConnectionId = d.upstreamConnectionId;

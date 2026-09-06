@@ -37,6 +37,71 @@ function sseStream(frames: string[], onCancel?: () => void): ReadableStream<Uint
 }
 
 describe("WS endpoint re-framer (120/132)", () => {
+  test("delivery observation follows accepted sends and precedes terminal finalization", async () => {
+    const { ws } = mockWs(-1);
+    const observed: string[] = [];
+    await pumpResponsesSseToWebSocket(ws, sseStream([
+      'data: {"type":"response.output_text.delta","delta":"private"}\n\n',
+      'data: {"type":"response.failed"}\n\n',
+    ]), {
+      onFrameSent: type => observed.push(type),
+      onTerminal: status => observed.push(status),
+    });
+    expect(observed).toEqual(["response.output_text.delta", "response.failed", "failed"]);
+  });
+
+  test("delivery kinds require nonempty output and exclude payload content", async () => {
+    const { ws } = mockWs();
+    const observed: Array<[string, string | undefined]> = [];
+    await pumpResponsesSseToWebSocket(ws, sseStream([
+      'data: {"type":"response.output_text.delta","delta":""}\n\n',
+      'data: {"type":"response.output_item.done","item":{"type":"message","content":[]}}\n\n',
+      'data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"private"}]}}\n\n',
+      'data: {"type":"response.refusal.delta","delta":"private"}\n\n',
+      'data: {"type":"response.completed"}\n\n',
+    ]), { onFrameSent: (type, kind) => observed.push([type, kind]) });
+    expect(observed.map(([, kind]) => kind)).toEqual([undefined, undefined, "text", "refusal", undefined]);
+    expect(JSON.stringify(observed)).not.toContain("private");
+  });
+
+  test("downstream cancellation distinguishes closed sockets and replaced turns once", async () => {
+    for (const closed of [false, true]) {
+      const { ws } = mockWs();
+      const reasons: string[] = [];
+      const stream = new ReadableStream<Uint8Array>({});
+      const pump = pumpResponsesSseToWebSocket(ws, stream, { onCancelled: reason => reasons.push(reason) });
+      if (closed) Object.defineProperty(ws, "readyState", { value: 3 });
+      ws.data.cancel?.();
+      ws.data.cancel?.();
+      await pump;
+      expect(reasons).toEqual([closed ? "client_disconnect" : "turn_replaced"]);
+    }
+  });
+
+  test("dropped sends and stale turns never report delivery", async () => {
+    for (const sendResult of [0, 1]) {
+      const { ws } = mockWs(sendResult);
+      const observed: string[] = [];
+      const pump = pumpResponsesSseToWebSocket(ws, sseStream([
+        'data: {"type":"response.completed"}\n\n',
+      ]), { isCurrent: () => sendResult === 0, onFrameSent: type => observed.push(type) });
+      if (sendResult === 0) await expect(pump).rejects.toThrow("send dropped");
+      else await pump;
+      expect(observed).toEqual([]);
+    }
+  });
+
+  test("synthetic error delivery precedes terminal finalization and observer failure is isolated", async () => {
+    const { ws, sent } = mockWs();
+    const order: string[] = [];
+    await pumpResponsesSseToWebSocket(ws, sseStream([]), {
+      onFrameSent: type => { order.push(type); throw new Error("observer failed"); },
+      onTerminal: status => order.push(status),
+    });
+    expect(order).toEqual(["error", "incomplete"]);
+    expect(sent).toHaveLength(1);
+  });
+
   test("each accepted socket has an independent diagnostics connection identity", () => {
     const first = buildResponsesWsData(new Headers(), { kind: "loopback" });
     const second = buildResponsesWsData(new Headers(), { kind: "loopback" });

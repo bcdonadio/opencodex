@@ -13,7 +13,7 @@ import {
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
-import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordDeliveredOutput, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
+import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import type { AdapterRequest } from "../adapters/base";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -514,7 +514,6 @@ export function recordFirstOutput(
   now = Date.now(),
 ): void {
   if (!Number.isFinite(requestStartedAt) || !Number.isFinite(now)) return;
-  recordDeliveredOutput(logCtx);
   const requestElapsed = Math.max(0, now - requestStartedAt);
   if (logCtx.firstOutputMs === undefined) logCtx.firstOutputMs = requestElapsed;
   if (logCtx.activeAttempt && logCtx.activeAttempt.firstOutputMs === undefined) {
@@ -781,7 +780,17 @@ export function usageFromResponsesPayload(usage: unknown): OcxUsage | undefined 
 
 export function inspectResponseLogJson(logCtx: RequestLogContext, text: string): void {
   try {
-    applyResponseLogMetadata(logCtx, JSON.parse(text));
+    const parsed: unknown = JSON.parse(text);
+    const response = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown> : undefined;
+    // Responses JSON has a status rather than an SSE event type. Observe its
+    // explicit terminal even when the provider supplied no usage. Translated
+    // bridge responses do not establish an upstream protocol terminal.
+    const status = response?.status;
+    const terminal = response?.object === "response" && !response.type
+      && !logCtx.usageFromBridge && logCtx.terminalSource !== "synthetic"
+      && (status === "completed" || status === "failed" || status === "incomplete");
+    applyResponseLogMetadata(logCtx, terminal ? { type: `response.${status}`, response } : parsed);
   } catch {
     logCtx.activeTierMetadata?.markResponseUnparseable();
     /* body may not be JSON; request log metadata is best-effort only */

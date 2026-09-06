@@ -1,4 +1,4 @@
-import { observeRequestTransport, recordRequestShape } from "./transaction-capture";
+import { observeRequestTransport, recordRequestShape, recordDeliveredOutput, recordDownstreamTerminal, recordDownstreamCancelled } from "./transaction-capture";
 import { markActivity } from "../lib/sidecar-tracker";
 import { knownModelIdsForProvider } from "../router";
 import {
@@ -2250,7 +2250,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         ws.data.turnId = turnId;
         const isCurrent = () => ws.data.turnId === turnId;
         const turnAbort = new AbortController();
+        let observeTurnCancellation: (() => void) | undefined;
         const cancelTurn = () => {
+          observeTurnCancellation?.();
           turnAbort.abort("websocket turn superseded or closed");
         };
         ws.data.cancel = cancelTurn;
@@ -2297,6 +2299,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             ...(wsAdmission ? admissionFields(wsAdmission) : {}),
             inboundProtocol: "responses",
           };
+          observeTurnCancellation = () => recordDownstreamCancelled(logCtx,
+            ws.readyState === 1 ? "turn_replaced" : "client_disconnect");
           let logged = false;
           const finalizeLog = (
             status: number,
@@ -2335,6 +2339,13 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             });
             await sendResponseToWebSocket(ws, response, isCurrent, {
               onSsePayload: payload => inspectResponseLogSsePayload(logCtx, payload),
+              onCancelled: reason => recordDownstreamCancelled(logCtx, reason),
+              onFrameSent: (type, outputKind) => {
+                if (outputKind) recordDeliveredOutput(logCtx, outputKind);
+                if (["response.completed", "response.failed", "response.incomplete", "error"].includes(type)) {
+                  recordDownstreamTerminal(logCtx);
+                }
+              },
               onTerminal: status => {
                 terminalRecorder?.(status, logCtx.terminalHttpStatus);
                 finalizeLog(httpStatusForRequestLogTerminal(status, logCtx), {
@@ -2346,9 +2357,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             if (!logged) finalizeLog(turnAbort.signal.aborted ? 499 : response.status);
           } catch (err) {
             if (!isCurrent()) return;
+            const failureStatus = err instanceof CodexAccountCooldownError ? 429 : 502;
             try {
               if (err instanceof CodexAccountCooldownError) {
-                finalizeLog(429);
                 // Codex Desktop rides this WS transport, so it must carry the same
                 // actionable text as HTTP; a frame has no headers, hence message-only.
                 const accountSelector = typeof payload.model === "string"
@@ -2358,17 +2369,21 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
                   type: "rate_limit_error",
                   message: cooldownErrorMessage(err, accountSelector),
                 }));
+                recordDownstreamTerminal(logCtx);
                 return;
               }
-              finalizeLog(502);
               sendJsonFrame(ws, buildWsErrorFrame(502, {
                 type: "proxy_error",
                 message: err instanceof Error ? err.message : String(err),
               }));
+              recordDownstreamTerminal(logCtx);
             } catch {
               /* socket already gone or send dropped */
+            } finally {
+              finalizeLog(failureStatus);
             }
           } finally {
+            observeTurnCancellation = undefined;
             turnAdmissionLease.release();
             if (!logged && turnAbort.signal.aborted) finalizeLog(499);
             if (ws.data.cancel === cancelTurn) ws.data.cancel = undefined;
