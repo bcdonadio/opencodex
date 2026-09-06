@@ -604,6 +604,14 @@ export function trackSseForRequestLog(
       reportTerminal(status);
     },
     logCtx,
+    onParsedPayload: payload => {
+      if (!logCtx || !payload || typeof payload !== "object") return;
+      const event = payload as { type?: unknown; delta?: unknown };
+      if (typeof event.delta === "string" && event.delta.length > 0 && typeof event.type === "string"
+        && ["response.output_text.delta", "response.reasoning_summary_text.delta",
+          "response.function_call_arguments.delta", "response.refusal.delta"].includes(event.type))
+        recordDeliveredOutput(logCtx, event.type);
+    },
     onFirstOutput: () => {
       if (logCtx) recordDeliveredOutput(logCtx);
       onFirstOutput?.();

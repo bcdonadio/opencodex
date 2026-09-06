@@ -45,7 +45,7 @@ function identifier(d: TransactionDiagnosticsV1, field: string, raw: unknown): v
   const result = observeDiagnosticIdentifier(raw);
   if (result.state === "excluded") return;
   d.fieldAvailability[field] = { status: result.state, source: "upstream" };
-  if (result.value) set(d, field, result.value);
+  if (result.value) d[field] = result.value;
   else delete d[field];
   if (result.state === "redacted") d.redactionApplied = true;
   if (result.state === "truncated") d.captureTruncated = true;

@@ -9,6 +9,7 @@ import type { TransportObservation } from "./responses/fetch-helpers";
 import { httpStatusFromTerminalError } from "../lib/errors";
 import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
+import { captureUpstreamHeaders, captureUpstreamPayloadFacts } from "./transaction-upstream-facts";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
@@ -257,6 +258,11 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
     delete d.responseIdMismatch;
     delete d.duplicateTerminalSuppressed;
     delete d.terminalEventType;
+    for (const field of ["usageSource", "usageReportedAt", "usagePartial", "usageMissingCount", "usageMissingReason",
+      "lastKnownUsageResponseId", "errorOrigin", "upstreamErrorCode", "errorType", "errorParam", "errorEnvelopeSchema",
+      "retryable", "retryAfterMs", "unknownErrorFieldNames", "incompleteReason"]) {
+      delete d[field]; delete d.fieldAvailability[field];
+    }
     ctx.upstreamTransport = ctx.upstreamTransport && ctx.upstreamTransport !== transport ? "mixed" : transport;
     d.upstreamTransport = ctx.upstreamTransport;
     d.upstreamCallMade = true;
@@ -319,6 +325,7 @@ export function recordUpstreamResponse(ctx: RequestLogContext, response: Respons
     d.upstreamHeadersAt = Date.now();
     d.upstreamContentType = response.headers.get("content-type")?.split(";")[0];
     const id = identifier(d, "upstreamRequestId", response.headers.get("x-request-id") ?? response.headers.get("openai-request-id"), "upstream");
+    captureUpstreamHeaders(d, response.headers);
     for (const [header, field] of [["x-ratelimit-limit-requests", "requestLimit"], ["x-ratelimit-limit-tokens", "tokenLimit"]]) {
       const value = response.headers.get(header!);
       if (value !== null && /^\d+(?:\.\d+)?$/.test(value)) d[field!] = Number(value);
@@ -374,7 +381,10 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
         d.lastEventAt = Date.now();
       }
     }
-    if (bytes > 0) d.bytesReceived = Number(d.bytesReceived ?? 0) + bytes;
+    if (bytes > 0) {
+      d.bytesReceived = Number(d.bytesReceived ?? 0) + bytes;
+      if (send) send.bytesReceived = Number(send.bytesReceived ?? 0) + bytes;
+    }
     if (!synthetic && type) {
       d.lastEventType = protocolTypes.has(type) ? type : "unknown";
       d.protocolEventType = d.lastEventType;
@@ -383,7 +393,12 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
     if (!synthetic && type === "response.created") d.upstreamRequestAccepted = true;
     if (response.model) d.responseModel = response.model;
     if (response.reasoning?.effort) d.responseEffort = response.reasoning.effort;
-    if (response.usage) { d.usageSource = "upstream"; d.usageReportedAt = Date.now(); if (responseId) d.lastKnownUsageResponseId = responseId; }
+    if (!synthetic) {
+      captureUpstreamPayloadFacts(d, payload);
+      if (response.usage && d.usageSource === "upstream") {
+        d.usageReportedAt = Date.now(); if (responseId) d.lastKnownUsageResponseId = responseId;
+      }
+    }
     const terminal = ["response.completed", "response.failed", "response.incomplete", "error"].includes(type);
     const clock = clocks.get(d)!;
     const now = performance.now();
@@ -406,13 +421,6 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
       }
       if (type !== "response.completed" && clocks.get(d)!.output !== undefined) d.outputDeliveredBeforeFailure = true;
     }
-    const error = response.error ?? p.error;
-    if (error && typeof error === "object" && !d.errorOrigin) {
-      d.errorOrigin = "upstream"; d.upstreamErrorCode = error.code; d.errorType = error.type;
-      d.errorEnvelopeSchema = p.response ? "response.error" : "error";
-    }
-    if (response.incomplete_details && ["max_output_tokens", "content_filter"].includes(response.incomplete_details.reason))
-      d.incompleteReason = response.incomplete_details.reason;
     if (type === "response.output_item.added" && p.item?.type) {
       const known = ["message", "reasoning", "function_call", "custom_tool_call", "web_search_call", "image_generation_call"];
       const kind = known.includes(p.item.type) ? p.item.type : "unknown";
@@ -523,7 +531,7 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
     }
     d.logSink = "usage.jsonl";
     d.usageSource ??= ctx.usageFromBridge ? "adapter" : ctx.usage ? "upstream" : undefined;
-    if (!ctx.usage) d.usageMissingReason = "not_reported";
+    if (!ctx.usage && d.usageSource === undefined) d.usageMissingReason ??= "not_reported";
     d.fieldAvailability.terminalMappedStatus = { status: "derived", source: "derived" };
     if (terminal && d.downstreamTerminalSentAt === undefined)
       d.fieldAvailability.downstreamTerminalSentAt = { status: "not_observed", source: "transport" };
