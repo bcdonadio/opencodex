@@ -1,4 +1,5 @@
-import { recordForwardedRequest, recordUpstreamResponse } from "./transaction-capture";
+import { transportObserver, recordUpstreamResponse } from "./transaction-capture";
+import { diagnosticTarget } from "./responses/fetch-helpers";
 /**
  * /v1/live and /v1/realtime/calls relay (issue #371).
  *
@@ -657,7 +658,8 @@ export async function handleLive(
   const linkedSignal = signalWithTimeout(LIVE_UPSTREAM_TIMEOUT_MS, req.signal);
   const sidecarExit = sidecarEnter("live");
   try {
-    recordForwardedRequest(logCtx, "http", outboundBody);
+    transportObserver(logCtx)({ kind: "send", transport: "http", body: outboundBody,
+      target: diagnosticTarget(url, { method: "POST" }) });
     const upstreamResponse = await fetch(url, {
       method: "POST",
       headers,

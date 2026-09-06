@@ -695,6 +695,46 @@ describe("durability boundary regressions", () => {
 });
 
 describe("transaction diagnostics schema", () => {
+  test("retains turn replacement cancellation through normalization", () => {
+    const raw = createTransactionDiagnostics({ receivedAt: 1 });
+    raw.cancellationReason = "turn_replaced";
+    expect(normalizeTransactionDiagnostics(raw)?.cancellationReason).toBe("turn_replaced");
+  });
+
+  test("only retains integer HTTP statuses in the protocol range", () => {
+    for (const field of ["httpStatus", "websocketHandshakeStatus", "terminalMappedStatus"] as const) {
+      for (const status of [0, 99, 200.5, 600, Infinity, NaN]) {
+        const raw = createTransactionDiagnostics({ receivedAt: 1 });
+        raw[field] = status;
+        raw.fieldAvailability[field] = { status: "observed", source: "transport" };
+        const normalized = normalizeTransactionDiagnostics(raw)!;
+        expect(normalized[field]).toBeUndefined();
+        expect(normalized.fieldAvailability[field]?.status).not.toBe("observed");
+      }
+      for (const status of [100, 101, 200, 499, 599]) {
+        const raw = createTransactionDiagnostics({ receivedAt: 1 });
+        raw[field] = status;
+        expect(normalizeTransactionDiagnostics(raw)?.[field]).toBe(status);
+      }
+    }
+  });
+
+  test("reports capped diagnostic lists and counter maps", () => {
+    for (const count of [64, 65, 200]) {
+      const raw = createTransactionDiagnostics({ receivedAt: 1 });
+      raw.derivedFields = Array.from({ length: count }, (_, i) => `field${i}`);
+      raw.outputItemCountsByType = Object.fromEntries(raw.derivedFields.map(name => [name, 1]));
+      const normalized = normalizeTransactionDiagnostics(raw)!;
+      expect(normalized.derivedFields).toHaveLength(64);
+      expect(Object.keys(normalized.outputItemCountsByType!)).toHaveLength(64);
+      expect(normalized.captureTruncated).toBe(count > 64);
+      if (count > 64) {
+        expect(normalized.fieldAvailability.derivedFields?.status).toBe("truncated");
+        expect(normalized.fieldAvailability.outputItemCountsByType?.status).toBe("truncated");
+        expect(normalizeTransactionDiagnostics(normalized)?.captureTruncated).toBe(true);
+      }
+    }
+  });
   test("derives response-created correlation through the v1 lifecycle builder", () => {
     const diagnostics = createTransactionDiagnostics({
       requestId: "ocx-test",
@@ -1618,6 +1658,27 @@ describe("transaction diagnostics persistence", () => {
     expect(getRequestLogEntries()[0]?.upstreamError).toBe(message);
     expect(readUsageEntries()[0]?.upstreamError).toBe(message);
     expect(readUsageEntries()[0]?.diagnostics?.errorMessage).toBeUndefined();
+  });
+
+  test("HTTP endpoint errors survive display persistence while diagnostic copies stay strict", () => {
+    for (const message of ["Not Found: /v1/chat/completions", "POST /v1/responses returned 502"]) {
+      clearRequestLogsForTests();
+      const diagnostics = createTransactionDiagnostics({ receivedAt: 1 });
+      diagnostics.errorMessage = message;
+      addRequestLog({ requestId: "endpoint-error", timestamp: 1, provider: "test", model: "test", status: 502,
+        durationMs: 1, usageStatus: "unreported", upstreamError: message, diagnostics });
+      expect(getRequestLogEntries()[0]?.upstreamError).toBe(message);
+      expect(readUsageEntries().at(-1)?.upstreamError).toBe(message);
+      expect(readUsageEntries().at(-1)?.diagnostics?.errorMessage).toBeUndefined();
+    }
+    for (const message of ["failed: /v1/responses/private-file", "failed: ../private/file", "failed: /home/person/file",
+      "failed: /v1/responses?secret=value", "failed: /private/data", "failed: /v1/../private"]) {
+      clearRequestLogsForTests();
+      addRequestLog({ requestId: "private-path-error", timestamp: 1, provider: "test", model: "test", status: 502,
+        durationMs: 1, usageStatus: "unreported", upstreamError: message });
+      expect(getRequestLogEntries()[0]?.upstreamError).toBeUndefined();
+      expect(readUsageEntries().at(-1)?.upstreamError).toBeUndefined();
+    }
   });
 
   test("review: display guidance exception never restores arbitrary private URL paths", () => {

@@ -1,4 +1,5 @@
-import { recordForwardedRequest, recordUpstreamResponse } from "./transaction-capture";
+import { transportObserver, recordUpstreamResponse } from "./transaction-capture";
+import { diagnosticTarget } from "./responses/fetch-helpers";
 /**
  * /v1/alpha/search relay.
  *
@@ -157,7 +158,8 @@ export async function handleSearch(
   const sidecarExit = sidecarEnter("search");
   let upstreamResponse: Response | undefined;
   try {
-    recordForwardedRequest(logCtx, "http", JSON.stringify(relayBody));
+    transportObserver(logCtx)({ kind: "send", transport: "http", body: JSON.stringify(relayBody),
+      target: diagnosticTarget(url, { method: "POST" }) });
     upstreamResponse = await fetch(url, {
       method: "POST",
       headers,

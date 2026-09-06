@@ -654,6 +654,41 @@ describe("isWin32EagerRewrite", () => {
 });
 
 describe("codexWsUpstreamFetch", () => {
+  test("close facts preserve sanitized event reasons without guessing the initiator", async () => {
+    for (const [reason, expected] of [
+      ["maintenance restart", "maintenance restart"],
+      ["https://example.invalid/?token=ws-close-private-token", undefined],
+      ["", undefined],
+      ["界".repeat(1000), "界".repeat(166)],
+    ] as const) {
+      installFake(ws => {
+        ws.emit("open", {});
+        ws.emit("close", { code: 1006, reason });
+      });
+      const ctx: RequestLogContext = { provider: "test", model: "test",
+        activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+      const capture = transportObserver(ctx);
+      const closes: unknown[] = [];
+      const response = await rawCodexWsUpstreamFetch(CODEX_URL, streamingInit(),
+        (async () => { throw new Error("fallback forbidden"); }) as typeof fetch,
+        BOUNDED_WS_RUNTIME, undefined, undefined, event => {
+          if (event.kind === "close") closes.push(event);
+          capture(event);
+        });
+      await expect(response.text()).rejects.toThrow();
+      expect(ctx.diagnostics?.closedBy).toBe("unknown");
+      expect(ctx.diagnostics?.websocketCloseCode).toBe(1006);
+      expect(ctx.diagnostics?.websocketCloseReason).toBe(expected);
+      expect(closes).toHaveLength(1);
+      expect(closes[0]).toMatchObject({ kind: "close", code: 1006, reason: expected });
+      expect(JSON.stringify(closes)).not.toContain("ws-close-private-token");
+      expect(JSON.stringify(ctx.diagnostics)).not.toContain("ws-close-private-token");
+      capture({ kind: "connect", connectionId: "replacement-socket" });
+      expect(ctx.diagnostics?.websocketCloseReason).toBeUndefined();
+      expect(ctx.diagnostics?.closedBy).toBeUndefined();
+    }
+  });
+
   test("stream failures expose fixed classifications without raw error or close text", async () => {
     for (const reason of ["upstream_close", "transport_error", "frame_overflow"] as const) {
       installFake(ws => {

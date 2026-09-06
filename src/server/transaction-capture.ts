@@ -1,6 +1,7 @@
 import {
   beginDiagnosticSend, createDiagnosticAttemptId, createTransactionDiagnostics, finishDiagnosticSend,
   normalizeTransactionDiagnostics, normalizeDiagnosticSend, recordDiagnosticEvent, observeDiagnosticIdentifier,
+  sanitizeDiagnosticError,
   MAX_DIAGNOSTIC_SENDS,
   type DiagnosticEventTypeV1, type DiagnosticSendV1, type TransactionDiagnosticsV1,
 } from "../diagnostics/transaction";
@@ -770,7 +771,7 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
         d.reconnectCount = Number(d.reconnectCount ?? 0)
           + (previousConnectionId && previousConnectionId !== event.connectionId ? 1 : 0);
         for (const field of ["websocketHandshakeStatus", "upstreamConnectedAt", "handshakeCompletedAt", "connectMs", "handshakeMs",
-          "connectionReused", "upstreamRequestSequenceOnConnection", "connectionAgeMs", "websocketCloseCode", "closedBy"]) delete d[field];
+          "connectionReused", "upstreamRequestSequenceOnConnection", "connectionAgeMs", "websocketCloseCode", "websocketCloseReason", "closedBy"]) delete d[field];
         d.fieldAvailability.websocketHandshakeStatus = { status: "not_observed", source: "transport" };
       }
       if (event.connectionId) d.upstreamConnectionId = event.connectionId;
@@ -804,7 +805,13 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
           send.connectionReused = event.reused;
         }
       }
-      if (event.kind === "close") { d.websocketCloseCode = event.code; d.closedBy = "upstream"; recordDiagnosticEvent(d, { type: "upstream.closed", at: Date.now(), source: "transport" }); }
+      if (event.kind === "close") {
+        d.websocketCloseCode = event.code;
+        d.websocketCloseReason = sanitizeDiagnosticError(event.reason);
+        // A CloseEvent proves closure, not which peer initiated it.
+        d.closedBy = "unknown";
+        recordDiagnosticEvent(d, { type: "upstream.closed", at: Date.now(), source: "transport" });
+      }
       clean(ctx);
     }
   });
