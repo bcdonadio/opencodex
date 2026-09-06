@@ -82,6 +82,65 @@ function policyEntry(requestId = "ocx-policy", timestamp = 1_500): PersistedUsag
 }
 
 describe("transaction support export", () => {
+  test("availability metadata does not stand in for captured values", () => {
+    const row = policyEntry();
+    row.diagnostics!.fieldAvailability = {
+      subscriptionPlan: { status: "unknown", source: "upstream" },
+      modelSwitchApplied: { status: "unsupported", source: "proxy" },
+      policyEventId: { status: "unknown", source: "upstream" },
+    };
+    row.diagnostics!.modelSwitchRequested = false;
+    const bundle = buildSupportExport({ requestIds: [row.requestId] }, [row]);
+    expect(bundle.unavailableFields).toEqual(expect.arrayContaining([
+      "subscriptionPlan", "modelSwitchApplied", "policyEventId",
+    ]));
+    expect(bundle.unavailableFields).not.toContain("modelSwitchRequested");
+  });
+
+  test("pseudonymizes revisions and trace IDs while preserving approved header names", () => {
+    const row = policyEntry();
+    const fields = ["proxyCommit", "proxyBuildId", "proxyInstanceId", "configRevision",
+      "routeConfigRevision", "modelCatalogRevision", "routeDecisionId", "selectedCandidate",
+      "settingsRevision", "requestSettingsRevision"];
+    for (const field of fields) row.diagnostics![field] = "private-revision";
+    row.diagnostics!.requestIdHeader = "x-request-id";
+    row.diagnostics!.upstreamTraceHeaders = ["x-trace-id", "traceparent", "private-trace", "Bearer secret", "/home/private"];
+    row.diagnostics!.modelSwitchAppliedAt = 1_600;
+    row.diagnostics!.contextUsageRatioEstimate = 0.75;
+    const first = buildSupportExport({ requestIds: [row.requestId] }, [row]);
+    const second = buildSupportExport({ requestIds: [row.requestId] }, [row]);
+    const diagnostic = first.records[0]!.diagnostics as Record<string, any>;
+    for (const field of fields) expect(diagnostic[field]).toMatch(/^psn_[a-f0-9]{24}$/);
+    expect(diagnostic.requestSettingsRevision).toBe(diagnostic.configRevision);
+    expect(diagnostic.upstreamTraceHeaders).toEqual(["x-trace-id", "traceparent"]);
+    expect(diagnostic.requestIdHeader).toBe("x-request-id");
+    expect(diagnostic.traceId).toMatch(/^psn_[a-f0-9]{24}$/);
+    expect(diagnostic.modelSwitchAppliedAt).toBe(1_600);
+    expect(diagnostic.contextUsageRatioEstimate).toBe(0.75);
+    expect(JSON.stringify(first)).not.toContain("private-revision");
+    expect(first.records).not.toEqual(second.records);
+  });
+
+  test("distinguishes validation exclusions from byte truncation", () => {
+    const row = policyEntry();
+    row.model = "/home/private";
+    const bundle = buildSupportExport({ requestIds: [row.requestId] }, [row]);
+    expect(bundle.records).toHaveLength(0);
+    expect(bundle.gaps).toContainEqual({ kind: "record_validation", omittedRecordCount: 1 });
+    expect(bundle.gaps.some(gap => gap.kind === "byte_limit")).toBe(false);
+    expect(bundle.exportCompleteness).toBe("partial");
+  });
+
+  test("reports incomplete canonical scans even when a selected request is found", () => {
+    const row = policyEntry();
+    const bundle = buildSupportExport({ requestIds: [row.requestId] }, [row], {
+      canonicalScanIncomplete: true,
+    });
+    expect(bundle.records).toHaveLength(1);
+    expect(bundle.gaps).toContainEqual({ kind: "log_coverage", omittedRecordCount: 0 });
+    expect(bundle.exportCompleteness).toBe("partial");
+  });
+
   test("computes coverage over large canonical ledgers without argument spreading", () => {
     const row: PersistedUsageEntry = {
       requestId: "old", timestamp: 1_000, provider: "a", model: "m",
