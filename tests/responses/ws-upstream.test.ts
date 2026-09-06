@@ -572,6 +572,10 @@ describe("codexWsUpstreamFetch", () => {
     const bytes = await wsResponse.text();
     expect(bytes).toContain('"code":"cyber_policy"');
     expect(wsCtx.diagnostics?.httpStatus).toBeUndefined();
+    expect(wsCtx.diagnostics?.upstreamHostname).toBe("chatgpt");
+    expect(wsCtx.diagnostics?.endpointClass).toBe("responses");
+    expect(wsCtx.diagnostics?.method).toBe("POST");
+    expect(wsCtx.activeAttempt?.sends?.[0]?.endpointClass).toBe("responses");
     expect(wsCtx.diagnostics?.websocketHandshakeStatus).toBe(101);
     expect(wsCtx.diagnostics?.upstreamResponseId).toBe("resp-policy");
     expect(wsCtx.diagnostics?.upstreamErrorCode).toBe("cyber_policy");

@@ -136,7 +136,10 @@ export function providerFetch(
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch, options.observeTransport);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch,
+        options.observeTransport ? event => notifyTransport(options.observeTransport,
+          event.kind === "send" && event.transport === "websocket"
+            ? { ...event, target: diagnosticTarget(input, init) } : event) : undefined);
     }
     return httpFetch(input, init);
   };
