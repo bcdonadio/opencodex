@@ -1,4 +1,5 @@
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
+import { sanitizeDiagnosticError } from "../../diagnostics/transaction";
 import { CodexWsMetadata, type CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { CODEX_RESPONSES_HTTP_URL, type PreparedCodexWsRequest } from "./codex-ws-request";
 import { CodexWsCorrelation } from "./codex-ws-correlation";
@@ -253,7 +254,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     };
 
     const onClose = (event: unknown) => {
-      observe({ kind: "close", connectionId: session.connectionId, code: (event as { code?: number })?.code });
+      const close = event as { code?: number; reason?: unknown } | null;
+      observe({ kind: "close", connectionId: session.connectionId, code: close?.code,
+        reason: sanitizeDiagnosticError(close?.reason) });
       cleanup();
       if (!opened) {
         if (settledPreOpen) return;

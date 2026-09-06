@@ -71,7 +71,7 @@ export type TransportObservation =
   | { kind: "response"; transport: "http" | "websocket"; response: Response }
   | { kind: "event"; payload: unknown; bytes: number }
   | { kind: "stream_failure"; reason: "client_cancel" | "request_abort" | "owner_cancel" | "prelude_timeout" | "frame_overflow" | "queue_overflow" | "transport_error" | "upstream_close" | "stream_closed" | "protocol_error"; bytes?: number; timeoutMs?: number }
-  | { kind: "connect" | "open" | "connection" | "close" | "mismatch"; connectionId?: string; reused?: boolean; code?: number; sequence?: number; generation?: number; ageMs?: number };
+  | { kind: "connect" | "open" | "connection" | "close" | "mismatch"; connectionId?: string; reused?: boolean; code?: number; reason?: string; sequence?: number; generation?: number; ageMs?: number };
 
 export function notifyTransport(observer: ProviderFetchOptions["observeTransport"], event: TransportObservation): void {
   try { observer?.(event); } catch { /* diagnostics cannot alter dispatch or fallback */ }
