@@ -315,6 +315,52 @@ describe("transaction diagnostics schema", () => {
     ]) expect(send).not.toHaveProperty(field);
   });
 
+  test("rejects file URI and cross-platform path forms without dropping route tokens", () => {
+    const prohibited = [
+      "file:/etc/passwd",
+      "file:///etc/passwd",
+      "file:C:/Users/alice/token",
+      "C:/Users/alice/token",
+      "C:\\Users\\alice\\token",
+      "//server/share/token",
+      "\\\\server\\share\\token",
+    ];
+    for (const value of prohibited) {
+      const diagnostics = createTransactionDiagnostics({ requestId: "ocx-path-matrix", receivedAt: 1_000 });
+      Object.assign(diagnostics, { adapterName: value });
+      const normalized = normalizeTransactionDiagnostics(diagnostics)!;
+      expect(normalized.adapterName).toBeUndefined();
+      expect(normalized.fieldAvailability.adapterName).toEqual({
+        status: "redacted",
+        source: "proxy",
+      });
+
+      const send = beginDiagnosticSend(baseAttempt(), {
+        startedAt: 1_001,
+        provider: value,
+        model: value,
+        adapter: value,
+      });
+      expect(send.provider).toBeUndefined();
+      expect(send.model).toBeUndefined();
+      expect(send.adapter).toBeUndefined();
+    }
+
+    const allowed = beginDiagnosticSend(baseAttempt(), {
+      startedAt: 2_000,
+      provider: "openai",
+      model: "openai/gpt-5.6-sol",
+      adapter: "openai-responses",
+      forwardedModel: "openrouter/meta-llama/llama-3.1",
+    });
+    expect(allowed).toMatchObject({
+      provider: "openai",
+      model: "openai/gpt-5.6-sol",
+      adapter: "openai-responses",
+      forwardedModel: "openrouter/meta-llama/llama-3.1",
+    });
+  });
+
   test("normalizes only bounded event and send prefixes", () => {
     const diagnostics = createTransactionDiagnostics({ requestId: "ocx-work-cap", receivedAt: 1_000 });
     const event = (eventSequence: number) => ({
@@ -566,5 +612,31 @@ describe("transaction diagnostics persistence", () => {
 
     expect(getRequestLogEntries()[0]?.upstreamError).toBeUndefined();
     expect(readUsageEntries()[0]?.upstreamError).toBeUndefined();
+  });
+
+  test("direct upstream errors reject file URI, drive, and UNC path variants", () => {
+    const prohibited = [
+      "file:/etc/passwd",
+      "file:C:/Users/alice/token",
+      "C:/Users/alice/token",
+      "C:\\Users\\alice\\token",
+      "//server/share/token",
+      "\\\\server\\share\\token",
+    ];
+    prohibited.forEach((upstreamError, index) => addRequestLog({
+      requestId: `ocx-path-error-${index}`,
+      timestamp: index + 1,
+      provider: "openai",
+      model: "gpt-test",
+      status: 502,
+      durationMs: 1,
+      usageStatus: "unreported",
+      upstreamError,
+    }));
+
+    expect(getRequestLogEntries().map(entry => entry.upstreamError))
+      .toEqual(Array.from({ length: prohibited.length }, () => undefined));
+    expect(readUsageEntries().map(entry => entry.upstreamError))
+      .toEqual(Array.from({ length: prohibited.length }, () => undefined));
   });
 });

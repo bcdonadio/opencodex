@@ -261,12 +261,20 @@ const SAFE_DIAGNOSTIC_FIELD = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 const SAFE_HOSTNAME = /^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::[0-9]{1,5})?$/;
 const SAFE_ACCOUNT_LABEL = /^(?:main|[po][0-9a-f]{6})$/;
 const UNSAFE_DIAGNOSTIC_TEXT = /(?:\b(?:https?|file):\/\/|\bwww\.|(?:^|[\s"'(])(?:\/(?:home|Users|etc|var|tmp|mnt|opt|usr)\/|[A-Za-z]:\\|\\\\)|(?:^|[\s,{])(?:HOME|PATH|PWD|USER|SHELL|TOKEN|SECRET|API_KEY|AUTHORIZATION)\s*=|[A-Z][A-Z0-9_]{2,}\s*=|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|<\/?(?:thinking|reasoning|analysis)>|\b(?:chain[ -]of[ -]thought|hidden reasoning|private reasoning)\b|(?:^|[\s,{])(?:analysis|reasoning)\s*:)/i;
+const FILE_URI = /\bfile:(?:[\\/]+|[A-Za-z]:[\\/])/i;
+const WINDOWS_OR_UNC_PATH = /(?:^|[\s"'(])(?:[A-Za-z]:[\\/]|[\\/]{2}(?=[^\\/\s]))/;
 
 type DiagnosticSanitizationState = "observed" | "redacted" | "truncated" | "excluded";
 
 interface SanitizedDiagnosticString {
   value?: string;
   state: DiagnosticSanitizationState;
+}
+
+function containsUnsafeDiagnosticText(value: string): boolean {
+  return UNSAFE_DIAGNOSTIC_TEXT.test(value)
+    || FILE_URI.test(value)
+    || WINDOWS_OR_UNC_PATH.test(value);
 }
 
 const IDENTIFIER_FIELDS = [
@@ -370,7 +378,7 @@ function sanitizedStringResult(
   // Remove record/control boundaries before redaction so a credential label cannot use
   // a newline to limit the redactor's range and expose a suffix when this is normalized again.
   const controlsRemoved = value.replace(CONTROL_CHARACTERS, "");
-  if (rejectUnsafe && UNSAFE_DIAGNOSTIC_TEXT.test(controlsRemoved)) return { state: "redacted" };
+  if (rejectUnsafe && containsUnsafeDiagnosticText(controlsRemoved)) return { state: "redacted" };
   const redacted = redactSecretString(controlsRemoved);
   const withoutControls = redacted
     .replace(CONTROL_CHARACTERS, "")
