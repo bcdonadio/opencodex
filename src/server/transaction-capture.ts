@@ -307,6 +307,21 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
       }
       const send = activeSend(ctx);
       if (send) { send.bytesForwarded = Buffer.byteLength(body); send.forwardedModel = ctx.diagnostics?.forwardedModel as string | undefined; }
+    } else {
+      // Read only in-memory byte lengths. Request streams/FormData cannot be
+      // measured here without consuming or reserializing the caller's body.
+      const bytes = body instanceof ArrayBuffer ? body.byteLength
+        : ArrayBuffer.isView(body) ? body.byteLength
+        : body instanceof Blob ? body.size : undefined;
+      if (bytes !== undefined) {
+        d.forwardedRequestBytes = bytes;
+        d.bytesForwarded = Number(d.bytesForwarded ?? 0) + bytes;
+        const send = activeSend(ctx);
+        if (send) send.bytesForwarded = bytes;
+      } else {
+        delete d.forwardedRequestBytes;
+        d.fieldAvailability.forwardedRequestBytes = { status: "not_observed", source: "transport" };
+      }
     }
     recordDiagnosticEvent(ctx.diagnostics!, { type: "upstream.request.sent", at: Date.now(), source: "transport" });
     clean(ctx);
@@ -528,7 +543,16 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
       if (ctx.activeAttempt && !sendOwners.has(ctx.activeAttempt)) sendOwners.set(ctx.activeAttempt, { sendCount: 0 });
       return;
     }
-    if (event.kind === "send") recordForwardedRequest(ctx, event.transport, event.body);
+    if (event.kind === "send") {
+      if (event.target) {
+        const d = diagnostics(ctx);
+        d.upstreamHostname = event.target.upstreamHostname;
+        d.endpointClass = event.target.endpointClass;
+        d.method = event.target.method;
+        d.fieldAvailability.endpointClass = { status: event.target.endpointClass ? "observed" : "not_observed", source: "transport" };
+      }
+      recordForwardedRequest(ctx, event.transport, event.body);
+    }
     else if (event.kind === "response") recordUpstreamResponse(ctx, event.response, event.transport);
     else if (event.kind === "event") recordProtocolEvent(ctx, event.payload, event.bytes, true);
     else {

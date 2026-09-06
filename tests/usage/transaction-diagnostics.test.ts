@@ -38,6 +38,14 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 let home = "";
 let previousHome: string | undefined;
 
+test("upstream hostname normalization accepts only closed diagnostic classes", () => {
+  const base = createTransactionDiagnostics({ requestId: "host-class", receivedAt: Date.now() });
+  for (const host of ["tenant.example", "api.openai.com", "localhost", "127.0.0.1", "a-secret-token"]) {
+    expect(normalizeTransactionDiagnostics({ ...base, upstreamHostname: host })?.upstreamHostname).toBeUndefined();
+  }
+  expect(normalizeTransactionDiagnostics({ ...base, upstreamHostname: "custom" })?.upstreamHostname).toBe("custom");
+});
+
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
   home = mkdtempSync(join(tmpdir(), "ocx-transaction-diagnostics-"));

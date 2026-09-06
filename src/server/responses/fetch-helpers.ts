@@ -67,13 +67,41 @@ export interface ProviderFetchOptions {
 export type TransportObservation =
   | { kind: "queue"; observation: RequestPacingObservation }
   | { kind: "prepared" }
-  | { kind: "send"; transport: "http" | "websocket"; body?: unknown }
+  | { kind: "send"; transport: "http" | "websocket"; body?: unknown; target?: DiagnosticTarget }
   | { kind: "response"; transport: "http" | "websocket"; response: Response }
   | { kind: "event"; payload: unknown; bytes: number }
   | { kind: "connect" | "open" | "connection" | "close" | "mismatch"; connectionId?: string; reused?: boolean; code?: number; sequence?: number; generation?: number; ageMs?: number };
 
 export function notifyTransport(observer: ProviderFetchOptions["observeTransport"], event: TransportObservation): void {
   try { observer?.(event); } catch { /* diagnostics cannot alter dispatch or fallback */ }
+}
+
+export interface DiagnosticTarget {
+  endpointClass?: string;
+  upstreamHostname: string;
+  method?: string;
+}
+
+/** Closed classes only: configured destinations may contain private tenant names. */
+export function diagnosticTarget(input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit): DiagnosticTarget | undefined {
+  try {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const host = url.hostname.toLowerCase();
+    const upstreamHostname = host === "api.openai.com" ? "api_openai"
+      : host === "chatgpt.com" ? "chatgpt"
+      : host === "api.anthropic.com" ? "api_anthropic"
+      : host === "generativelanguage.googleapis.com" ? "google_api"
+      : ["localhost", "127.0.0.1", "[::1]"].includes(host) ? "loopback" : "custom";
+    const path = url.pathname;
+    const endpointClass = path.endsWith("/responses/compact") ? "compact"
+      : path.endsWith("/responses") ? "responses"
+      : path.endsWith("/chat/completions") ? "chat"
+      : path.endsWith("/messages") ? "messages"
+      : /\/images\/(?:generations|edits|variations)$/.test(path) ? "images" : undefined;
+    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    return { upstreamHostname, endpointClass,
+      ...(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].includes(method) ? { method } : {}) };
+  } catch { return undefined; }
 }
 
 export function providerFetch(
@@ -90,7 +118,8 @@ export function providerFetch(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
       const wireInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
-      notifyTransport(options.observeTransport, { kind: "send", transport: "http", body: init?.body });
+      notifyTransport(options.observeTransport, { kind: "send", transport: "http", body: init?.body,
+        target: options.observeTransport ? diagnosticTarget(input, init) : undefined });
       const response = await base(input, wireInit);
       notifyTransport(options.observeTransport, { kind: "response", transport: "http", response });
       return response;

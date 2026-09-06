@@ -238,6 +238,54 @@ function installFake(script: (ws: FakeWebSocket) => void) {
 }
 
 describe("providerFetch routing", () => {
+  test("HTTP diagnostics retain actual status and closed destination classes without consuming bodies", async () => {
+    const ctx: RequestLogContext = { provider: "test", model: "test" };
+    const original = new Response("unchanged", { status: 503 });
+    const body = new Uint8Array([1, 2, 3]);
+    const base = { fetch: async (_input: unknown, init: RequestInit) => {
+      expect(init.body).toBe(body);
+      return original;
+    } } as any;
+    const wrapped = providerFetch(base, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(ctx) });
+    const response = await wrapped("https://private-tenant.example/v1/chat/completions?token=secret", { method: "POST", body });
+    expect(response).toBe(original);
+    expect(response.bodyUsed).toBe(false);
+    expect(ctx.diagnostics?.httpStatus).toBe(503);
+    expect(ctx.diagnostics?.upstreamHostname).toBe("custom");
+    expect(ctx.diagnostics?.endpointClass).toBe("chat");
+    expect(ctx.diagnostics?.method).toBe("POST");
+    expect(ctx.activeAttempt?.sends?.[0]?.endpointClass).toBe("chat");
+    expect(ctx.activeAttempt?.sends?.[0]?.httpStatus).toBe(503);
+    expect(ctx.activeAttempt?.sends?.[0]?.bytesForwarded).toBe(3);
+    expect(ctx.diagnostics?.bytesReceived).toBeUndefined();
+    expect(JSON.stringify(ctx.diagnostics)).not.toContain("private-tenant");
+    expect(JSON.stringify(ctx.diagnostics)).not.toContain("secret");
+    expect(await response.text()).toBe("unchanged");
+  });
+
+  test("Request body streams stay unread and unknown destinations clear stale endpoint classes", async () => {
+    const ctx: RequestLogContext = { provider: "test", model: "test" };
+    const request = new Request("https://private.example/custom/tenant", { method: "POST", body: "private-body" });
+    const wrapped = providerFetch({ fetch: async (input: unknown) => {
+      expect(input).toBe(request);
+      expect(request.bodyUsed).toBe(false);
+      return new Response("ok");
+    } } as any, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(ctx) });
+    await wrapped(request);
+    expect(ctx.diagnostics?.method).toBe("POST");
+    expect(ctx.diagnostics?.endpointClass).toBeUndefined();
+    expect(ctx.diagnostics?.forwardedRequestBytes).toBeUndefined();
+    expect(ctx.diagnostics?.fieldAvailability.forwardedRequestBytes?.status).toBe("not_observed");
+    expect(request.bodyUsed).toBe(false);
+    expect(JSON.stringify(ctx.diagnostics)).not.toContain("private-body");
+  });
+
+  test("throwing HTTP observers preserve the original fetch response", async () => {
+    const response = new Response("unchanged");
+    const wrapped = providerFetch({ fetch: async () => response } as any, BOUNDED_WS_RUNTIME,
+      { observeTransport: () => { throw new Error("diagnostic failure"); } });
+    expect(await wrapped("https://api.openai.com/v1/responses", { method: "POST", body: "{}" })).toBe(response);
+  });
   test("a canary runtime identity cannot open the WS transport", async () => {
     const sentinel = new Response("base");
     let baseCalls = 0;
@@ -509,6 +557,8 @@ describe("codexWsUpstreamFetch", () => {
     const response = await providerFetch(base, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(ctx) })(CODEX_URL, streamingInit());
     expect(await response.text()).toBe("fallback");
     expect(ctx.diagnostics?.httpStatus).toBe(429);
+    expect(ctx.diagnostics?.upstreamHostname).toBe("chatgpt");
+    expect(ctx.activeAttempt?.sends?.[0]?.httpStatus).toBe(429);
     expect(ctx.activeAttempt?.sends?.map(send => send.upstreamTransport)).toEqual(["http"]);
     expect(ctx.diagnostics?.websocketHandshakeStatus).toBeUndefined();
 
