@@ -546,6 +546,130 @@ function joinBytes(chunks: Uint8Array[]): Uint8Array {
   return joined;
 }
 
+describe("relaySseEagerBounded — delivered chunk observation", () => {
+  test.each([false, true])("observes exact UTF-8 output and terminal sentinel (observer throws: %s)", async throws => {
+    const { hooks, rec } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => {
+      delivered.push(chunk.slice());
+      if (throws) throw new Error("delivery observer failed");
+    };
+    const up = controlledUpstream();
+    const output = readAllBytes(relaySseEagerBounded(up.stream, new AbortController(), hooks));
+    const delta = sse(JSON.stringify({ type: "response.output_text.delta", delta: "olá €" }));
+    up.push(delta);
+    up.push(sse(COMPLETED));
+    up.close();
+
+    const actual = await output;
+    expect(actual).toEqual(joinBytes([delta, sse(COMPLETED), doneFrame(enc)]));
+    expect(joinBytes(delivered)).toEqual(actual);
+    expect(rec.dones).toBe(1);
+    expect(rec.synthetics).toEqual([]);
+  });
+
+  test("observes rewritten and injected blocks without retaining the original payload", async () => {
+    const { hooks } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => delivered.push(chunk.slice());
+    hooks.rewriteBlocks = block => block.includes("ORIGINAL")
+      ? [block.replace("ORIGINAL", "réécrit"), ': injected keepalive']
+      : [block];
+    const up = controlledUpstream();
+    const output = readAllBytes(relaySseEagerBounded(up.stream, new AbortController(), hooks));
+    const original = sse(JSON.stringify({ type: "response.output_text.delta", delta: "ORIGINAL" }));
+    up.push(original.subarray(0, 17));
+    up.push(original.subarray(17));
+    up.push(sse(COMPLETED));
+    up.close();
+
+    const actual = await output;
+    expect(joinBytes(delivered)).toEqual(actual);
+    const text = new TextDecoder().decode(actual);
+    expect(text).toContain("réécrit");
+    expect(text).toContain(": injected keepalive\n\n");
+    expect(text).not.toContain("ORIGINAL");
+    expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
+
+  test.each([false, true])("observes partial EOF bytes and synthetic incomplete tail (rewrite: %s)", async rewrite => {
+    const { hooks, rec } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => delivered.push(chunk.slice());
+    if (rewrite) hooks.rewritePayload = payload => payload.replace("ORIGINAL", "restored");
+    const up = controlledUpstream();
+    const output = readAllBytes(relaySseEagerBounded(up.stream, new AbortController(), hooks));
+    up.push(enc.encode('data: {"type":"response.output_text.delta","delta":"ORIGINAL"}'));
+    up.close();
+
+    const actual = await output;
+    expect(joinBytes(delivered)).toEqual(actual);
+    expect(new TextDecoder().decode(actual)).toContain(rewrite ? "restored" : "ORIGINAL");
+    expect(new TextDecoder().decode(actual)).toContain('"reason":"adapter_eof"');
+    expect(actual.slice(-doneFrame(enc).byteLength)).toEqual(doneFrame(enc));
+    expect(rec.synthetics).toEqual(["incomplete"]);
+  });
+
+  test.each(["upstream", "rewrite", "rewrite-eof"] as const)("observes synthetic failed output after %s failure", async failure => {
+    const { hooks, rec } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => delivered.push(chunk.slice());
+    if (failure !== "upstream") hooks.rewritePayload = () => { throw new Error("rewrite failure"); };
+    const up = controlledUpstream();
+    const output = readAllBytes(relaySseEagerBounded(up.stream, new AbortController(), hooks));
+    if (failure === "upstream") up.fail(new Error("upstream failure"));
+    else {
+      up.push(failure === "rewrite" ? sse(DELTA) : enc.encode(`data: ${DELTA}`));
+      up.close();
+    }
+
+    const actual = await output;
+    expect(joinBytes(delivered)).toEqual(actual);
+    const text = new TextDecoder().decode(actual);
+    expect(failedPayload(text).response.status).toBe("failed");
+    expect(countOccurrences(text, FAILED_EVENT_MARKER)).toBe(1);
+    expect(countOccurrences(text, "data: [DONE]\n\n")).toBe(1);
+    expect(rec.synthetics).toEqual(["failed"]);
+  });
+
+  test.each(["reader", "signal"] as const)("does not observe upstream terminal during discard-drain after %s cancellation", async cancellation => {
+    const { hooks, rec } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => delivered.push(chunk.slice());
+    let resolveDone!: () => void;
+    const done = new Promise<void>(resolve => { resolveDone = resolve; });
+    const onDone = hooks.onDone;
+    hooks.onDone = () => { onDone(); resolveDone(); };
+    const up = controlledUpstream();
+    const client = new AbortController();
+    const upstream = new AbortController();
+    const reader = relaySseEagerBounded(up.stream, upstream, hooks, {
+      clientGoneSignal: client.signal,
+      postCancelDrainMs: watchdogMs(2_000),
+    }).getReader();
+    try {
+      up.push(sse(DELTA));
+      expect((await reader.read()).value).toEqual(sse(DELTA));
+      // Consumer promises run after the producer's synchronous enqueue observer.
+      const beforeCancel = joinBytes(delivered);
+      expect(beforeCancel).toEqual(sse(DELTA));
+      if (cancellation === "reader") await reader.cancel();
+      else client.abort();
+      up.push(sse(COMPLETED));
+      up.close();
+      await done;
+
+      expect(rec.terminals.map(terminal => terminal.status)).toEqual(["completed"]);
+      expect(joinBytes(delivered)).toEqual(beforeCancel);
+      expect(rec.cancels).toBe(0);
+      expect(rec.dones).toBe(1);
+    } finally {
+      upstream.abort();
+      reader.releaseLock();
+    }
+  });
+});
+
 describe("relaySseEagerBounded — side-effect parity", () => {
   test("(a) relays bytes verbatim; terminal recorded once; completed captured; onDone once", async () => {
     const { hooks, rec } = makeHooks();
