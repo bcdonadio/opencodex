@@ -38,6 +38,44 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 let home = "";
 let previousHome: string | undefined;
 
+test("stream facts separate event IDs, acceptance and delivery evidence", async () => {
+  const { recordForwardedRequest, recordProtocolEvent, finalizeDiagnostics, recordDeliveredOutput,
+    recordDownstreamTerminal } = await import("../../src/server/transaction-capture");
+  const ctx: import("../../src/server/request-log").RequestLogContext = { provider: "openai", model: "test" };
+  recordForwardedRequest(ctx, "websocket");
+  recordProtocolEvent(ctx, { type: "response.created", id: "event-not-response", event_id: "evt-created",
+    sequence_number: 0, response: { id: "resp-accepted" } }, 0, true);
+  expect(ctx.diagnostics?.upstreamRequestAccepted).toBe(true);
+  expect(ctx.diagnostics?.upstreamResponseId).toBe("resp-accepted");
+  expect(ctx.diagnostics?.upstreamEventId).toBe("evt-created");
+  expect(ctx.diagnostics?.events.at(-1)?.eventId).toBe("evt-created");
+  expect(ctx.activeAttempt?.sends?.[0]?.upstreamEventId).toBe("evt-created");
+  recordProtocolEvent(ctx, { type: "response.failed", response: { id: "resp-accepted" } }, 0, true);
+  ctx.firstOutputMs = 2; // Upstream TTFT is not downstream delivery.
+  finalizeDiagnostics(ctx, 400, "failure", Date.now(), true);
+  expect(ctx.diagnostics?.outputDeliveredBeforeFailure).toBeUndefined();
+  expect(ctx.diagnostics?.downstreamTerminalSentAt).toBeUndefined();
+  recordDeliveredOutput(ctx, "response.output_text.delta");
+  recordDownstreamTerminal(ctx);
+  finalizeDiagnostics(ctx, 400, "failure", Date.now(), true);
+  expect(ctx.diagnostics?.outputDeliveredBeforeFailure).toBe(true);
+  expect(ctx.diagnostics?.lastOutputKind).toBe("text");
+  expect(ctx.diagnostics?.downstreamTerminalSentAt).toBeNumber();
+});
+
+test("stream facts reject unknown event values and synthetic IDs", async () => {
+  const { recordForwardedRequest, recordProtocolEvent } = await import("../../src/server/transaction-capture");
+  const ctx: import("../../src/server/request-log").RequestLogContext = { provider: "openai", model: "test" };
+  recordForwardedRequest(ctx, "http");
+  recordProtocolEvent(ctx, { type: "untrusted-private-text", id: "event-only", sequence_number: -2 }, 0, true);
+  expect(ctx.diagnostics?.upstreamResponseId).toBeUndefined();
+  expect(ctx.diagnostics?.protocolEventType).toBe("unknown");
+  expect(ctx.diagnostics?.lastEventSequence).toBeUndefined();
+  recordProtocolEvent(ctx, { type: "response.failed", event_id: "synthetic-id" }, 0, false, true);
+  expect(ctx.diagnostics?.upstreamEventId).toBeUndefined();
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("untrusted-private-text");
+});
+
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
   home = mkdtempSync(join(tmpdir(), "ocx-transaction-diagnostics-"));
