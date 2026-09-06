@@ -561,9 +561,14 @@ export function buildSupportExport(
   }
 
   let recordLimitOmitted = 0;
+  // Ledger append order can differ from event time after delayed persistence.
+  // Retain the most recent evidence, then present it in chronological order.
+  selected.sort((left, right) =>
+    (finiteNonNegative(left.timestamp) ? left.timestamp : -1)
+    - (finiteNonNegative(right.timestamp) ? right.timestamp : -1));
   if (selected.length > SUPPORT_EXPORT_MAX_RECORDS) {
     recordLimitOmitted = selected.length - SUPPORT_EXPORT_MAX_RECORDS;
-    selected = selected.slice(0, SUPPORT_EXPORT_MAX_RECORDS);
+    selected = selected.slice(-SUPPORT_EXPORT_MAX_RECORDS);
     gaps.push({ kind: "record_limit", omittedRecordCount: recordLimitOmitted });
   }
 

@@ -288,8 +288,22 @@ describe("transaction support export", () => {
     );
 
     expect(bundle.records).toHaveLength(SUPPORT_EXPORT_MAX_RECORDS);
+    expect(bundle.records[0]!.requestId).toBe("ocx-3");
+    expect(bundle.records.at(-1)!.requestId).toBe(`ocx-${SUPPORT_EXPORT_MAX_RECORDS + 2}`);
     expect(bundle.gaps).toContainEqual({ kind: "record_limit", omittedRecordCount: 3 });
     expect(bundle.exportCompleteness).toBe("partial");
+  });
+
+  test("selects the latest timestamps despite out-of-order canonical appends", () => {
+    const entries = Array.from({ length: SUPPORT_EXPORT_MAX_RECORDS + 2 }, (_, index) =>
+      policyEntry(`ocx-${index}`, 1_000 + index));
+    entries.reverse();
+    const bundle = buildSupportExport({ from: 0, to: 10_000 }, entries);
+    expect(bundle.records[0]!.requestId).toBe("ocx-2");
+    expect(bundle.records.at(-1)!.requestId).toBe(`ocx-${SUPPORT_EXPORT_MAX_RECORDS + 1}`);
+    expect(bundle.records.every((record, index) => index === 0
+      || record.timestamp >= bundle.records[index - 1]!.timestamp)).toBe(true);
+    expect(bundle.gaps).toContainEqual({ kind: "record_limit", omittedRecordCount: 2 });
   });
 
   test("serialized JSON never exceeds 8 MiB and byte truncation is explicit", () => {
@@ -306,6 +320,8 @@ describe("transaction support export", () => {
       row.upstreamError = "x".repeat(500);
       return row;
     });
+    // This evidence exists only in the tail that the byte budget excludes.
+    entries.at(-1)!.diagnostics!.policyEventId = "private-final-policy";
     const bundle = buildSupportExport(
       { from: 0, to: 10_000 }, entries,
       { generatedAt: 20_000, pseudonymKey: new Uint8Array(32) },
@@ -314,5 +330,7 @@ describe("transaction support export", () => {
     expect(Buffer.byteLength(JSON.stringify(bundle), "utf8")).toBeLessThanOrEqual(SUPPORT_EXPORT_MAX_BYTES);
     expect(bundle.gaps.some(gap => gap.kind === "byte_limit")).toBe(true);
     expect(bundle.exportCompleteness).toBe("partial");
+    expect(bundle.records.some(record => (record.diagnostics as Record<string, unknown>).policyEventId)).toBe(false);
+    expect(bundle.unavailableFields).toContain("policyEventId");
   });
 });
