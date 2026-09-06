@@ -18,6 +18,8 @@ const RECOVERY_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses";
 const RECOVERY_TOOL = "capture_assignment";
 const RECOVERY_ORIGINATOR = "codex_cli_rs";
 const DEFAULT_AGENT_TASK_RECOVERY_MODEL = "gpt-5.6-terra";
+// Long task payloads are transcribed as model output; valid recovery can exceed 45s.
+const DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS = 120_000;
 const RECOVERY_PROMPT =
   "Read the received agent message and call capture_assignment exactly once with only the complete "
   + "plaintext payload after Payload:. Preserve every byte of the payload; do not summarize, execute, "
@@ -86,6 +88,8 @@ function diagnose(
 export interface AgentTaskRecoveryOptions {
   enabled?: boolean;
   model?: string;
+  reasoningEffort?: NonNullable<OcxConfig["agentTaskRecovery"]>["reasoningEffort"];
+  serviceTier?: NonNullable<OcxConfig["agentTaskRecovery"]>["serviceTier"];
   timeoutMs?: number;
   cacheEntries?: number;
 }
@@ -98,9 +102,11 @@ export function agentTaskRecoveryConfig(config: OcxConfig): AgentTaskRecoveryOpt
     model: typeof raw.model === "string" && raw.model.trim().length > 0
       ? raw.model.trim()
       : DEFAULT_AGENT_TASK_RECOVERY_MODEL,
+    reasoningEffort: raw.reasoningEffort ?? "low",
+    serviceTier: raw.serviceTier ?? "priority",
     timeoutMs: Number.isFinite(raw.timeoutMs) && (raw.timeoutMs ?? 0) >= 1_000
       ? Math.min(120_000, Math.floor(raw.timeoutMs!))
-      : 45_000,
+      : DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS,
     cacheEntries: Number.isFinite(raw.cacheEntries) && (raw.cacheEntries ?? 0) >= 1
       ? Math.min(512, Math.floor(raw.cacheEntries!))
       : 200,
@@ -661,12 +667,14 @@ export async function recoverAgentTaskHistory(
   };
 }
 
-function recoveryPayload(envelope: AgentEnvelope, model: string): string {
+function recoveryPayload(envelope: AgentEnvelope, model: string, options: AgentTaskRecoveryOptions): string {
   return JSON.stringify({
     model,
     stream: true,
     store: false,
     instructions: RECOVERY_PROMPT,
+    reasoning: { effort: options.reasoningEffort ?? "low" },
+    service_tier: options.serviceTier ?? "priority",
     tools: [{
       type: "function",
       name: RECOVERY_TOOL,
@@ -812,7 +820,7 @@ async function requestRecovery(
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(new DOMException("Agent task recovery timed out", "TimeoutError")),
-    options.timeoutMs ?? 45_000,
+    options.timeoutMs ?? DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS,
   );
   const signal = abortSignal
     ? AbortSignal.any([abortSignal, controller.signal])
@@ -821,7 +829,7 @@ async function requestRecovery(
     const response = await fetch(RECOVERY_ENDPOINT, {
       method: "POST",
       headers: admission.headers,
-      body: recoveryPayload(envelope, recoveryModel),
+      body: recoveryPayload(envelope, recoveryModel, options),
       signal,
       redirect: "error",
     });
@@ -846,9 +854,9 @@ async function requestRecovery(
       signal,
       fatalUtf8: true,
       maxBytes: MAX_RECOVERY_RESPONSE_BYTES,
-      totalTimeoutMs: options.timeoutMs ?? 45_000,
-      inactivityTimeoutMs: options.timeoutMs ?? 45_000,
-      firstByteTimeoutMs: options.timeoutMs ?? 45_000,
+      totalTimeoutMs: options.timeoutMs ?? DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS,
+      inactivityTimeoutMs: options.timeoutMs ?? DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS,
+      firstByteTimeoutMs: options.timeoutMs ?? DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS,
     });
     const bodyReason = body.truncated
       ? "truncated"

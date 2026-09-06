@@ -591,7 +591,11 @@ export interface OcxConfig {
     enabled?: boolean;
     /** ChatGPT model used by the recovery request. Default: gpt-5.6-terra. */
     model?: string;
-    /** Recovery request timeout in milliseconds. Default: 45000. */
+    /** Reasoning effort for the decrypting model only. Default: low. */
+    reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+    /** Requested service tier for recovery only. Default: priority. */
+    serviceTier?: "auto" | "default" | "flex" | "priority";
+    /** Recovery request timeout in milliseconds. Default: 120000 (maximum). */
     timeoutMs?: number;
     /** Maximum in-memory ciphertext-to-assignment entries. Default: 200. */
     cacheEntries?: number;

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import {
   clearResponseStateForTests,
@@ -528,6 +528,8 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(fetchedUrls).toHaveLength(2);
     expect(fetchedUrls[0]).toContain("chatgpt.com/backend-api/codex");
     expect(forwardedBodies[0]).toContain("capture_assignment");
+    expect(JSON.parse(forwardedBodies[0]!).reasoning).toEqual({ effort: "low" });
+    expect(JSON.parse(forwardedBodies[0]!).service_tier).toBe("priority");
     expect(forwardedBodies[1]).toContain("Implement the focused regression test.");
     expect(forwardedBodies[1]).not.toContain(FERNET_TASK);
     expect(forwardedBodies[1].match(/Message Type: NEW_TASK/g) ?? []).toHaveLength(0);
@@ -535,6 +537,24 @@ describe("agent task recovery (opt-in, default off)", () => {
     const terminal = routedBody.messages?.at(-1);
     expect(terminal?.role).toBe("user");
     expect(terminal?.content === assignment || JSON.stringify(terminal?.content) === JSON.stringify([{ type: "text", text: assignment }])).toBe(true);
+  });
+
+  test("configured recovery effort and tier reach only the decrypting request", async () => {
+    const config = routedConfig({ enabled: true, reasoningEffort: "medium", serviceTier: "default" });
+    const bodies: Array<Record<string, any>> = [];
+    globalThis.fetch = (async (url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return String(url).includes("chatgpt.com")
+        ? new Response(recoverySse("Review the supplied plan."))
+        : providerResponse();
+    }) as typeof fetch;
+    const response = await post(config, "xai/grok-4.5", encryptedInput(), codexHeaders());
+    expect(response.status).toBe(200);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.reasoning).toEqual({ effort: "medium" });
+    expect(bodies[0]!.service_tier).toBe("default");
+    expect(bodies[1]!.service_tier).toBeUndefined();
+    expect(bodies[1]!.reasoning).toBeUndefined();
   });
 
   test("recovers an encrypted MESSAGE follow-up before routed-provider dispatch", async () => {
@@ -1360,6 +1380,43 @@ describe("agent task recovery (opt-in, default off)", () => {
 
     expect(response.status).toBe(400);
     expect(providerFetches).toBe(0);
+  });
+
+  test("default recovery budgets admit a long task still streaming beyond 45 seconds", async () => {
+    // Scale only the old/new recovery deadlines; the stream's completion remains
+    // independently scheduled. This models the 50.9-second, 13 KiB production task.
+    const schedule = globalThis.setTimeout;
+    const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((callback: TimerHandler, delay?: number, ...args: unknown[]) =>
+      schedule(callback, delay === 45_000 || delay === 120_000 ? delay / 100 : delay, ...args)
+    ) as typeof setTimeout);
+    const assignment = "Complete plan content. ".repeat(600);
+    let completionTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancellations = 0;
+    try {
+      globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'));
+          completionTimer = schedule(() => {
+            controller.enqueue(new TextEncoder().encode(recoverySse(assignment)));
+            controller.close();
+          }, 510);
+        },
+        cancel() { cancellations += 1; clearTimeout(completionTimer); },
+      }))) as typeof fetch;
+      for (const options of [{ enabled: true }, agentTaskRecoveryConfig(routedConfig())!]) {
+        resetAgentTaskRecoveryState();
+        const input = encryptedInput();
+        expect((await recoverEncryptedAgentTask(
+          new Request("http://localhost/v1/responses", { headers: codexHeaders() }),
+          input, options, routedConfig(),
+        )).recovered).toBe(true);
+        expect(JSON.stringify(input)).toContain(assignment);
+      }
+      expect(cancellations).toBe(0);
+    } finally {
+      clearTimeout(completionTimer);
+      timerSpy.mockRestore();
+    }
   });
 
   test("times out recovery without dispatching the encrypted task", async () => {

@@ -143,7 +143,9 @@ from a native ChatGPT parent to a routed child. It is disabled by default. When 
 and the final routed child input contains an otherwise unreadable Fernet `NEW_TASK` or `MESSAGE`
 payload, opencodex uses a raw Responses passthrough request
 to the fixed `https://chatgpt.com/backend-api/codex/responses` endpoint with forward-mode
-authentication. ChatGPT returns the plaintext payload through a forced function call; opencodex
+authentication. By default, the recovery model uses low reasoning effort, requests priority service, and returns
+the plaintext payload through a forced
+function call; opencodex
 then converts only that collaboration item to a standard user message before routed-provider dispatch.
 The routed recovery message strips transport routing metadata and contains exactly one
 payload-only user text value.
@@ -162,7 +164,23 @@ ChatGPT backend behavior and may stop working after a backend change. The recove
 model output, not a cryptographically verified plaintext, so byte-for-byte fidelity is not
 guaranteed. A scoped cache miss may add an authenticated ChatGPT request, consume account quota, and
 add latency before the routed request. Concurrent requests for the same scoped task share one
-recovery request. Startup prints a warning whenever the feature is enabled.
+recovery request. Recovery waits up to 120 seconds by default, including reading the complete
+response. Large task payloads can take longer than 45 seconds to transcribe even while the
+backend is actively streaming. An explicit `timeoutMs` remains authoritative (1,000–120,000 ms);
+older configurations set to 45,000 keep that shorter deadline until changed.
+Startup prints a warning whenever the feature is enabled.
+
+Configure the decrypting request independently of the routed worker under `agentTaskRecovery`:
+
+| Field | Default | Values |
+| --- | --- | --- |
+| `reasoningEffort` | `low` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `serviceTier` | `priority` | `auto`, `default`, `flex`, `priority` |
+
+These map to `reasoning.effort` and `service_tier` on the recovery request only. They do not
+change the downstream worker's model, effort, or tier. Choose values supported by the configured
+recovery model and account; a requested tier does not guarantee the backend's actual service tier.
+
 
 Admission and retention are deliberately narrow:
 
@@ -206,7 +224,9 @@ model output rather than authenticated plaintext.
   "agentTaskRecovery": {
     "enabled": true,
     "model": "gpt-5.6-terra",
-    "timeoutMs": 45000,
+    "reasoningEffort": "low",
+    "serviceTier": "priority",
+    "timeoutMs": 120000,
     "cacheEntries": 200
   }
 }

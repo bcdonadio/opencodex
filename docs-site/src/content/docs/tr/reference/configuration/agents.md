@@ -227,7 +227,9 @@ değerlendirilmelidir.
   "agentTaskRecovery": {
     "enabled": true,
     "model": "gpt-5.6-terra",
-    "timeoutMs": 45000,
+    "reasoningEffort": "low",
+    "serviceTier": "priority",
+    "timeoutMs": 120000,
     "cacheEntries": 200
   }
 }

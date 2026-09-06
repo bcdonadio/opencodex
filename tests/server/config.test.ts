@@ -1022,6 +1022,8 @@ describe("opencodex config defaults", () => {
     const recovery = {
       enabled: true,
       model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: "default",
       timeoutMs: 45_000,
       cacheEntries: 200,
     };
@@ -1036,6 +1038,8 @@ describe("opencodex config defaults", () => {
       true,
       { enabled: "true" },
       { enabled: true, model: " " },
+      { enabled: true, reasoningEffort: "invalid" },
+      { enabled: true, serviceTier: "invalid" },
       { enabled: true, timeoutMs: 999 },
       { enabled: true, timeoutMs: 120_001 },
       { enabled: true, cacheEntries: 0 },
