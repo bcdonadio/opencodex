@@ -14,6 +14,13 @@ function base64Bytes(data: string): number | undefined {
   return data.length / 4 * 3 - padding;
 }
 
+function inlineBase64(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > MAX_BYTES || !value.startsWith("data:")) return undefined;
+  const comma = value.indexOf(",");
+  if (comma < 5 || comma > 128 || !value.slice(0, comma).endsWith(";base64")) return undefined;
+  return value.slice(comma + 1);
+}
+
 /** Count JSON UTF-8 bytes without invoking toJSON or allocating a serialized body. */
 function jsonBytes(value: unknown, budget: { nodes: number; bytes: number }, depth = 0): number | undefined {
   if (--budget.nodes < 0 || depth > 32) return undefined;
@@ -75,6 +82,7 @@ export function summarizeRequestShape(body: Record<string, unknown>): {
   };
   values.conversationItemCount = values.inputItemCount!;
   for (const field of COUNT_FIELDS) values[field] = 0;
+  if (typeof body.input === "string") values.messageCount = 1;
   const budget = { nodes: MAX_NODES, bytes: MAX_BYTES };
   let remaining = 2048, limited = false, resultsKnown = true, attachmentsKnown = true;
   let resultBytes = 0, largest = 0, attachmentBytes = 0, attachmentChars = MAX_BYTES;
@@ -83,10 +91,14 @@ export function summarizeRequestShape(body: Record<string, unknown>): {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
     const item = raw as Record<string, unknown>;
     const type = item.type;
+    if (type === "additional_tools" && Array.isArray(item.tools)) values.toolDefinitionCount! += item.tools.length;
     if (type === "message" || typeof item.role === "string") values.messageCount!++;
-    if (type === "function_call" || type === "custom_tool_call" || type === "tool_use" || type === "server_tool_use") values.toolCallCount!++;
+    if (typeof type === "string" && ["function_call", "custom_tool_call", "tool_use", "server_tool_use", "web_search_call", "file_search_call",
+      "computer_call", "local_shell_call", "shell_call", "mcp_call", "image_generation_call", "code_interpreter_call"].includes(type)) values.toolCallCount!++;
     if (Array.isArray(item.tool_calls)) values.toolCallCount! += item.tool_calls.length;
-    if (type === "function_call_output" || type === "custom_tool_call_output" || type === "tool_result" || item.role === "tool") {
+    if (type === "function_call_output" || type === "custom_tool_call_output" || type === "tool_result"
+      || type === "computer_call_output" || type === "local_shell_call_output" || type === "shell_call_output"
+      || item.role === "tool" || item.role === "function") {
       values.toolResultCount!++;
       const output = Object.hasOwn(item, "output") ? item.output : item.content;
       let size: number | undefined;
@@ -111,7 +123,11 @@ export function summarizeRequestShape(body: Record<string, unknown>): {
     if (image || audio || file) {
       const source = item.source as Record<string, unknown> | undefined;
       const audioData = item.input_audio as Record<string, unknown> | undefined;
-      const data = source?.type === "base64" ? source.data : audioData?.data;
+      const imageUrl = typeof item.image_url === "object" && item.image_url !== null
+        ? (item.image_url as Record<string, unknown>).url : item.image_url;
+      const fileBody = item.file as Record<string, unknown> | undefined;
+      const data = source?.type === "base64" ? source.data : audioData?.data
+        ?? inlineBase64(imageUrl) ?? inlineBase64(item.file_data ?? fileBody?.file_data);
       if (typeof data === "string" && data.length <= attachmentChars) {
         attachmentChars -= data.length;
         const size = base64Bytes(data);

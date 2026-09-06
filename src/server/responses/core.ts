@@ -1,4 +1,4 @@
-import { transportObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation } from "../transaction-capture";
+import { transportObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput } from "../transaction-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -6026,6 +6026,7 @@ async function handleResponsesInner(
             }
           },
           onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+            recordCompactionOutput(logCtx, response);
             commitReasoningReplayServingRoute();
             rememberKiroDeliveredFinalAnswer(adapter.name, response);
             if (!routedCompaction) {
@@ -6096,6 +6097,7 @@ async function handleResponsesInner(
         }
       },
     });
+    recordCompactionOutput(logCtx, json);
     if (!routedCompaction) {
       rememberKiroDeliveredFinalAnswer(adapter.name, json);
       rememberResponseState(
@@ -7187,6 +7189,7 @@ async function handleResponsesInner(
           }
         },
         onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+          recordCompactionOutput(logCtx, response);
           commitReasoningReplayServingRoute();
           rememberKiroDeliveredFinalAnswer(activeAdapter.name, response);
           // Compaction turns must NOT enter the continuation cache: _rawBody still holds the full
@@ -7264,6 +7267,7 @@ async function handleResponsesInner(
         }
       },
     });
+    recordCompactionOutput(logCtx, json);
     // See the streaming branch: compaction turns skip the continuation cache.
     if (!routedCompaction) {
       rememberKiroDeliveredFinalAnswer(activeAdapter.name, json);

@@ -13,7 +13,7 @@ import {
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
-import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordDeliveredOutput, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
+import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordContextTransformation, recordDeliveredOutput, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import type { AdapterRequest } from "../adapters/base";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -537,11 +537,26 @@ export function recordAttemptRequestedEffort(logCtx: RequestLogContext): void {
   }
 }
 
+const contextObservationOwners = new WeakMap<RequestLogContext, WeakSet<AdapterRequest>>();
+
+/** Copy adapter-owned bounded observations without retaining the built request. */
+function recordAdapterContext(logCtx: RequestLogContext, request: AdapterRequest): void {
+  captureSafely(() => {
+    let seen = contextObservationOwners.get(logCtx);
+    if (!seen) { seen = new WeakSet(); contextObservationOwners.set(logCtx, seen); }
+    if (seen.has(request)) return;
+    seen.add(request);
+    if (!Array.isArray(request.contextLog)) return;
+    for (const observation of request.contextLog.slice(0, 16)) recordContextTransformation(logCtx, observation);
+  });
+}
+
 /** Copy the adapter's exact outbound reasoning parameter into the durable request log. */
 export function recordAdapterReasoning(
   logCtx: RequestLogContext,
   request: AdapterRequest,
 ): void {
+  recordAdapterContext(logCtx, request);
   delete logCtx.effectiveEffort;
   delete logCtx.reasoningWireField;
   delete logCtx.reasoningWireValue;

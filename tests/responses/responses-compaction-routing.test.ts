@@ -793,6 +793,7 @@ describe("bare native compaction model without canonical openai (#2901)", () => 
     expect(logCtx.diagnostics?.contextTransformationKinds).toContain("synthetic_compaction");
     expect(logCtx.diagnostics?.locallyInjectedItemCounts).toMatchObject({ message: 1 });
     expect(logCtx.diagnostics?.droppedItemCounts).toMatchObject({ tool_definition: 1 });
+    expect(logCtx.diagnostics?.compactionOccurred).toBe(true);
     const json = await res.json() as { output?: Array<{ type?: string }> };
     expect((json.output ?? []).filter(item => item.type === "compaction").length).toBe(1);
   });

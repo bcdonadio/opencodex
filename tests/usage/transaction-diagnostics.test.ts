@@ -37,6 +37,46 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { recordContextTransformation, recordCompletedCompaction, recordReconstructedContext, recordContextEstimate,
   recordProtocolEvent, recordRequestShape } from "../../src/server/transaction-capture";
 import type { RequestLogContext } from "../../src/server/request-log";
+import { recordAdapterReasoning } from "../../src/server/request-log";
+import { recordForwardedRequest } from "../../src/server/transaction-capture";
+import type { AdapterRequest } from "../../src/adapters/base";
+
+test("adapter context counts survive log ingestion before reasoning metadata and deduplicate same build", () => {
+  const ctx = {} as RequestLogContext;
+  const request = { url: "https://example.test", headers: {}, body: "{}", contextLog: [
+    { kind: "adapter_normalization", injected: { message: 1 }, dropped: { message: 1 } },
+    { kind: "instruction_injection", truncated: { instruction: 2 } },
+  ] } as AdapterRequest;
+  recordAdapterReasoning(ctx, request);
+  recordAdapterReasoning(ctx, request);
+  expect(ctx.diagnostics?.locallyInjectedItemCounts).toEqual({ message: 1 });
+  expect(ctx.diagnostics?.droppedItemCounts).toEqual({ message: 1 });
+  expect(ctx.diagnostics?.truncatedItemCounts).toEqual({ instruction: 2 });
+  expect(normalizeTransactionDiagnostics(ctx.diagnostics)?.truncatedItemCounts).toEqual({ instruction: 2 });
+});
+
+test("forwarded shape cannot carry counts from a prior send into an oversized retry", () => {
+  const ctx = {} as RequestLogContext;
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "first", input: [{ role: "user", content: "hi" }] }));
+  expect(ctx.diagnostics?.forwardedInputItemCount).toBe(1);
+  recordForwardedRequest(ctx, "http", JSON.stringify({ model: "second", input: "x".repeat(1024 * 1024) }));
+  expect(ctx.diagnostics?.forwardedInputItemCount).toBeUndefined();
+  expect(ctx.diagnostics?.forwardedModel).toBeUndefined();
+});
+
+test("caller observes supported inline attachments and additional tools without retaining data URIs", () => {
+  const ctx = {} as RequestLogContext;
+  recordRequestShape(ctx, { max_completion_tokens: 10, input: [
+    { type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,YWJj" },
+      { type: "input_file", file_data: "data:application/pdf;base64,YWI=" }] },
+    { type: "additional_tools", tools: [{ type: "function", name: "never-retain-tool-name" }] },
+  ] });
+  expect(ctx.diagnostics?.attachmentBytes).toBe(5);
+  expect(ctx.diagnostics?.toolDefinitionCount).toBe(1);
+  expect(ctx.diagnostics?.maxOutputTokens).toBe(10);
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("data:");
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("never-retain-tool-name");
+});
 
 test("context observations preserve operation provenance and reject arbitrary counter labels", () => {
   const ctx = {} as RequestLogContext;

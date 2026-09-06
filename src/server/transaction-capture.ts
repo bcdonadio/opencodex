@@ -73,6 +73,16 @@ export function recordCompletedCompaction(ctx: RequestLogContext, source: "proxy
   });
 }
 
+/** Bounded observation of an actual completed bridge response, including buffered Responses. */
+export function recordCompactionOutput(ctx: RequestLogContext, response: Record<string, unknown>): void {
+  captureSafely(() => {
+    if (response.status === "completed" && Array.isArray(response.output)
+      && response.output.slice(0, 1024).some(item => !!item && typeof item === "object" && item.type === "compaction")) {
+      recordCompletedCompaction(ctx);
+    }
+  });
+}
+
 /** Diagnostics never share exception handling with dispatch/admission. */
 export function captureSafely(action: () => void): void { try { action(); } catch { /* optional observation */ } }
 
@@ -273,7 +283,7 @@ export function recordRequestShape(ctx: RequestLogContext, body: unknown, bytes?
       d.deltaInputCount = typeof b.input === "string" ? 1 : Array.isArray(b.input) ? b.input.length : Array.isArray(b.messages) ? b.messages.length : 0;
       d.continuationMode = previous ? "previous_response" : "explicit_input";
       d.streamingRequested = b.stream; d.storeRequested = b.store; d.parallelToolCalls = b.parallel_tool_calls;
-      d.maxOutputTokens = b.max_output_tokens ?? b.max_tokens;
+      d.maxOutputTokens = b.max_output_tokens ?? b.max_completion_tokens ?? b.max_tokens;
       d.truncationMode = b.truncation;
       d.toolChoiceMode = typeof b.tool_choice === "string" ? b.tool_choice : undefined;
     }
@@ -285,6 +295,18 @@ export function recordForwardedRequest(ctx: RequestLogContext, transport: "http"
   captureSafely(() => {
     recordSelectedRoute(ctx);
     const d = diagnostics(ctx);
+    // Every physical send owns its shape. An opaque/oversized retry body must
+    // never inherit the prior send's counts or model as current wire evidence.
+    for (const suffix of ["InputItemCount", "ConversationItemCount", "MessageCount", "ToolDefinitionCount", "ToolCallCount",
+      "ToolResultCount", "ReasoningItemCount", "EncryptedItemCount", "ImageCount", "AudioCount", "FileCount",
+      "AttachmentBytes", "ToolResultBytes", "LargestToolResultBytes"]) {
+      delete d[`forwarded${suffix}`];
+      delete d.fieldAvailability[`forwarded${suffix}`];
+    }
+    delete d.forwardedModel;
+    delete d.forwardedPreviousResponseId;
+    delete d.previousResponseRewriteApplied;
+    delete d.forwardedRequestBytes;
     const clock = clocks.get(d)!;
     if (clock.lastSend) finishDiagnosticSend(clock.lastSend, { endedAt: clock.lastSend.endedAt ?? Date.now(),
       ...(clock.lastSend.status === undefined && clock.lastSend.httpStatus !== undefined ? { status: clock.lastSend.httpStatus } : {}) });
