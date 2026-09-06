@@ -42,6 +42,112 @@ import type { RequestLogContext } from "../../src/server/request-log";
 import { recordAdapterReasoning } from "../../src/server/request-log";
 import { recordForwardedRequest } from "../../src/server/transaction-capture";
 import type { AdapterRequest } from "../../src/adapters/base";
+import { captureAdapterExecution, finalizeDiagnostics, transportObserver } from "../../src/server/transaction-capture";
+import { providerFetch } from "../../src/server/responses/fetch-helpers";
+import { noteAttemptSend } from "../../src/server/request-log";
+import type { OcxProviderConfig } from "../../src/types";
+
+test("custom adapter execution retains unobserved calls across retries and attempt changes", async () => {
+  const ctx = { provider: "custom", model: "m" } as RequestLogContext;
+  const attempt = beginRequestAttempt(1, "custom", "m", "custom");
+  ctx.activeAttempt = attempt;
+  const provider = { adapter: "custom" } as OcxProviderConfig;
+  finalizeDiagnostics(ctx, 502, "custom", Date.now());
+  expect(ctx.diagnostics?.upstreamCallMade).toBe(false);
+  for (let i = 0; i < 2; i++) {
+    noteAttemptSend(attempt, 25, i ? "key-429" : undefined);
+    await captureAdapterExecution(ctx, providerFetch(provider, undefined, {
+      observeTransport: transportObserver(ctx),
+    }), async () => Response.json({ ok: true }));
+  }
+  finalizeDiagnostics(ctx, 200, "custom", Date.now());
+  expect(attempt.sendCount).toBe(2);
+  expect(attempt.sends).toBeUndefined();
+  expect(attempt.recoveryKinds).toEqual(["key-429"]);
+  expect(ctx.diagnostics?.upstreamCallMade).toBeUndefined();
+  expect(ctx.diagnostics?.fieldAvailability.upstreamCallMade?.status).toBe("not_observed");
+  ctx.activeAttempt = beginRequestAttempt(2, "next", "m", "custom");
+  noteAttemptSend(ctx.activeAttempt, 1);
+  await captureAdapterExecution(ctx, providerFetch(provider, undefined, {
+    observeTransport: transportObserver(ctx),
+  }), async () => { throw new Error("adapter failed before any observable dispatch"); }).catch(() => {});
+  finalizeDiagnostics(ctx, 502, "custom", Date.now());
+  expect(ctx.activeAttempt.sendCount).toBe(1);
+  expect(ctx.activeAttempt.sends).toBeUndefined();
+  expect(ctx.diagnostics?.upstreamCallMade).not.toBe(false);
+});
+
+test("custom adapter physical executor owns multiple sends and rejected admission", async () => {
+  const ctx = { provider: "custom", model: "m" } as RequestLogContext;
+  ctx.activeAttempt = beginRequestAttempt(1, "custom", "m", "custom");
+  const provider = { adapter: "custom", fetch: Object.assign(async () => Response.json({ ok: true }), {
+    preconnect() {},
+  }) } as unknown as OcxProviderConfig;
+  noteAttemptSend(ctx.activeAttempt, 1);
+  await captureAdapterExecution(ctx, providerFetch(provider, undefined, {
+    observeTransport: transportObserver(ctx),
+  }), async executor => {
+    await executor("https://example.test/responses", { method: "POST", body: "{}" });
+    return executor.unpacedFetch!("https://example.test/responses", { method: "POST", body: "{}" });
+  });
+  finalizeDiagnostics(ctx, 200, "physical", Date.now());
+  expect(ctx.activeAttempt.sendCount).toBe(2);
+  expect(ctx.activeAttempt.sends).toHaveLength(2);
+  expect(ctx.diagnostics?.upstreamCallMade).toBe(true);
+
+  const rejected = { provider: "custom", model: "m" } as RequestLogContext;
+  rejected.activeAttempt = beginRequestAttempt(1, "custom", "m", "custom");
+  noteAttemptSend(rejected.activeAttempt, 1);
+  const executor = providerFetch(provider, undefined, {
+    observeTransport: transportObserver(rejected),
+    beforeDispatch() { throw new Error("admission rejected"); },
+  });
+  await captureAdapterExecution(rejected, executor, fetch => fetch("https://example.test"))
+    .catch(() => {});
+  finalizeDiagnostics(rejected, 502, "rejected", Date.now());
+  expect(rejected.activeAttempt.sendCount).toBe(0);
+  expect(rejected.activeAttempt.sends).toBeUndefined();
+  expect(rejected.diagnostics?.upstreamCallMade).toBe(false);
+
+  const paced = { provider: "custom", model: "m" } as RequestLogContext;
+  paced.activeAttempt = beginRequestAttempt(1, "custom", "m", "custom");
+  noteAttemptSend(paced.activeAttempt, 1);
+  const pacedExecutor = providerFetch(provider, undefined, { observeTransport: transportObserver(paced) });
+  pacedExecutor.waitForPacing = async () => { throw new Error("pacing rejected"); };
+  await captureAdapterExecution(paced, pacedExecutor, async fetch => {
+    await fetch.waitForPacing!();
+    return fetch.unpacedFetch!("https://example.test");
+  }).catch(() => {});
+  finalizeDiagnostics(paced, 502, "paced", Date.now());
+  expect(paced.activeAttempt.sendCount).toBe(0);
+  expect(paced.activeAttempt.sends).toBeUndefined();
+  expect(paced.diagnostics?.upstreamCallMade).toBe(false);
+});
+
+test("adapter diagnostics setup failure preserves execution and thrown errors", async () => {
+  const ctx = {} as RequestLogContext;
+  Object.defineProperty(ctx, "activeAttempt", { get() { throw new Error("diagnostics unavailable"); } });
+  const executor = providerFetch({ adapter: "custom" } as OcxProviderConfig);
+  const result = Response.json({ ok: true });
+  expect(await captureAdapterExecution(ctx, executor, async fetch => {
+    expect(fetch).toBe(executor);
+    return result;
+  })).toBe(result);
+  const failure = new Error("original adapter failure");
+  await expect(captureAdapterExecution(ctx, executor, async () => { throw failure; })).rejects.toBe(failure);
+});
+
+test("prepared custom adapter admission never claims an invocation before execution", () => {
+  const ctx = { provider: "custom", model: "m" } as RequestLogContext;
+  ctx.activeAttempt = beginRequestAttempt(1, "custom", "m", "custom");
+  noteAttemptSend(ctx.activeAttempt, 1);
+  transportObserver(ctx)({ kind: "prepared" });
+  // The outer pacing wait rejects, so the adapter execution boundary is never entered.
+  finalizeDiagnostics(ctx, 499, "admission", Date.now());
+  expect(ctx.activeAttempt.sendCount).toBe(0);
+  expect(ctx.activeAttempt.sends).toBeUndefined();
+  expect(ctx.diagnostics?.upstreamCallMade).toBe(false);
+});
 
 test("adapter context counts survive log ingestion before reasoning metadata and deduplicate same build", () => {
   const ctx = {} as RequestLogContext;

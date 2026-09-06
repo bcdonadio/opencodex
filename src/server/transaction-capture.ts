@@ -5,7 +5,7 @@ import {
   type DiagnosticEventTypeV1, type DiagnosticSendV1, type TransactionDiagnosticsV1,
 } from "../diagnostics/transaction";
 import type { RequestLogContext } from "./request-log";
-import type { TransportObservation } from "./responses/fetch-helpers";
+import type { ProviderFetch, TransportObservation } from "./responses/fetch-helpers";
 import { httpStatusFromTerminalError } from "../lib/errors";
 import { version as proxyVersion } from "../../package.json";
 import { observeDecodedRequestBody } from "./request-decompress";
@@ -18,6 +18,43 @@ import { recordAuthSend } from "./transaction-auth-capture";
 
 const clocks = new WeakMap<TransactionDiagnosticsV1, { start: number; output?: number; terminal?: number; sent?: number; event?: number; firstEvent?: number; connect?: number; finalized?: number; lastSend?: DiagnosticSendV1 }>();
 const sendOwners = new WeakMap<object, { sendCount: number; sends?: DiagnosticSendV1[] }>();
+
+/** Adapter-owned I/O may bypass the supplied fetch. Keep that invocation count
+ * without inventing a physical send; a used executor owns even a rejected send. */
+export async function captureAdapterExecution<T>(ctx: RequestLogContext,
+  executor: ProviderFetch,
+  execute: (executor: ProviderFetch) => Promise<T>,
+): Promise<T> {
+  let attempt: RequestLogContext["activeAttempt"];
+  let invoked = false;
+  let observed = executor;
+  captureSafely(() => {
+    const mark = (fetch: typeof globalThis.fetch) => Object.assign(
+      (...args: Parameters<typeof globalThis.fetch>) => { invoked = true; return fetch(...args); },
+      { preconnect: fetch.preconnect },
+    );
+    const wrapped = Object.assign(mark(executor), {
+      waitForPacing: executor.waitForPacing
+        ? (...args: Parameters<NonNullable<typeof executor.waitForPacing>>) => {
+          invoked = true;
+          return executor.waitForPacing!(...args);
+        } : undefined,
+      unpacedFetch: executor.unpacedFetch ? mark(executor.unpacedFetch) : undefined,
+    });
+    attempt = ctx.activeAttempt;
+    observed = wrapped;
+  });
+  try { return await execute(observed); }
+  finally {
+    captureSafely(() => {
+      if (!attempt || invoked) return;
+      let owner = sendOwners.get(attempt);
+      if (!owner) { owner = { sendCount: 0 }; sendOwners.set(attempt, owner); }
+      owner.sendCount += 1;
+      attempt.sendCount = owner.sendCount;
+    });
+  }
+}
 const activeSends = new WeakMap<object, DiagnosticSendV1>();
 const sendState = new WeakMap<DiagnosticSendV1, { responseId?: string; terminalType?: string; terminalObserver?: object; directTypes: Set<string>; syntheticTypes: Set<string> }>();
 const requestShapes = new WeakSet<RequestLogContext>();
@@ -637,7 +674,10 @@ export function finalizeDiagnostics(ctx: RequestLogContext, status: number, requ
     // A positive legacy send count without an observed send is incomplete evidence.
     if (d.upstreamCallMade !== true) {
       if (!(ctx.attempts ?? []).some(attempt => attempt.sendCount > 0) && !(ctx.activeAttempt?.sendCount)) d.upstreamCallMade = false;
-      else d.fieldAvailability.upstreamCallMade = { status: "not_observed", source: "transport" };
+      else {
+        delete d.upstreamCallMade;
+        d.fieldAvailability.upstreamCallMade = { status: "not_observed", source: "transport" };
+      }
     }
     d.logSink = "usage.jsonl";
     d.usageSource ??= ctx.usageFromBridge ? "adapter" : ctx.usage ? "upstream" : undefined;

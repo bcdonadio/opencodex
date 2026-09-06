@@ -1,4 +1,4 @@
-import { transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput, recordRequestedReasoning, recordDownstreamCancelled } from "../transaction-capture";
+import { captureAdapterExecution, transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput, recordRequestedReasoning, recordDownstreamCancelled } from "../transaction-capture";
 import { captureRetryDelay } from "../transaction-recovery-capture";
 import { recordRouteAuth, recordAuthRefresh } from "../transaction-auth-capture";
 import type { Server } from "bun";
@@ -6273,17 +6273,19 @@ async function handleResponsesInner(
   try {
     if (activeAdapter.fetchResponse) {
       noteAttemptSend(logCtx.activeAttempt, inputTokenEstimate);
+      transportObserver(logCtx)({ kind: "prepared" });
       await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal, pacingObserver(logCtx));
-      upstreamResponse = await activeAdapter.fetchResponse(builtInitialRequest, {
-        abortSignal: upstream.signal,
-        timeoutMs: connectMs,
-        stream: parsed.stream,
-        executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+      upstreamResponse = await captureAdapterExecution(logCtx,
+        providerFetch(route.provider, options.codexWsRuntimeIdentity, {
           observeTransport: transportObserver(logCtx),
           providerName: route.providerName,
           modelId: route.modelId,
-        }),
-      });
+        }), executor => activeAdapter.fetchResponse!(builtInitialRequest, {
+          abortSignal: upstream.signal,
+          timeoutMs: connectMs,
+          stream: parsed.stream,
+          executor,
+        }));
     } else {
       // #1851 scope guard: transient-5xx retry on this generic adapter path is opt-in for
       // direct Google AI Studio only (Vertex/Antigravity use fetchResponse above). Other
@@ -6394,17 +6396,19 @@ async function handleResponsesInner(
       try {
         try {
           if (activeAdapter.fetchResponse) {
+            transportObserver(logCtx)({ kind: "prepared" });
             await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal, pacingObserver(logCtx));
-            return await activeAdapter.fetchResponse(retryRequest, {
-              abortSignal: upstream.signal,
-              timeoutMs: connectMs,
-              stream: parsed.stream,
-              executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+            return await captureAdapterExecution(logCtx,
+              providerFetch(route.provider, options.codexWsRuntimeIdentity, {
                 observeTransport: transportObserver(logCtx),
                 providerName: route.providerName,
                 modelId: route.modelId,
-              }),
-            });
+              }), executor => activeAdapter.fetchResponse!(retryRequest, {
+                abortSignal: upstream.signal,
+                timeoutMs: connectMs,
+                stream: parsed.stream,
+                executor,
+              }));
           }
           // #2643 review: this leg used to call fetchWithHeaderTimeout directly, so an
           // opted-in provider's transient-5xx policy applied to the initial send and to
@@ -6877,17 +6881,19 @@ async function handleResponsesInner(
       try {
         if (activeAdapter.fetchResponse) {
           noteAttemptSend(logCtx.activeAttempt, continuationEstimate, replayKind);
+          transportObserver(logCtx)({ kind: "prepared" });
           await waitForProviderRequestSlot(route.providerName, route.provider, nextParsed.modelId, upstream.signal, pacingObserver(logCtx));
-          return await activeAdapter.fetchResponse(builtContinuationRequest, {
-            abortSignal: upstream.signal,
-            timeoutMs: connectMs,
-            stream: nextParsed.stream,
-            executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+          return await captureAdapterExecution(logCtx,
+            providerFetch(route.provider, options.codexWsRuntimeIdentity, {
               observeTransport: transportObserver(logCtx),
               providerName: route.providerName,
               modelId: nextParsed.modelId,
-            }),
-          });
+            }), executor => activeAdapter.fetchResponse!(builtContinuationRequest, {
+              abortSignal: upstream.signal,
+              timeoutMs: connectMs,
+              stream: nextParsed.stream,
+              executor,
+            }));
         }
         // Same #1851 scope guard as the initial send: transient-5xx retry only for direct
         // Google AI Studio; every other adapter keeps reset-only semantics here.
