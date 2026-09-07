@@ -85,6 +85,55 @@ function baseEntry(overrides: Partial<RequestLogEntry>): RequestLogEntry {
 }
 
 describe("GET /api/logs display metrics", () => {
+  test("summary excludes evidence before projection while retaining filters and display metrics", async () => {
+    addRequestLog(baseEntry({ requestId: "summary-row", usage: { inputTokens: 100, outputTokens: 10 }, attempts: [{
+      ordinal: 1, provider: "anthropic", model: "claude-3-haiku-20240307", adapter: "anthropic", status: 200,
+      durationMs: 1000, sendCount: 1, recoveryKinds: [], usageStatus: "reported", usage: { inputTokens: 100, outputTokens: 10 },
+    }] }));
+    const entry = getRequestLogEntries()[0]!;
+    // Attach evidence after ingestion to isolate polling from capture normalization.
+    Object.defineProperty(entry, "diagnostics", { configurable: true, enumerable: true, value: { fixture: "full-evidence" } });
+    Object.defineProperty(entry.attempts![0], "sends", { configurable: true, enumerable: true, value: [{ fixture: "send-evidence" }] });
+    const full = await readLogPoll("provider=anthropic");
+    expect(full.logs[0]).toHaveProperty("diagnostics.fixture", "full-evidence");
+    expect(full.logs[0]).toHaveProperty("attempts.0.sends.0.fixture", "send-evidence");
+    const summary = await readLogPoll("provider=anthropic&view=summary");
+    expect(summary.total).toBe(full.total);
+    expect(summary.logs[0]).not.toHaveProperty("diagnostics");
+    expect(summary.logs[0]).not.toHaveProperty("attempts.0.sends");
+    expect(summary.logs[0]).toHaveProperty("detailAvailable", true);
+    expect(summary.logs[0]?.displayMetrics).toEqual(full.logs[0]?.displayMetrics);
+    expect(summary.logs[0]).toHaveProperty("attempts.0.displayMetrics", (full.logs[0]!.attempts as Array<Record<string, unknown>>)[0]!.displayMetrics);
+    expect(await readLogPoll("provider=anthropic&view=summary", full.cursor)).toMatchObject({ reset: true });
+    Object.defineProperty(entry, "diagnostics", { enumerable: true, get() { throw new Error("summary read diagnostics"); } });
+    Object.defineProperty(entry.attempts![0], "sends", { enumerable: true, get() { throw new Error("summary read sends"); } });
+    expect(await readLogPoll("provider=anthropic&view=summary", summary.cursor)).toMatchObject({ logs: [], reset: false });
+    entry.status = 503;
+    expect(await readLogPoll("provider=anthropic&view=summary", summary.cursor)).toMatchObject({ reset: true });
+    evictOldestRequestLogForBudget();
+    expect(await readLogPoll("provider=anthropic&view=summary", summary.cursor)).toMatchObject({ logs: [], reset: true });
+  });
+
+  test("detail returns one live full row for opaque IDs and rejects invalid or evicted IDs", async () => {
+    const requestId = "opaque/slash?query=1&percent%plus+";
+    addRequestLog(baseEntry({ requestId }));
+    Object.defineProperty(getRequestLogEntries()[0]!, "diagnostics", { enumerable: true, value: { fixture: "full-evidence" } });
+    const readDetail = async (query: string) => {
+      const url = new URL(`http://localhost/api/logs/detail?${query}`);
+      return handleManagementAPI(new Request(url), url, config);
+    };
+    const query = new URLSearchParams({ requestId }).toString();
+    const response = await readDetail(query);
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toEqual((await readLogPoll()).logs[0]);
+    for (const invalid of ["", "requestId=", "requestId=%00", "requestId=%FF", "requestId=%ZZ", "requestId=x&requestId=y", `requestId=${"x".repeat(1025)}`]) {
+      expect((await readDetail(invalid))?.status).toBe(400);
+    }
+    expect((await readDetail("requestId=missing"))?.status).toBe(404);
+    evictOldestRequestLogForBudget();
+    expect((await readDetail(query))?.status).toBe(404);
+  });
+
   test("parent, individual attempt DTO and summary agree on unresolved slash cost without rewriting history", async () => {
     const model = "anthropic/claude-3-haiku-20240307";
     const row = baseEntry({
@@ -324,15 +373,15 @@ import { ManagementRequest as Request } from "../helpers/management-auth";
 describe("GET /api/logs snapshot polling", () => {
   beforeEach(() => clearRequestLogsForTests());
 
-  test("poll application equals full reads across append, nested live mutation, eviction and clear", async () => {
+  test.each(["", "&view=summary"])("poll application equals full reads across append, nested live mutation, eviction and clear %s", async (view) => {
     let accepted: Array<Record<string, unknown>> = [];
     let cursor: string | undefined;
     const check = async (reset: boolean, deltaLength: number) => {
-      const poll = await readLogPoll("limit=2000", cursor);
+      const poll = await readLogPoll(`limit=2000${view}`, cursor);
       expect(poll.reset).toBe(reset);
       expect(poll.logs).toHaveLength(deltaLength);
       accepted = !cursor || poll.reset ? poll.logs : [...accepted, ...poll.logs];
-      const snapshot = await readLogPoll("limit=2000");
+      const snapshot = await readLogPoll(`limit=2000${view}`);
       expect(accepted).toEqual(snapshot.logs);
       expect(poll.total).toBe(snapshot.total);
       cursor = poll.cursor;
