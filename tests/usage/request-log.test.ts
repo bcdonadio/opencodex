@@ -17,6 +17,7 @@ import {
   finishRequestAttempt,
   getRequestLogEntries,
   hydrateRequestLogsFromDisk,
+  inspectResponseLogJson,
   noteAttemptSend,
   recordAdapterReasoning,
   recordFirstOutput,
@@ -42,7 +43,58 @@ import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { createSseInspector } from "../../src/server/relay";
 import { decodeRequestLogCursor, selectRequestLogPoll } from "../../src/server/request-log-cursor";
+
+describe("HTTP diagnostic lifecycle ownership", () => {
+  test("JSON terminal failure without usage retains explicit response identity", () => {
+    const ctx: RequestLogContext = { provider: "openai", model: "test" };
+    inspectResponseLogJson(ctx, JSON.stringify({ object: "response", id: "resp-no-usage", status: "failed",
+      error: { code: "policy_violation", type: "invalid_request_error", message: "denied" } }));
+    expect(ctx.diagnostics?.upstreamResponseId).toBe("resp-no-usage");
+    expect(ctx.diagnostics?.terminalEventType).toBe("response.failed");
+    expect(ctx.diagnostics?.events.some(event => event.type === "response.failed" && event.source === "upstream")).toBe(true);
+    expect(ctx.usage).toBeUndefined();
+  });
+
+  test("bridge JSON status does not fabricate an upstream terminal", () => {
+    const ctx: RequestLogContext = { provider: "anthropic", model: "test", usageFromBridge: true };
+    inspectResponseLogJson(ctx, JSON.stringify({ object: "response", id: "resp-local", status: "completed" }));
+    expect(ctx.diagnostics?.terminalEventType).toBeUndefined();
+  });
+
+  test("preflight SSE output followed by failure is not downstream delivery", () => {
+    const ctx: RequestLogContext = { provider: "openai", model: "test" };
+    const inspector = createSseInspector({ logCtx: ctx, onFirstOutput: () => recordFirstOutput(ctx, Date.now()) });
+    for (const payload of [
+      { type: "response.created", response: { id: "resp-preflight" } },
+      { type: "response.output_text.delta", delta: "not forwarded" },
+      { type: "response.failed", response: { id: "resp-preflight", error: { code: "policy_violation" } } },
+    ]) inspector.feed(new TextEncoder().encode(`data: ${JSON.stringify(payload)}\n\n`));
+    inspector.dispose();
+    expect(ctx.diagnostics?.upstreamResponseId).toBe("resp-preflight");
+    expect(ctx.diagnostics?.terminalEventType).toBe("response.failed");
+    expect(ctx.diagnostics?.outputDeliveredBeforeFailure).not.toBe(true);
+    expect(ctx.diagnostics?.downstreamTerminalSentAt).toBeUndefined();
+    expect(ctx.usage).toBeUndefined();
+  });
+
+  test("client SSE queue records output and terminal before final log snapshot", async () => {
+    const rows: RequestLogEntry[] = [];
+    const ctx: RequestLogContext = { provider: "openai", model: "test" };
+    const text = [
+      { type: "response.created", response: { id: "resp-delivered" } },
+      { type: "response.output_text.delta", delta: "delivered" },
+      { type: "response.failed", response: { id: "resp-delivered", error: { code: "policy_violation" } } },
+    ].map(payload => `data: ${JSON.stringify(payload)}\n\n`).join("");
+    const response = responseWithDeferredRequestLog(new Response(text, { headers: { "content-type": "text/event-stream" } }),
+      "req-delivery", Date.now(), ctx, row => rows.push(row));
+    expect(await response.text()).toBe(text);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.diagnostics?.outputDeliveredBeforeFailure).toBe(true);
+    expect(rows[0]?.diagnostics?.downstreamTerminalSentAt).toBeNumber();
+  });
+});
 
 async function* replayAdapterEvents(events: AdapterEvent[]): AsyncGenerator<AdapterEvent> {
   for (const event of events) yield event;
@@ -62,6 +114,31 @@ function log(overrides: Partial<RequestLogEntry>): RequestLogEntry {
 }
 
 describe("request log metadata", () => {
+  test("standalone actual-wire observations survive ring retention and disk hydration", () => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-transport-log-"));
+    process.env.OPENCODEX_HOME = home;
+    clearRequestLogsForTests();
+    try {
+      addRequestLog(log({ inboundTransport: "websocket", upstreamTransport: "mixed" }));
+      expect(getRequestLogEntries()[0]?.inboundTransport).toBe("websocket");
+      expect(getRequestLogEntries()[0]?.upstreamTransport).toBe("mixed");
+      const persisted = readUsageEntries()[0]!;
+      expect(persisted.diagnostics).toBeUndefined();
+      expect(persisted.inboundTransport).toBe("websocket");
+      expect(persisted.upstreamTransport).toBe("mixed");
+      const hydrated = requestLogEntryFromPersistedUsage(persisted);
+      expect(hydrated.inboundTransport).toBe("websocket");
+      expect(hydrated.upstreamTransport).toBe("mixed");
+    } finally {
+      clearRequestLogsForTests();
+      resetUsageReadCacheForTests();
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      removeTreeWithRetry(home);
+    }
+  });
+
   test("records actual transport on the parent and physical attempt, and merges retries", () => {
     const attempt = beginRequestAttempt(1, "openai", "gpt-test", "openai-responses");
     const ctx: RequestLogContext = {

@@ -17,6 +17,7 @@ import { resolveProxyRoute } from "../../lib/proxy-env";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { CODEX_RESPONSES_HTTP_URL, CODEX_RESPONSES_WS_URL, prepareCodexHttpInit, prepareCodexWsRequest } from "./codex-ws-request";
 import { codexWsExchange } from "./codex-ws-exchange";
+import type { ProviderFetchOptions } from "./fetch-helpers";
 import { CodexWsSession } from "./codex-ws-session";
 import { codexWsPool, codexWsReuseIdentity } from "./codex-ws-pool";
 import { codexWsCreateFrameExceedsLimit } from "./codex-ws-wire";
@@ -130,6 +131,7 @@ export function codexWsUpstreamFetch(
   onQuota?: CodexWsQuotaObserver,
   beforeDispatch?: (headers: Headers) => void,
   onTransport?: (transport: "http" | "websocket") => void,
+  observeTransport?: ProviderFetchOptions["observeTransport"],
 ): Promise<Response> {
   const prepared = prepareCodexWsRequest(url, init);
   if (!prepared) return sseFallback(url, prepareCodexHttpInit(url, init));
@@ -180,5 +182,5 @@ export function codexWsUpstreamFetch(
   } catch {
     return sseFallback(url, init);
   }
-  return codexWsExchange({ session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport });
+  return codexWsExchange({ session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport, observeTransport });
 }

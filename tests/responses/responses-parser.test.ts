@@ -941,12 +941,23 @@ describe("unpaired tool result boundary (#3259)", () => {
   });
 
   test.each([
-    { label: "wrong id prefix", id: "fc_wrong", name: "create_thread", namespace: "codex_app" },
-    { label: "wrong namespace", id: "fco_valid", name: "create_thread", namespace: "collaboration" },
-    { label: "wrong tool", id: "fco_valid", name: "read_thread", namespace: "codex_app" },
-    { label: "empty call id", id: "fco_valid", name: "create_thread", namespace: "codex_app", call_id: "" },
-  ])("a delegation-shaped near miss remains an unusable tool result: $label", (fields) => {
-    const result = toolResultOf({ type: "function_call_output", ...fields, output: delegationPayload });
+    { label: "alternate id prefix", id: "fc_wrong", name: "create_thread", namespace: "codex_app" },
+    { label: "alternate namespace", id: "fco_valid", name: "create_thread", namespace: "collaboration" },
+    { label: "alternate tool", id: "fco_valid", name: "read_thread", namespace: "codex_app" },
+  ])("a delegation carrier accepts alternate metadata: $label", ({ label: _label, ...fields }) => {
+    const parsed = parseRequest(delegationHistory({
+      type: "function_call_output", ...fields, output: delegationPayload,
+    }));
+    expect(parsed.context.messages.some(message => message.role === "toolResult")).toBe(false);
+    expect(parsed.context.messages.filter(message => message.role === "user").map(message => message.content))
+      .toEqual(["do the task", delegationPayload]);
+  });
+
+  test("a delegation-shaped carrier with an empty call id remains an unusable tool result", () => {
+    const result = toolResultOf({
+      type: "function_call_output", id: "fco_valid", name: "create_thread", namespace: "codex_app",
+      call_id: "", output: delegationPayload,
+    });
     expect(result).toBeDefined();
     expect(typeof result?.toolCallId !== "string" || result.toolCallId.length === 0).toBe(true);
   });

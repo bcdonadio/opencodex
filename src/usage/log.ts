@@ -9,6 +9,16 @@ import { usageDisplayTotalTokens } from "./totals";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
+import {
+  clearDiagnosticPersistenceOutcome,
+  MAX_DIAGNOSTIC_SENDS,
+  normalizeDiagnosticSends,
+  normalizeTransactionDiagnostics,
+  sanitizeUpstreamDisplayError,
+  sanitizeDiagnosticIdentifier,
+  type DiagnosticSendV1,
+  type TransactionDiagnosticsV1,
+} from "../diagnostics/transaction";
 import { claudeCompatibilityReason, normalizeClaudeFeatureCodes, type ClaudeFeatureCode } from "../claude/compatibility";
 
 export interface PersistedClaudeCompatibilityLog {
@@ -82,6 +92,10 @@ export type UsageCredentialSource = "grok-oauth" | "xai-api-key";
 
 export interface PersistedUsageAttempt {
   ordinal: number;
+  attemptId?: string;
+  attemptStartedAt?: number;
+  attemptEndedAt?: number;
+  sends?: DiagnosticSendV1[];
   provider: string;
   /** Absent on historic attempts and routes whose subscription attribution is unknown. */
   credentialSource?: UsageCredentialSource;
@@ -138,6 +152,8 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  /** Bounded v1 lifecycle/correlation facts; absent on rows written before diagnostics. */
+  diagnostics?: TransactionDiagnosticsV1;
   /** Actual client-to-proxy transport. */
   inboundTransport?: "http" | "websocket";
   /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
@@ -180,6 +196,10 @@ export interface PersistedUsageEntry {
   closeReason?: "terminal" | "client_cancel" | "non_stream" | "body_stall" | "body_overflow";
   /** Already redacted + capped at capture (request-log.ts redactSecretString().slice(0,500)). */
   upstreamError?: string;
+  localTerminalReason?: string;
+  affinity?: "reused" | "new_bind" | "rebound" | "cleared";
+  transportPhase?: "pre_headers" | "mid_stream" | "terminal_sse";
+  terminalSource?: "upstream" | "synthetic";
   /**
    * Bounded route-decision trace (RI-01): why this provider/model/account was
    * selected. Additive field; old rows without it parse unchanged. Never
@@ -440,8 +460,17 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
         && ATTEMPT_RECOVERY_KINDS.has(value as AttemptRecoveryKind),
     ))]
     : [];
+  const attemptId = sanitizeDiagnosticIdentifier(attempt.attemptId);
+  const sends = normalizeDiagnosticSends(attempt.sends);
   return {
     ordinal: attempt.ordinal as number,
+    ...(attemptId ? { attemptId } : {}),
+    ...(isNonNegativeFiniteNumber(attempt.attemptStartedAt)
+      ? { attemptStartedAt: attempt.attemptStartedAt }
+      : {}),
+    ...(isNonNegativeFiniteNumber(attempt.attemptEndedAt)
+      ? { attemptEndedAt: attempt.attemptEndedAt }
+      : {}),
     provider: attempt.provider,
     ...(attempt.provider === "xai"
       && (attempt.credentialSource === "grok-oauth" || attempt.credentialSource === "xai-api-key")
@@ -453,10 +482,12 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     durationMs: attempt.durationMs,
     // Absent by default; only the literal `true` marker survives the round trip.
     ...(attempt.streamAborted === true ? { streamAborted: true } : {}),
+    ...(attempt.locallyAnswered === true ? { locallyAnswered: true } : {}),
     ...(isNonNegativeFiniteNumber(attempt.firstOutputMs)
       ? { firstOutputMs: attempt.firstOutputMs }
       : {}),
     sendCount: attempt.sendCount as number,
+    ...(sends ? { sends } : {}),
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
     ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
@@ -509,7 +540,7 @@ export function isValidReasoningWireValue(
     || (wireField === "reasoning.enabled" && typeof wireValue === "boolean");
 }
 
-function normalizedAttempts(raw: unknown): PersistedUsageAttempt[] {
+export function normalizeUsageAttempts(raw: unknown): PersistedUsageAttempt[] {
   if (!Array.isArray(raw)) return [];
   return raw.map(normalizeUsageAttempt)
     .filter((attempt): attempt is PersistedUsageAttempt => attempt !== null);
@@ -526,7 +557,7 @@ export function normalizeUsageEntryForTest(entry: PersistedUsageEntry): Persiste
 }
 
 function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
-  const attempts = normalizedAttempts(entry.attempts);
+  const attempts = normalizeUsageAttempts(entry.attempts);
   const tierOutcome = entry.tierOutcome ? normalizeAttemptTierOutcome(entry.tierOutcome) : undefined;
   const callerServiceTier = sanitizeLogMetadataString(entry.callerServiceTier);
   const responseServiceTier = sanitizeLogMetadataString(entry.responseServiceTier);
@@ -535,6 +566,16 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
   const routeDecision = entry.routeDecision
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
+  const diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
+  if (diagnostics && Array.isArray(entry.attempts) && entry.attempts.some(attempt =>
+    attempt && (attempt.sendCount > MAX_DIAGNOSTIC_SENDS
+      || (Array.isArray(attempt.sends) && attempt.sends.length > MAX_DIAGNOSTIC_SENDS)))) {
+    diagnostics.captureTruncated = true;
+    diagnostics.fieldAvailability.sends = { status: "truncated", source: "transport" };
+    diagnostics.fieldAvailability = normalizeTransactionDiagnostics(diagnostics)!.fieldAvailability;
+  }
+  const upstreamError = sanitizeUpstreamDisplayError(entry.upstreamError);
+  const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
   return {
     requestId: entry.requestId,
     timestamp: entry.timestamp,
@@ -550,6 +591,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+    ...(diagnostics ? { diagnostics } : {}),
     ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
@@ -562,6 +604,9 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
+    ...(sanitizeLogMetadataString(entry.requestedAlias)
+      ? { requestedAlias: sanitizeLogMetadataString(entry.requestedAlias) }
+      : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),
     ...(typeof entry.requestedEffort === "string" && entry.requestedEffort
       ? { requestedEffort: capMetadataString(entry.requestedEffort) }
@@ -605,9 +650,28 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ...(typeof entry.totalTokens === "number" ? { totalTokens: entry.totalTokens } : {}),
     ...(Array.isArray(entry.attempts) ? { attempts } : {}),
     ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
-    ...(entry.terminalStatus ? { terminalStatus: entry.terminalStatus } : {}),
-    ...(entry.closeReason ? { closeReason: entry.closeReason } : {}),
-    ...(entry.upstreamError ? { upstreamError: entry.upstreamError } : {}),
+    ...(entry.terminalStatus === "completed" || entry.terminalStatus === "failed"
+      || entry.terminalStatus === "incomplete"
+      ? { terminalStatus: entry.terminalStatus }
+      : {}),
+    ...(entry.closeReason === "terminal" || entry.closeReason === "client_cancel"
+      || entry.closeReason === "non_stream" || entry.closeReason === "body_stall"
+      || entry.closeReason === "body_overflow"
+      ? { closeReason: entry.closeReason }
+      : {}),
+    ...(upstreamError ? { upstreamError } : {}),
+    ...(localTerminalReason ? { localTerminalReason } : {}),
+    ...(entry.affinity === "reused" || entry.affinity === "new_bind"
+      || entry.affinity === "rebound" || entry.affinity === "cleared"
+      ? { affinity: entry.affinity }
+      : {}),
+    ...(entry.transportPhase === "pre_headers" || entry.transportPhase === "mid_stream"
+      || entry.transportPhase === "terminal_sse"
+      ? { transportPhase: entry.transportPhase }
+      : {}),
+    ...(entry.terminalSource === "upstream" || entry.terminalSource === "synthetic"
+      ? { terminalSource: entry.terminalSource }
+      : {}),
     ...(routeDecision ? { routeDecision } : {}),
     ...(claudeCompatibility ? { claudeCompatibility } : {}),
   };
@@ -623,7 +687,9 @@ function ensureUsageLogDir(): void {
 export function appendUsageEntry(entry: PersistedUsageEntry): void {
   ensureUsageLogDir();
   const path = usageLogPath();
-  appendFileSync(path, `${JSON.stringify(normalizeUsageEntry(entry))}\n`, { encoding: "utf-8", mode: 0o600 });
+  const normalized = normalizeUsageEntry(entry);
+  if (normalized.diagnostics) clearDiagnosticPersistenceOutcome(normalized.diagnostics);
+  appendFileSync(path, `${JSON.stringify(normalized)}\n`, { encoding: "utf-8", mode: 0o600 });
   try { chmodSync(path, 0o600); } catch { /* best-effort on platforms that ignore chmod */ }
 }
 
@@ -658,6 +724,8 @@ export interface ManagementUsageSnapshot {
   truncatedPrefixBytes: number;
   entriesTruncated: boolean;
   entriesDropped: number;
+  /** Nonblank lines rejected by parsing/row normalization in the bounded read. */
+  invalidEntriesDropped: number;
   /** Digest of the covered prefix, used to detect an in-place rewrite before reuse. */
   prefixDigest: string;
   /**
@@ -728,6 +796,7 @@ interface RetainedUsageSnapshot {
   entries: PersistedUsageEntry[];
   entriesTruncated: boolean;
   entriesDropped: number;
+  invalidEntriesDropped: number;
   revision: UsageLogRevision;
   retainedAt: number;
   approxBytes: number;
@@ -878,6 +947,7 @@ export function currentUsageLogRevision(): UsageLogRevision | null {
 async function parseUsageTextCooperatively(text: string, signal: AbortSignal): Promise<{
   entries: PersistedUsageEntry[];
   entriesDropped: number;
+  invalidEntriesDropped: number;
   entryLengths: number[];
   /** Bytes of unparseable lines after the final accepted row. */
   trailingSkippedBytes: number;
@@ -902,6 +972,7 @@ async function parseUsageTextCooperatively(text: string, signal: AbortSignal): P
   // summing those lengths -- would consume extra rows to reach the window start,
   // silently hiding history and desynchronizing truncatedPrefixBytes.
   let pendingSkippedBytes = 0;
+  let invalidEntriesDropped = 0;
   for (let offset = 0; offset < lines.length; offset += batchSize) {
     if (signal.aborted) throw signal.reason;
     const batch = lines.slice(offset, offset + batchSize);
@@ -912,6 +983,7 @@ async function parseUsageTextCooperatively(text: string, signal: AbortSignal): P
       const lineBytes = Buffer.byteLength(line, "utf-8") + (isLastLine && line === "" ? 0 : 1);
       const parsed = parseUsageLines([line]);
       if (parsed.length === 0) {
+        if (line.trim()) invalidEntriesDropped += 1;
         pendingSkippedBytes += lineBytes;
         continue;
       }
@@ -929,12 +1001,13 @@ async function parseUsageTextCooperatively(text: string, signal: AbortSignal): P
   // separately; the trim arithmetic adds them back to keep lengths summing to the span.
   const trailingSkippedBytes = pendingSkippedBytes;
   if (entries.length <= MANAGEMENT_USAGE_MAX_ENTRIES) {
-    return { entries, entriesDropped: 0, entryLengths, trailingSkippedBytes, cappedPrefixBytes: 0 };
+    return { entries, entriesDropped: 0, invalidEntriesDropped, entryLengths, trailingSkippedBytes, cappedPrefixBytes: 0 };
   }
   const entriesDropped = entries.length - MANAGEMENT_USAGE_MAX_ENTRIES;
   return {
     entries: entries.slice(-MANAGEMENT_USAGE_MAX_ENTRIES),
     entriesDropped,
+    invalidEntriesDropped,
     entryLengths: entryLengths.slice(-MANAGEMENT_USAGE_MAX_ENTRIES),
     trailingSkippedBytes,
     // Bytes of the rows the cap removed. The caller adds them to its skipped prefix so
@@ -998,6 +1071,7 @@ async function readUsageEntriesFullCooperatively(
       truncatedPrefixBytes,
       entriesTruncated: parsed.entriesDropped > 0,
       entriesDropped: parsed.entriesDropped,
+      invalidEntriesDropped: parsed.invalidEntriesDropped,
       prefixDigest,
       entryLengths: parsed.entryLengths,
       trailingSkippedBytes: parsed.trailingSkippedBytes,
@@ -1053,6 +1127,7 @@ async function readUsageEntriesIncrementally(
     let appendedEntries: PersistedUsageEntry[] = [];
     let appendedLengths: number[] = [];
     let appendedDropped = 0;
+    let appendedInvalidDropped = 0;
     let appendedTrailingSkipped = retained.trailingSkippedBytes;
     if (size > retained.coveredThroughBytes) {
       // The covered offset must land immediately after a newline, or the retained rows
@@ -1074,6 +1149,7 @@ async function readUsageEntriesIncrementally(
       appendedEntries = appended.entries;
       appendedLengths = appended.entryLengths;
       appendedDropped = appended.entriesDropped;
+      appendedInvalidDropped = appended.invalidEntriesDropped;
       // A capped appended chunk is not joinable: its dropped rows sit between the
       // retained rows and the kept ones, so the lengths no longer describe a contiguous
       // span. Fall back to a full read.
@@ -1118,6 +1194,9 @@ async function readUsageEntriesIncrementally(
     // still balanced. Re-anchor with a full read instead.
     if (rowsBeginAtBytes < windowStart) return null;
     if (dropIndex > 0) {
+      // Rejected lines share row byte spans. Re-anchor instead of guessing how
+      // many rejected lines remain in a newly trimmed byte window.
+      if (retained.invalidEntriesDropped + appendedInvalidDropped > 0) return null;
       entries = entries.slice(dropIndex);
       lengths = lengths.slice(dropIndex);
     }
@@ -1156,6 +1235,7 @@ async function readUsageEntriesIncrementally(
       // would make a byte-truncated read claim rows were dropped when none were.
       entriesTruncated: entriesDropped > 0,
       entriesDropped,
+      invalidEntriesDropped: retained.invalidEntriesDropped + appendedInvalidDropped,
       // The digest must describe exactly the region the returned rows came from, which
       // is the post-trim window, not the pre-trim one.
       prefixDigest: usageRegionDigest(fd, rowsBeginAtBytes, size) ?? "",
@@ -1181,10 +1261,11 @@ export async function readUsageSnapshotForManagement(maxReadBytes = MANAGEMENT_U
   truncatedPrefixBytes: number;
   entriesTruncated: boolean;
   entriesDropped: number;
+  invalidEntriesDropped: number;
 }> {
   if (!Number.isSafeInteger(maxReadBytes) || maxReadBytes <= 0) throw new RangeError("management usage max read bytes must be positive");
   const path = usageLogPath();
-  if (!existsSync(path)) return { entries: [], revision: null, truncatedPrefixBytes: 0, entriesTruncated: false, entriesDropped: 0 };
+  if (!existsSync(path)) return { entries: [], revision: null, truncatedPrefixBytes: 0, entriesTruncated: false, entriesDropped: 0, invalidEntriesDropped: 0 };
   const observed = currentUsageLogRevision();
   const key = `${usageLogIdentityKey(observed)}\0${maxReadBytes}`;
   const observedSize = observed?.size ?? 0;
@@ -1232,6 +1313,7 @@ export async function readUsageSnapshotForManagement(maxReadBytes = MANAGEMENT_U
       entries: snapshot.entries,
       entriesTruncated: snapshot.entriesTruncated,
       entriesDropped: snapshot.entriesDropped,
+      invalidEntriesDropped: snapshot.invalidEntriesDropped,
       revision: snapshot.revision,
       retainedAt: Date.now(),
       approxBytes: retainedUsageSnapshotBytes(snapshot.entries),

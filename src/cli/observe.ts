@@ -12,12 +12,21 @@ import {
 } from "./runtime-api";
 import { formatUsageReport } from "./usage-report";
 import { USAGE_RANGES, USAGE_SURFACES } from "../usage/summary";
+import { closeSync, openSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
+import { renameAtomicFile } from "../lib/windows-atomic-replace";
+import {
+  SUPPORT_EXPORT_MAX_REQUEST_IDS,
+  SUPPORT_EXPORT_MAX_WINDOW_MS,
+} from "../diagnostics/support-export";
 import { ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 
 const USAGE = `Usage:
   ocx observe logs [--provider <name>] [--model <id>] [--status <code>]
       [--conversation <id>] [--limit <n>] [--follow] [--json|--jsonl]
   ocx logs explain <request-id> [--json]
+  ocx logs export (--request <id> ... | --from <ms> --to <ms>) [--out <path>] [--force] [--json]
   ocx logs rebuild-index
   ocx logs index-status
   ocx observe usage [--range <today|1d|7d|30d|all>] [--surface <all|codex|claude|grok>]
@@ -111,6 +120,82 @@ async function explain(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   const encoded = encodeURIComponent(requestId);
   const result = await runtimeRequest(`/api/request-history/${encoded}/route-decision`, {}, deps);
   printData(result, wantsJson, wantsJson ? undefined : [JSON.stringify(result, null, 2)]);
+}
+
+function takeRepeatedOptions(args: string[], flag: string): string[] {
+  const values: string[] = [];
+  while (args.includes(flag)) {
+    const value = takeOption(args, flag);
+    if (value !== undefined) values.push(value);
+  }
+  return values;
+}
+
+function writeSupportExport(path: string, text: string, force: boolean): void {
+  if (force) {
+    const temporary = join(dirname(path), `.ocx-support-${process.pid}-${randomUUID()}.tmp`);
+    let descriptor: number | undefined;
+    try {
+      descriptor = openSync(temporary, "wx", 0o600);
+      writeFileSync(descriptor, text, { encoding: "utf8" });
+      closeSync(descriptor);
+      descriptor = undefined;
+      renameAtomicFile(temporary, path, undefined, "support-export");
+      return;
+    } catch (error) {
+      if (descriptor !== undefined) closeSync(descriptor);
+      try { unlinkSync(temporary); } catch { /* best-effort cleanup */ }
+      throw error;
+    }
+  }
+  try {
+    writeFileSync(path, text, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new CliUsageError("support bundle already exists; re-run with --force to replace it", USAGE);
+    }
+    throw error;
+  }
+}
+
+async function exportSupportBundle(argv: string[], deps: RuntimeApiDeps): Promise<void> {
+  const args = [...argv];
+  // JSON is the default; accept the explicit flag for the shared CLI contract.
+  takeFlag(args, "--json");
+  const requestIds = takeRepeatedOptions(args, "--request");
+  const from = takeIntegerOption(args, "--from", { min: 0 });
+  const to = takeIntegerOption(args, "--to", { min: 0 });
+  const out = takeOption(args, "--out");
+  const force = takeFlag(args, "--force");
+  rejectArgs(args, USAGE);
+  const hasRequests = requestIds.length > 0;
+  const hasRange = from !== undefined || to !== undefined;
+  if (hasRequests === hasRange) {
+    throw new CliUsageError("provide --request values or exact --from/--to, never both", USAGE);
+  }
+  if (hasRequests && requestIds.length > SUPPORT_EXPORT_MAX_REQUEST_IDS) {
+    throw new CliUsageError(`--request may be repeated at most ${SUPPORT_EXPORT_MAX_REQUEST_IDS} times`, USAGE);
+  }
+  if (hasRange && (from === undefined || to === undefined)) {
+    throw new CliUsageError("--from and --to must be provided together", USAGE);
+  }
+  if (from !== undefined && to !== undefined
+    && (from > to || to - from > SUPPORT_EXPORT_MAX_WINDOW_MS)) {
+    throw new CliUsageError("--from/--to must be ascending and span no more than 24 hours", USAGE);
+  }
+  if (force && out === undefined) throw new CliUsageError("--force requires --out", USAGE);
+
+  const search = new URLSearchParams();
+  if (hasRequests) {
+    for (const requestId of requestIds) search.append("requestId", requestId);
+  } else {
+    search.set("from", String(from));
+    search.set("to", String(to));
+  }
+  const result = await runtimeRequest(`/api/transaction-diagnostics/export?${search}`, {}, deps);
+  const serialized = JSON.stringify(result);
+  if (out !== undefined) writeSupportExport(out, serialized, force);
+  else console.log(serialized);
 }
 
 async function rebuildIndex(argv: string[], deps: RuntimeApiDeps): Promise<void> {
@@ -221,6 +306,7 @@ export async function handleObserveCommand(argv: string[], deps: RuntimeApiDeps 
     if (sub === "logs") {
       const action = rest[0];
       if (action === "explain") await explain(rest.slice(1), deps);
+      else if (action === "export") await exportSupportBundle(rest.slice(1), deps);
       else if (action === "rebuild-index") await rebuildIndex(rest.slice(1), deps);
       else if (action === "index-status") await indexStatus(rest.slice(1), deps);
       else await logs(rest, deps);

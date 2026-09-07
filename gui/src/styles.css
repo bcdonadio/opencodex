@@ -2884,3 +2884,13 @@ button.prov-account-row.active { cursor: default; }
 }
 .claude-effort-badge.on { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
 .claude-effort-badge.off { background: color-mix(in srgb, var(--muted) 12%, transparent); color: var(--muted); }
+
+.log-diagnostics > summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
+.log-diagnostics > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.log-diagnostics h4 { margin: 12px 0 6px; }
+.log-diagnostics-grid { margin: 0 0 8px; font-size: 12px; }
+.log-diagnostics-grid > div { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, 2fr); gap: 12px; padding: 3px 0; }
+.log-diagnostics-grid dt { color: var(--muted); }
+.log-diagnostics-grid dd { margin: 0; min-width: 0; }
+.log-diagnostics-grid code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-diagnostics ol { padding-left: 20px; }

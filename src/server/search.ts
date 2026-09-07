@@ -1,3 +1,5 @@
+import { transportObserver, recordUpstreamResponse } from "./transaction-capture";
+import { diagnosticTarget } from "./responses/fetch-helpers";
 /**
  * /v1/alpha/search relay.
  *
@@ -157,6 +159,8 @@ export async function handleSearch(
   const sidecarExit = sidecarEnter("search");
   let upstreamResponse: Response | undefined;
   try {
+    transportObserver(logCtx)({ kind: "send", transport: "http", body: JSON.stringify(relayBody),
+      target: diagnosticTarget(url, { method: "POST" }) });
     observeRequestTransport(logCtx, "http");
     upstreamResponse = await fetch(url, {
       method: "POST",
@@ -168,6 +172,7 @@ export async function handleSearch(
       // `session_id`, and `x-codex-turn-metadata` to the redirect target.
       redirect: "manual",
     });
+    recordUpstreamResponse(logCtx, upstreamResponse);
     const observed = await readBoundedResponseBytes(upstreamResponse, {
       maxBytes: SEARCH_RESPONSE_MAX_BYTES,
       signal: linkedSignal.signal,

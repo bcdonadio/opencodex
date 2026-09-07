@@ -1,3 +1,6 @@
+import { captureAdapterExecution, transportObserver, pacingObserver, recordRequestShape, recordSyntheticTerminal, recordSelectedRoute, recordReconstructedContext, recordContextTransformation, recordCompactionOutput, recordRequestedReasoning, recordDownstreamCancelled } from "../transaction-capture";
+import { captureRetryDelay } from "../transaction-recovery-capture";
+import { recordRouteAuth, recordAuthRefresh } from "../transaction-auth-capture";
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
@@ -44,6 +47,7 @@ import {
   markBodyNonPersistable,
   previousResponseProviderState,
   previousResponseReplayFailure,
+  previousResponseReplayPrefixLength,
   previousResponseScopeMismatch,
   rememberResponseState,
 } from "../../responses/state";
@@ -293,6 +297,7 @@ import {
   inspectResponseLogJson,
   noteAttemptSend,
   readConfiguredCodexServiceTier,
+  readConfiguredCodexEffort,
   recordAdapterReasoning,
   recordAdapterTier,
   recordAdapterTierMetadata,
@@ -316,6 +321,7 @@ import {
   consumeForInspection,
   consumeForResponseLogMetadata,
   createSseInspector,
+  createDownstreamDiagnosticInspector,
   isEagerRelaySseResponse,
   isNativePassthroughSseResponse,
   markEagerRelaySseResponse,
@@ -373,7 +379,7 @@ import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/cat
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { hasUnreadableEncryptedAgentTask, looksLikeBackendCiphertext, sanitizeEncryptedContentInPlace } from "./encrypted-payload";
-import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier, type ProviderFetchOptions } from "./fetch-helpers";
+import { diagnosticTarget, fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier, type ProviderFetchOptions } from "./fetch-helpers";
 import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upstream-reachability";
 import {
   acquireUpstreamHostAdmission,
@@ -1450,6 +1456,7 @@ async function retryCodexPoolOnAlternateAccount(
     config,
   );
   logCtx.accountLogLabel = codexAuthContextLogLabel(retryAuthCtx, config);
+  recordRouteAuth(logCtx, route.provider.authMode, retryAuthCtx);
   sealRequestAttemptIdentity(
     logCtx.activeAttempt,
     logCtx.provider,
@@ -1484,6 +1491,7 @@ async function retryCodexPoolOnAlternateAccount(
           connectMs,
           stream,
           providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+            observeTransport: transportObserver(logCtx),
             providerName: route.providerName,
             modelId: route.modelId,
             onCodexWsQuota: codexWsQuotaObserver(retryAuthCtx, route.provider),
@@ -2365,6 +2373,8 @@ async function applyFinalRouteRequestNormalization(args: {
   logCtx.provider = route.providerName;
   logCtx.providerAdapter = route.provider.adapter;
   logCtx.routeDecision = route.routeDecision;
+  recordSelectedRoute(logCtx);
+  recordRouteAuth(logCtx, route.provider.authMode);
   if (route.routeReason === "model-alias" || route.modelId !== responseModelId && responseModelId.includes("/")) logCtx.requestedAlias = responseModelId;
 
   if (responsesUpstreamStreaming === false && route.provider.adapter === "openai-responses") {
@@ -2447,7 +2457,11 @@ async function applyFinalRouteRequestNormalization(args: {
       injectionPrompt: config.injectionPrompt,
     });
     if (guidance) {
+      const messagesBeforeGuidance = parsed.context.messages.length;
       injectDeveloperMessage(parsed, guidance);
+      if (parsed.context.messages.length > messagesBeforeGuidance) {
+        recordContextTransformation(logCtx, { kind: "developer_guidance", injected: { developer: 1 } });
+      }
       if (isInjectionDebugEnabled()) {
         injectionDebugLog(`[opencodex] ${route.modelId}: multi-agent guidance injected (surface=${collabSurface(parsed)}, guidanceEnabled=${multiAgentGuidanceEnabled(config)}, ${guidance.length} chars)`);
       }
@@ -2519,6 +2533,7 @@ export async function handleComboResponses(
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
   const body = expandPreviousResponseInput(rawBody, inboundClientThreadId,
     isThreadSpawnRequest(req.headers) ? agentTaskRecoveryReplayScope(req, config) : undefined);
+  recordReconstructedContext(logCtx, body, previousResponseReplayPrefixLength(body));
   const scopeMismatch = previousResponseScopeMismatch(body);
   if (scopeMismatch) {
     console.warn("[opencodex] dropped a previous_response_id with a mismatched client task scope; continuing fresh");
@@ -2753,6 +2768,9 @@ export async function handleComboResponses(
     const childLog: RequestLogContext = {
       model: pick.target.model,
       provider: pick.target.provider,
+      diagnostics: logCtx.diagnostics,
+      inboundTransport: logCtx.inboundTransport,
+      upstreamTransport: logCtx.upstreamTransport,
       ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
       ...(logCtx.surface ? { surface: logCtx.surface } : {}),
     };
@@ -3182,6 +3200,7 @@ async function handleResponsesInner(
   let body: unknown;
   try {
     body = await readJsonRequestBody(req, translatorBudget);
+    if (!options.comboAttempt) recordRequestShape(logCtx, body);
   } catch (err) {
     if (options.abortSignal?.aborted || req.signal.aborted) {
       return clientCancelledResponse();
@@ -3250,6 +3269,7 @@ async function handleResponsesInner(
   const previousResponseInputExpanded = options.comboReplaySnapshot?.previousResponseInputExpanded
     ?? (body !== originalBody
       && typeof (body as { previous_response_id?: unknown }).previous_response_id === "string");
+  recordReconstructedContext(logCtx, body, previousResponseReplayPrefixLength(body));
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
     { strictEnvelope: !!agentTaskRecovery && isThreadSpawnRequest(req.headers) },
@@ -3264,6 +3284,7 @@ async function handleResponsesInner(
     const rewritten = sanitizeEncryptedContentInPlace(
       (body as { input?: unknown } | undefined)?.input,
     );
+    if (rewritten > 0) recordContextTransformation(logCtx, { kind: "plaintext_encrypted_rewrite" });
     if (rewritten > 0)
       console.warn(
         `[opencodex] rewrote ${rewritten} plaintext encrypted_content part(s) to input_text (spawn-message compatibility)`,
@@ -3376,6 +3397,7 @@ async function handleResponsesInner(
   }
   logCtx.requestedModel = parsed.modelId;
   logCtx.requestedEffort = parsed.options.reasoning;
+  recordRequestedReasoning(logCtx, parsed.options.reasoning, readConfiguredCodexEffort());
   logCtx.callerServiceTier = sanitizeLogMetadataString(parsed.options.serviceTier);
   logCtx.requestedServiceTier = parsed.options.serviceTier;
   logCtx.requestedSpeedLabel = requestLogSpeedLabel(parsed.options.serviceTier);
@@ -3425,6 +3447,7 @@ async function handleResponsesInner(
     if (parsed._compactionRequest === true) parsed._cursorIsolateConversation = true;
     route = shadowRoute ?? resolveRoute(parsed.modelId);
     logCtx.routeDecision = route.routeDecision;
+    recordSelectedRoute(logCtx);
   } catch (err) {
     if (err instanceof NoAvailableComboTargetsError) {
       return comboUnavailable(err.comboId);
@@ -4029,6 +4052,7 @@ async function handleResponsesInner(
     ? `${route.providerName}-${route.codexAccountNamespace}`
     : formatCodexProviderForLog(route.providerName, codexLogAccountId(authCtx), config);
   logCtx.accountLogLabel = codexAuthContextLogLabel(authCtx, config);
+  recordRouteAuth(logCtx, route.provider.authMode, authCtx);
   // Seed an account-derived scope before final adapter binding. Cursor never treats it as
   // authoritative: bindRouteReasoningReplayScope replaces it with the exact route owner or a
   // per-request fail-closed sentinel after the final provider and credential are known.
@@ -4272,6 +4296,7 @@ async function handleResponsesInner(
       // Both main and image-loop callers already acquired the initial pacing slot.
       // Subsequent physical messages retain this adapter/credential and are paced normally.
       const fetch = providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+        observeTransport: transportObserver(logCtx),
         providerName: route.providerName, modelId: route.modelId, pacingSlotAcquired: true,
         onTransport: transport => observeRequestTransport(logCtx, transport),
         beforeDispatch: () => {
@@ -4302,9 +4327,17 @@ async function handleResponsesInner(
       let dispatchInit = init;
       for (let attempt = 0; attempt < 3; attempt++) {
         if (selectionIsCurrent(requestBindings.get(wireRequest))) {
-          const fetchImpl = (route.provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? execute;
+          const customFetch = (route.provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch;
           onHttpDispatch();
-          return fetchImpl(destination, dispatchInit);
+          if (!customFetch) return execute(destination, dispatchInit);
+          // The selected provider can replace its executor during account revalidation.
+          // Observe this physical request too, using the rebuilt body and destination.
+          const observe = transportObserver(logCtx);
+          observe({ kind: "send", transport: "http", body: dispatchInit.body,
+            target: diagnosticTarget(destination, dispatchInit) });
+          const response = await customFetch(destination, dispatchInit);
+          observe({ kind: "response", transport: "http", response });
+          return response;
         }
         const nextAdapter = await refreshDispatchAdapter(requestParsed);
         const rebuilt = await nextAdapter.buildRequest(requestParsed, {
@@ -4510,6 +4543,8 @@ async function handleResponsesInner(
     logCtx.conversationId = normalizeLogConversationId(parsed._cursorConversationId);
   }
   logCtx.providerAdapter = adapter.name;
+  recordSelectedRoute(logCtx);
+  recordRouteAuth(logCtx, adapterProvider.authMode, authCtx);
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
   if (!options.comboAttempt && !logCtx.activeAttempt) {
@@ -4668,6 +4703,8 @@ async function handleResponsesInner(
     commitReasoningReplayServingIdentity(parsed._reasoningReplayScope);
   };
   if (routedCompaction) {
+    recordContextTransformation(logCtx, { kind: "synthetic_compaction",
+      dropped: { tool_definition: parsed.context.tools?.length ?? 0 }, injected: { message: 1 } });
     delete parsed.context.tools;
     delete parsed._webSearch;
     delete parsed.options.toolChoice;
@@ -5138,6 +5175,7 @@ async function handleResponsesInner(
             body: request.body,
           }, recovery), upstream.signal, connectMs, parsed.stream,
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              observeTransport: transportObserver(logCtx),
               dispatchOverride: oauthDispatch(request),
               providerName: route.providerName,
               modelId: route.modelId,
@@ -5217,6 +5255,7 @@ async function handleResponsesInner(
               body: request.body,
             }, innerRecovery), upstream.signal, connectMs, parsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
@@ -5276,6 +5315,7 @@ async function handleResponsesInner(
       }
       authCtx = replay.authCtx;
       route.provider = replay.provider;
+      recordRouteAuth(logCtx, route.provider.authMode, authCtx);
       selectedForwardHeaders = replay.headers;
       const replayAdapter = resolveSelectionAdapter(
         resolveWireProtocolOverride(route.providerName, route.modelId, replay.provider, inboundWire),
@@ -5324,6 +5364,7 @@ async function handleResponsesInner(
           // here on is a genuine transport attempt.
           storedPoolReplayDispatchNotifier(
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              observeTransport: transportObserver(logCtx),
               dispatchOverride: oauthDispatch(request),
               providerName: route.providerName,
               modelId: route.modelId,
@@ -5364,7 +5405,9 @@ async function handleResponsesInner(
       let refreshed: OAuthAccessSnapshot;
       try {
         refreshed = await refreshResolvedOAuthSelection(sentOAuthSnapshot);
+        recordAuthRefresh(logCtx, "succeeded");
       } catch (err) {
+        recordAuthRefresh(logCtx, "failed");
         upstream.abort();
         releaseCodexAuthContextProbeLease(authCtx);
         return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
@@ -5445,6 +5488,7 @@ async function handleResponsesInner(
               body: request.body,
             }, recovery), upstream.signal, connectMs, parsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
@@ -5520,7 +5564,7 @@ async function handleResponsesInner(
         for await (const _ of prepareSameTarget429Wait({
           body: upstreamResponse.body,
           signal: options.abortSignal,
-          delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+          delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
         })) {
           // pre-stream: no stall watchdog to feed
         }
@@ -5546,6 +5590,7 @@ async function handleResponsesInner(
               body: request.body,
             }, recovery), upstream.signal, connectMs, parsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
@@ -5964,6 +6009,12 @@ async function handleResponsesInner(
         const turnAc = new AbortController();
         linkAbortSignal(upstream, turnAc.signal);
         registerTurn(turnAc, options.turnAdmissionLease);
+        // Upstream outcome accounting stays synchronous. Only the log callback
+        // waits for the relay's accepted handoff and teardown observations.
+        let pendingLogTerminal: ResponsesTerminalStatus | undefined;
+        let pendingLogCancellation = false;
+        const deliveryInspector = logCtx.inboundTransport === "http"
+          ? createDownstreamDiagnosticInspector(logCtx) : undefined;
         const reportNativeTerminal = recordTerminalOutcomes
           ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
             terminalRecorder?.(status, httpStatusOverride);
@@ -5980,7 +6031,7 @@ async function handleResponsesInner(
                 );
               }
             }
-            options.onNativePassthroughTerminal?.(status);
+            pendingLogTerminal ??= status;
           }
           : undefined;
         const inspector = createSseInspector({
@@ -5993,6 +6044,10 @@ async function handleResponsesInner(
         });
         const eagerBody = relaySseEagerBounded(passthroughSseBody, turnAc, {
           inspectChunk: chunk => inspector.feed(chunk),
+          onDeliveredChunk: chunk => deliveryInspector?.feed(chunk),
+          onClientGone: () => {
+            if (logCtx.inboundTransport === "http") recordDownstreamCancelled(logCtx, "client_disconnect");
+          },
           finishInspection: () => inspector.finish(),
           disposeInspection: () => inspector.dispose(),
           // Stream lifetime follows the protocol terminal even when this request
@@ -6002,6 +6057,7 @@ async function handleResponsesInner(
             ? { rewriteBlocks: clientBlockRewrite }
             : {}),
           onSynthetic: (kind, reason) => {
+            recordSyntheticTerminal(logCtx, kind === "incomplete" ? "response.incomplete" : "response.failed");
             if (!reportNativeTerminal) return;
             if (kind === "incomplete") {
               logCtx.terminalSource = "synthetic";
@@ -6016,8 +6072,21 @@ async function handleResponsesInner(
               reportNativeTerminal("failed", 502);
             }
           },
-          onClientCancel: () => options.onNativePassthroughCancel?.(),
-          onDone: () => unregisterTurn(turnAc),
+          onClientCancel: () => { pendingLogCancellation = true; },
+          onDone: () => {
+            try {
+              // Flush only downstream bytes already accepted by enqueue; this
+              // cannot borrow an upstream terminal consumed in discard-drain.
+              deliveryInspector?.finish();
+              deliveryInspector?.dispose();
+            } catch { /* diagnostic inspection cannot block final logging */ }
+            try {
+              if (pendingLogTerminal !== undefined) options.onNativePassthroughTerminal?.(pendingLogTerminal);
+              else if (pendingLogCancellation) options.onNativePassthroughCancel?.();
+            } finally {
+              unregisterTurn(turnAc);
+            }
+          },
         }, {
           clientGoneSignal: options.abortSignal,
           ...(inlineEagerRewrite ? { rewriteBudget: translatorBudget } : {}),
@@ -6440,10 +6509,15 @@ async function handleResponsesInner(
       if (vidPlan && !t.namespace && vidPlan.toolNames.has(t.name)) return false;
       return true;
     })];
+    const removedBridgeTools = priorTools.length - bridgeTools.length;
     const existingNames = new Set(bridgeTools.map(t => t.name));
+    const retainedBridgeTools = bridgeTools.length;
     if (imgPlan && !existingNames.has(IMAGE_GEN_TOOL_NAME)) bridgeTools.push(buildImageTool());
     if (vidPlan && !existingNames.has(VIDEO_GEN_TOOL_NAME)) bridgeTools.push(buildVideoTool());
     parsed.context.tools = bridgeTools;
+    recordContextTransformation(logCtx, { kind: "media_tool_bridge",
+      dropped: { tool_definition: removedBridgeTools },
+      injected: { tool_definition: bridgeTools.length - retainedBridgeTools } });
     // Hosted image_generation tool_choice / allowed_tools must target the synthetic function name.
     // Gate on imgPlan — in a video-only turn buildImageTool() was never injected, so rewriting
     // image_generation/image_gen aliases would add an undeclared tool that strict upstreams reject.
@@ -6463,6 +6537,7 @@ async function handleResponsesInner(
       route.provider,
       options.codexWsRuntimeIdentity,
       {
+        observeTransport: transportObserver(logCtx),
         providerName: route.providerName,
         modelId: route.modelId,
         onTransport: transport => observeRequestTransport(logCtx, transport),
@@ -6488,6 +6563,7 @@ async function handleResponsesInner(
       fetchImpl: imageProviderFetch.unpacedFetch ?? imageProviderFetch,
       fetchForRequest: (request, iterParsed) => {
         const fetch = providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+          observeTransport: transportObserver(logCtx),
           dispatchOverride: oauthDispatch(request, iterParsed),
           providerName: route.providerName, modelId: route.modelId,
           onTransport: transport => observeRequestTransport(logCtx, transport),
@@ -6545,10 +6621,12 @@ async function handleResponsesInner(
   // through web-search instead of being swallowed. runTurn adapters never enter this branch.
   if (canRunWebSearch && wsPlan) {
     parsed.context.tools = [...(parsed.context.tools ?? []), buildWebSearchTool()];
+    recordContextTransformation(logCtx, { kind: "web_search_tool_bridge", injected: { tool_definition: 1 } });
     // Resolve the mutable route at send time: a 429 rotation replaces route.provider, so retaining
     // one pre-rotation providerFetch would keep the old credential and transport pin.
     const routedProviderFetch = ((input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
       providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+        observeTransport: transportObserver(logCtx),
         providerName: route.providerName,
         modelId: route.modelId,
         onTransport: transport => observeRequestTransport(logCtx, transport),
@@ -6556,6 +6634,7 @@ async function handleResponsesInner(
     const wsResponse = await runWithWebSearch({
       parsed, adapter,
       fetchForRequest: (request, iterParsed) => providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+        observeTransport: transportObserver(logCtx),
         dispatchOverride: oauthDispatch(request, iterParsed),
         providerName: route.providerName, modelId: route.modelId,
         onTransport: transport => observeRequestTransport(logCtx, transport),
@@ -6645,7 +6724,7 @@ async function handleResponsesInner(
     // Initial admission must settle before the streaming Response commits HTTP 200.
     // Let the outer Responses facade preserve the local retryable-429 contract.
     try {
-      await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal);
+      await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal, pacingObserver(logCtx));
     } catch (error) {
       cleanupRunTurnAbort();
       queue.close();
@@ -6663,7 +6742,7 @@ async function handleResponsesInner(
     ): Promise<void> => {
       try {
         if (!pacingSlotAcquired) {
-          await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal);
+          await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal, pacingObserver(logCtx));
         }
         await refreshRunTurnSelection();
         noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery);
@@ -6671,6 +6750,7 @@ async function handleResponsesInner(
           route.provider,
           options.codexWsRuntimeIdentity,
           {
+            observeTransport: transportObserver(logCtx),
             providerName: route.providerName,
             modelId: route.modelId,
             // runTurnAttempt acquired this logical turn's first physical-request slot above.
@@ -6857,6 +6937,7 @@ async function handleResponsesInner(
             }
           },
           onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+            recordCompactionOutput(logCtx, response);
             commitReasoningReplayServingRoute();
             rememberKiroDeliveredFinalAnswer(adapter.name, response);
             if (!routedCompaction) {
@@ -6927,6 +7008,7 @@ async function handleResponsesInner(
         }
       },
     });
+    recordCompactionOutput(logCtx, json);
     if (!routedCompaction) {
       rememberKiroDeliveredFinalAnswer(adapter.name, json);
       rememberResponseState(
@@ -7066,18 +7148,21 @@ async function handleResponsesInner(
   try {
     if (activeAdapter.fetchResponse) {
       noteAttemptSend(logCtx.activeAttempt, inputTokenEstimate);
-      await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal);
-      upstreamResponse = await activeAdapter.fetchResponse(builtInitialRequest, {
-        abortSignal: upstream.signal,
-        timeoutMs: connectMs,
-        stream: parsed.stream,
-        executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              dispatchOverride: oauthDispatch(builtInitialRequest),
+      transportObserver(logCtx)({ kind: "prepared" });
+      await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal, pacingObserver(logCtx));
+      upstreamResponse = await captureAdapterExecution(logCtx,
+        providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+          dispatchOverride: oauthDispatch(builtInitialRequest),
+          onTransport: transport => observeRequestTransport(logCtx, transport),
+          observeTransport: transportObserver(logCtx),
           providerName: route.providerName,
           modelId: route.modelId,
-          onTransport: transport => observeRequestTransport(logCtx, transport),
-        }),
-      });
+        }), executor => activeAdapter.fetchResponse!(builtInitialRequest, {
+          abortSignal: upstream.signal,
+          timeoutMs: connectMs,
+          stream: parsed.stream,
+          executor,
+        }));
     } else {
       // #1851 scope guard: transient-5xx retry on this generic adapter path is opt-in for
       // direct Google AI Studio only (Vertex/Antigravity use fetchResponse above). Other
@@ -7099,6 +7184,7 @@ async function handleResponsesInner(
             body: builtInitialRequest.body,
           }, recovery), upstream.signal, connectMs, parsed.stream,
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+              observeTransport: transportObserver(logCtx),
               dispatchOverride: oauthDispatch(builtInitialRequest),
               providerName: route.providerName,
               modelId: route.modelId,
@@ -7189,18 +7275,21 @@ async function handleResponsesInner(
       try {
         try {
           if (activeAdapter.fetchResponse) {
-            await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal);
-            return await activeAdapter.fetchResponse(retryRequest, {
-              abortSignal: upstream.signal,
-              timeoutMs: connectMs,
-              stream: parsed.stream,
-              executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
-              dispatchOverride: oauthDispatch(retryRequest),
+            transportObserver(logCtx)({ kind: "prepared" });
+            await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal, pacingObserver(logCtx));
+            return await captureAdapterExecution(logCtx,
+              providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                dispatchOverride: oauthDispatch(retryRequest),
+                onTransport: transport => observeRequestTransport(logCtx, transport),
+                observeTransport: transportObserver(logCtx),
                 providerName: route.providerName,
                 modelId: route.modelId,
-                onTransport: transport => observeRequestTransport(logCtx, transport),
-              }),
-            });
+              }), executor => activeAdapter.fetchResponse!(retryRequest, {
+                abortSignal: upstream.signal,
+                timeoutMs: connectMs,
+                stream: parsed.stream,
+                executor,
+              }));
           }
           // #2643 review: this leg used to call fetchWithHeaderTimeout directly, so an
           // opted-in provider's transient-5xx policy applied to the initial send and to
@@ -7218,6 +7307,7 @@ async function handleResponsesInner(
                 method: retryRequest.method, headers: retryRequest.headers, body: retryRequest.body,
               }, recoveryKind), upstream.signal, connectMs, parsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
               dispatchOverride: oauthDispatch(retryRequest),
                 providerName: route.providerName,
                 modelId: route.modelId,
@@ -7260,7 +7350,9 @@ async function handleResponsesInner(
         let refreshed: OAuthAccessSnapshot;
         try {
           refreshed = await refreshResolvedOAuthSelection(sentOAuthSnapshot);
+          recordAuthRefresh(logCtx, "succeeded");
         } catch (err) {
+          recordAuthRefresh(logCtx, "failed");
           cleanupUpstreamAbort();
           return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
         }
@@ -7356,7 +7448,7 @@ async function handleResponsesInner(
           for await (const _ of prepareSameTarget429Wait({
             body: upstreamResponse.body,
             signal: options.abortSignal,
-            delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+            delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
           })) {
             // pre-stream: no stall watchdog to feed
           }
@@ -7673,18 +7765,21 @@ async function handleResponsesInner(
       try {
         if (activeAdapter.fetchResponse) {
           noteAttemptSend(logCtx.activeAttempt, continuationEstimate, replayKind);
-          await waitForProviderRequestSlot(route.providerName, route.provider, nextParsed.modelId, upstream.signal);
-          return await activeAdapter.fetchResponse(builtContinuationRequest, {
-            abortSignal: upstream.signal,
-            timeoutMs: connectMs,
-            stream: nextParsed.stream,
-            executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+          transportObserver(logCtx)({ kind: "prepared" });
+          await waitForProviderRequestSlot(route.providerName, route.provider, nextParsed.modelId, upstream.signal, pacingObserver(logCtx));
+          return await captureAdapterExecution(logCtx,
+            providerFetch(route.provider, options.codexWsRuntimeIdentity, {
               dispatchOverride: oauthDispatch(builtContinuationRequest, nextParsed),
+              onTransport: transport => observeRequestTransport(logCtx, transport),
+              observeTransport: transportObserver(logCtx),
               providerName: route.providerName,
               modelId: nextParsed.modelId,
-              onTransport: transport => observeRequestTransport(logCtx, transport),
-            }),
-          });
+            }), executor => activeAdapter.fetchResponse!(builtContinuationRequest, {
+              abortSignal: upstream.signal,
+              timeoutMs: connectMs,
+              stream: nextParsed.stream,
+              executor,
+            }));
         }
         // Same #1851 scope guard as the initial send: transient-5xx retry only for direct
         // Google AI Studio; every other adapter keeps reset-only semantics here.
@@ -7706,6 +7801,7 @@ async function handleResponsesInner(
               connectMs,
               nextParsed.stream,
               providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                observeTransport: transportObserver(logCtx),
               dispatchOverride: oauthDispatch(builtContinuationRequest, nextParsed),
                 providerName: route.providerName,
                 modelId: nextParsed.modelId,
@@ -7763,7 +7859,7 @@ async function handleResponsesInner(
             // cancel aborts `upstream` through the bridge, and upstream is also linked from
             // options.abortSignal — so this covers both cancellation paths.
             signal: upstream.signal,
-            delayMs: rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now()),
+            delayMs: captureRetryDelay(logCtx, rateLimitRetryDelayMs(rateLimitPolicy, retryAfterHeader, Date.now())),
             heartbeatIntervalMs: Math.min(10_000, Math.max(250, stallTimeoutMs / 2)),
           });
         } catch {
@@ -8025,6 +8121,7 @@ async function handleResponsesInner(
           }
         },
         onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
+          recordCompactionOutput(logCtx, response);
           commitReasoningReplayServingRoute();
           rememberKiroDeliveredFinalAnswer(activeAdapter.name, response);
           // Compaction turns must NOT enter the continuation cache: _rawBody still holds the full
@@ -8102,6 +8199,7 @@ async function handleResponsesInner(
         }
       },
     });
+    recordCompactionOutput(logCtx, json);
     // See the streaming branch: compaction turns skip the continuation cache.
     if (!routedCompaction) {
       rememberKiroDeliveredFinalAnswer(activeAdapter.name, json);

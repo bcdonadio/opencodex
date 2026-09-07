@@ -149,6 +149,28 @@ JSON mode: `payload`.
 - Rows print `conv=<id>` when the entry carries one, so a conversation filter can be told apart from an empty result.
 - `--follow` deduplicates by row id and cannot be combined with `--json`.
 
+### `ocx logs export`
+
+Build a bounded, sanitized support bundle from canonical usage-ledger rows.
+
+| Method | Route |
+|---|---|
+| GET | `/api/transaction-diagnostics/export` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--request` | string | Select a request id; repeat at most 32 times. |
+| `--from` | number | Inclusive UTC epoch-millisecond window start. |
+| `--to` | number | Inclusive UTC epoch-millisecond window end, at most 24 hours after --from. |
+| `--out` | string | Write the JSON bundle to this explicit local path. |
+| `--force` | boolean | Replace an existing --out target. |
+| `--json` | boolean | Emit the JSON support bundle (already the default). |
+
+JSON mode: `payload`.
+
+- Choose repeatable --request values or exact --from/--to, never both.
+- Without --out, stdout is only the JSON support bundle; the command never publishes or sends it.
+
 ### `ocx storage report`
 
 Disk usage under CODEX_HOME, with the log-guard protection report.
@@ -647,6 +669,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 35
+- declared capabilities: 36
 - of those, state-changing: 15
 - head-resolved invocations: 2

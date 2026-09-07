@@ -17,7 +17,7 @@ import { XAI_OAUTH_DISCOVERY_URL } from "../../src/oauth/xai";
 import { XAI_GROK_CLI_BASE_URL } from "../../src/providers/xai-transport";
 import type { AdapterEvent, OcxConfig, OcxProviderConfig, OcxProviderContinuationState } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
-import { clearRequestLogsForTests, hydrateRequestLogsFromDisk, httpStatusForRequestLogTerminal, inspectResponseLogSsePayload, type RequestLogContext } from "../../src/server/request-log";
+import { addFinalRequestLog, clearRequestLogsForTests, hydrateRequestLogsFromDisk, httpStatusForRequestLogTerminal, inspectResponseLogSsePayload, type RequestLogContext } from "../../src/server/request-log";
 import { responseWithDeferredRequestLog } from "../../src/server/relay";
 import { readUsageEntries } from "../../src/usage/log";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
@@ -766,6 +766,33 @@ describe("server combo failover 030 activation matrix", () => {
         ],
       });
     }
+  });
+
+  test.each([true, false])("review: native combo sends survive parent adoption (success=%s)", async success => {
+    const stream = (id: string, completed: boolean) => new Response([
+      { type: "response.created", response: { id } },
+      { type: completed ? "response.completed" : "response.failed", response: { id,
+        status: completed ? "completed" : "failed", output: [],
+        ...(completed ? {} : { error: { code: "server_error", message: "fixture overload" } }) } },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+    const a = serve(() => stream("response-a", false));
+    const b = serve(() => stream("response-b", success));
+    const config = comboConfig({ a: provider("openai-responses", baseUrl(a), "key-a"),
+      b: provider("openai-responses", baseUrl(b), "key-b") });
+    const ctx: RequestLogContext = { provider: "", model: "" };
+    const start = Date.now();
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "combo/free", input: "fixture", stream: true }),
+    }), config, ctx);
+    await response.text();
+    addFinalRequestLog("combo-review", start, ctx, success ? 200 : 502);
+    const { usage } = await latestAttemptReceipts(config);
+    expect(usage.attempts?.map(attempt => attempt.sends?.[0]?.upstreamResponseId)).toEqual(["response-a", "response-b"]);
+    expect(usage.attempts?.map(attempt => attempt.sends?.[0]?.status)).toEqual([502, success ? 200 : 502]);
+    expect(usage.attempts?.every(attempt => attempt.sends?.[0]?.endedAt !== undefined)).toBe(true);
+    expect(usage.diagnostics?.responseIdMismatch).toBeUndefined();
+    expect(usage.diagnostics?.duplicateTerminalSuppressed).toBeUndefined();
   });
 
   test("persists one immutable combo route trace, not the child route trace", async () => {

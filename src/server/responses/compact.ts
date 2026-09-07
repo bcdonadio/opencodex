@@ -1,3 +1,5 @@
+import { transportObserver, recordRequestShape, recordContextTransformation, recordCompletedCompaction } from "../transaction-capture";
+import { recordRouteAuth } from "../transaction-auth-capture";
 import type { Server } from "bun";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import {
@@ -530,6 +532,7 @@ export async function handleResponsesCompact(
   let body: unknown;
   try {
     body = await readJsonRequestBody(req);
+    recordRequestShape(logCtx, body);
   } catch (err) {
     return decodeRequestErrorResponse(err, "responses-compact");
   }
@@ -584,6 +587,7 @@ export async function handleResponsesCompact(
     ? `${route.providerName}-${route.codexAccountNamespace}`
     : route.providerName;
   logCtx.providerAdapter = route.provider.adapter;
+  recordRouteAuth(logCtx, route.provider.authMode);
   const virtual = resolveOpenAiCompactModel(route.providerName, selectedModelId);
   if (virtual) {
     route.modelId = virtual.wireModelId;
@@ -693,6 +697,7 @@ export async function handleResponsesCompact(
           nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
         });
         logCtx.accountLogLabel = codexAuthContextLogLabel(authCtx, config);
+        recordRouteAuth(logCtx, route.provider.authMode, authCtx);
         const selected = await materializeCodexUpstreamAuthAsync(req.headers, authCtx, {
           admission,
           config: isCanonicalOpenAiForwardProvider(route.provider) ? config : undefined,
@@ -844,6 +849,7 @@ export async function handleResponsesCompact(
         connectMs,
         false,
         providerFetch(sendProvider, undefined, {
+          observeTransport: transportObserver(logCtx),
           providerName: route.providerName,
           modelId: route.modelId,
           beforeDispatch: isCanonicalOpenAiForwardProvider(sendProvider)
@@ -968,6 +974,7 @@ export async function handleResponsesCompact(
       compactProvider = replay.provider;
       headers = replay.headers;
       logCtx.accountLogLabel = codexAuthContextLogLabel(replay.authCtx, config);
+      recordRouteAuth(logCtx, route.provider.authMode, replay.authCtx);
       try {
         upstream = await sendCompactAttempt(compactProvider, headers, "single", authCtx);
       } catch (err) {
@@ -1042,6 +1049,7 @@ export async function handleResponsesCompact(
         await upstream.body?.cancel().catch(() => undefined);
         outcomeCtx = alternate.authCtx;
         logCtx.accountLogLabel = codexAuthContextLogLabel(alternate.authCtx, config);
+        recordRouteAuth(logCtx, route.provider.authMode, alternate.authCtx);
         try {
           upstream = await sendCompactAttempt(alternate.provider, alternate.headers, "single", alternate.authCtx);
         } catch (err) {
@@ -1101,7 +1109,21 @@ export async function handleResponsesCompact(
     // request log; the routed branch gets the same through handleResponses. The
     // synthetic buffer errors are not upstream bodies and stay uninspected.
     if (buffered.ok) {
-      inspectResponseLogJson(logCtx, await buffered.clone().text());
+      const compactResponseText = await buffered.clone().text();
+      inspectResponseLogJson(logCtx, compactResponseText);
+      // Compact JSON has no response.completed event. The actual successful
+      // compact output is the owner of this completion observation.
+      try {
+        if (compactResponseText.length <= 1024 * 1024) {
+          const compactResponseJson = JSON.parse(compactResponseText) as { output?: unknown[]; error?: unknown; status?: unknown };
+          if (!compactResponseJson.error && (compactResponseJson.status === undefined || compactResponseJson.status === "completed")
+            && Array.isArray(compactResponseJson.output)
+            && compactResponseJson.output.slice(0, 1024).some(item => !!item && typeof item === "object"
+              && (item as { type?: unknown }).type === "compaction")) {
+            recordCompletedCompaction(logCtx, "upstream");
+          }
+        }
+      } catch { /* optional shape observation cannot change compact response delivery */ }
       forgetCompactHandoffRoute(req);
     } else if (quotaFailure && !storedPool401ReplayAttempted) {
       const fallbackModel = compactHandoffRoute(req, raw.model);
@@ -1149,6 +1171,7 @@ export async function handleResponsesCompact(
     stream: accountGatedCompactWireModel || route.combo ? true : false,
     input: [...inputItems, { type: "compaction_trigger" }],
   };
+  recordContextTransformation(logCtx, { kind: "synthetic_compaction", injected: { compaction_trigger: 1 } });
   const internalHeaders = new Headers({ "content-type": "application/json" });
   for (const name of FORWARD_HEADERS) {
     const value = req.headers.get(name);
@@ -1230,6 +1253,7 @@ export async function handleResponsesCompact(
       headers: { "Content-Type": "application/json" },
     });
     rememberCompactHandoffRoute(req, raw.model);
+    recordCompletedCompaction(logCtx, "upstream");
     return result;
   }
   const encrypted = compactionItems[0]!.encrypted_content;
@@ -1241,5 +1265,6 @@ export async function handleResponsesCompact(
   const summary = decoded;
   const output = buildCompactV1Output(extractCompactUserMessages(inputItems), summary);
   rememberCompactHandoffRoute(req, raw.model);
+  recordCompletedCompaction(logCtx);
   return new Response(JSON.stringify({ output }), { headers: { "Content-Type": "application/json" } });
 }

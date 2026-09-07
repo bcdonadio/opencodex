@@ -14,8 +14,63 @@ import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { fetchWithHeaderTimeout } from "../../src/server/responses/fetch-helpers";
 import { requestPacingOverloadResponse } from "../../src/server/responses/pacing-overload";
 import type { OcxProviderConfig } from "../../src/types";
+import { pacingObserver, transportObserver } from "../../src/server/transaction-capture";
+import type { RequestLogContext } from "../../src/server/request-log";
 
 afterEach(() => resetProviderRequestPacingForTest());
+
+test("diagnostics observe real queue admission and leave aborted waits unadmitted", async () => {
+  const clock = fakePacingClock();
+  setProviderRequestPacingRuntimeForTest(clock.runtime);
+  const configured = provider({ enabled: true, minIntervalMs: 100 });
+  await waitForProviderRequestSlot("queued", configured);
+  const ctx = {} as RequestLogContext;
+  const pending = waitForProviderRequestSlot("queued", configured, undefined, undefined, pacingObserver(ctx));
+  expect(ctx.diagnostics?.queuedAt).toBeGreaterThan(0);
+  expect(ctx.diagnostics?.admittedAt).toBeUndefined();
+  clock.advanceBy(100);
+  await pending;
+  expect(ctx.diagnostics?.admittedAt).toBeGreaterThanOrEqual(ctx.diagnostics!.queuedAt as number);
+  expect(ctx.diagnostics?.queueMs).toBeGreaterThanOrEqual(0);
+  expect(ctx.diagnostics?.derivedFields).toContain("queueMs");
+  const aborted = {} as RequestLogContext;
+  const controller = new AbortController();
+  const wait = waitForProviderRequestSlot("queued", configured, undefined, controller.signal, pacingObserver(aborted));
+  controller.abort();
+  await expect(wait).rejects.toThrow();
+  expect(aborted.diagnostics?.queuedAt).toBeGreaterThan(0);
+  expect(aborted.diagnostics?.admittedAt).toBeUndefined();
+  expect(aborted.diagnostics?.queueMs).toBeUndefined();
+});
+
+test("pacing diagnostics cannot throw or invent a disabled queue", async () => {
+  const clock = fakePacingClock();
+  setProviderRequestPacingRuntimeForTest(clock.runtime);
+  await waitForProviderRequestSlot("safe", provider({ enabled: true, minIntervalMs: 100 }), undefined, undefined,
+    () => { throw new Error("diagnostic observer unavailable"); });
+  const ctx = {} as RequestLogContext;
+  await waitForProviderRequestSlot("off", provider({ enabled: false }), undefined, undefined, pacingObserver(ctx));
+  expect(ctx.diagnostics).toBeUndefined();
+});
+
+test("provider fetch forwards queue-owner observations before dispatch", async () => {
+  const clock = fakePacingClock();
+  setProviderRequestPacingRuntimeForTest(clock.runtime);
+  const configured = provider({ enabled: true, minIntervalMs: 100 });
+  await waitForProviderRequestSlot("fetch-observer", configured);
+  let dispatched = false;
+  Object.assign(configured, { fetch: async () => { dispatched = true; return new Response("{}"); } });
+  const ctx = {} as RequestLogContext;
+  const fetch = providerFetch(configured, undefined, { providerName: "fetch-observer", observeTransport: transportObserver(ctx) });
+  const pending = fetch("https://example.test/v1/chat/completions", { method: "POST", body: "{}" });
+  expect(dispatched).toBe(false);
+  expect(ctx.diagnostics?.queuedAt).toBeGreaterThan(0);
+  clock.advanceBy(100);
+  await pending;
+  expect(dispatched).toBe(true);
+  expect(ctx.diagnostics?.admittedAt).toBeGreaterThan(0);
+  expect(ctx.diagnostics?.queueMs).toBeGreaterThanOrEqual(0);
+});
 
 function provider(requestPacing: OcxProviderConfig["requestPacing"]): OcxProviderConfig {
   return { adapter: "openai-chat", baseUrl: "https://example.test/v1", requestPacing };

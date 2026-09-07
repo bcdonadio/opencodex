@@ -22,6 +22,12 @@ import { requestLogDto } from "./shared";
 import { jsonResponse } from "../auth-cors";
 import type { ManagementContext } from "./context";
 import type { PersistedUsageEntry } from "../../usage/log";
+import { readUsageSnapshotForManagement } from "../../usage/log";
+import {
+  buildSupportExport,
+  SUPPORT_EXPORT_MAX_REQUEST_IDS,
+  type SupportExportSelection,
+} from "../../diagnostics/support-export";
 
 function parseQueryInt(raw: string | null): number | undefined | "invalid" {
   if (raw === null) return undefined;
@@ -44,7 +50,54 @@ function finalAttemptTarget(entry: PersistedUsageEntry): { provider: string; mod
 
 export async function handleRequestHistoryRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { url, req, config } = ctx;
-  if (!url.pathname.startsWith("/api/request-history")) return null;
+  const supportExportPath = "/api/transaction-diagnostics/export";
+  if (!url.pathname.startsWith("/api/request-history") && url.pathname !== supportExportPath) return null;
+
+  if (url.pathname === supportExportPath && req.method === "GET") {
+    const allowed = new Set(["requestId", "from", "to"]);
+    if ([...url.searchParams.keys()].some(key => !allowed.has(key))) {
+      return jsonResponse({ error: { code: "invalid_selection", message: "only requestId or exact from/to selectors are accepted" } }, 400, req, config);
+    }
+    const requestIds = url.searchParams.getAll("requestId");
+    const hasRequestIds = requestIds.length > 0;
+    const hasFrom = url.searchParams.has("from");
+    const hasTo = url.searchParams.has("to");
+    if ((hasRequestIds && (hasFrom || hasTo)) || (!hasRequestIds && (!hasFrom || !hasTo))) {
+      return jsonResponse({ error: { code: "invalid_selection", message: "provide requestId values or exact from/to, never both" } }, 400, req, config);
+    }
+    if (requestIds.length > SUPPORT_EXPORT_MAX_REQUEST_IDS || requestIds.some(value => !value.trim())) {
+      return jsonResponse({ error: { code: "invalid_request_ids", message: `requestId accepts 1 to ${SUPPORT_EXPORT_MAX_REQUEST_IDS} non-empty values` } }, 400, req, config);
+    }
+    let selection: SupportExportSelection;
+    if (hasRequestIds) {
+      selection = { requestIds };
+    } else {
+      const from = parseQueryInt(url.searchParams.get("from"));
+      const to = parseQueryInt(url.searchParams.get("to"));
+      if (from === undefined || from === "invalid" || to === undefined || to === "invalid") {
+        return jsonResponse({ error: { code: "invalid_range", message: "from and to must be epoch-millisecond integers" } }, 400, req, config);
+      }
+      selection = { from, to };
+    }
+    try {
+      const snapshot = await readUsageSnapshotForManagement();
+      const bundle = buildSupportExport(selection, snapshot.entries, {
+        canonicalScanIncomplete: snapshot.truncatedPrefixBytes > 0
+          || snapshot.entriesTruncated || snapshot.entriesDropped > 0
+          || snapshot.invalidEntriesDropped > 0,
+      });
+      const response = jsonResponse(bundle, 200, req, config);
+      response.headers.set("Content-Disposition", 'attachment; filename="opencodex-support-export.json"');
+      response.headers.set("Cache-Control", "no-store");
+      response.headers.set("X-Content-Type-Options", "nosniff");
+      return response;
+    } catch (error) {
+      if (error instanceof RangeError) {
+        return jsonResponse({ error: { code: "invalid_selection", message: error.message } }, 400, req, config);
+      }
+      throw error;
+    }
+  }
 
   if (url.pathname === "/api/request-history" && req.method === "GET") {
     const statusRaw = parseQueryInt(url.searchParams.get("status"));

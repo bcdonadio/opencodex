@@ -1,3 +1,5 @@
+import { observeRequestTransport, recordRequestShape, recordDeliveredOutput, recordDownstreamTerminal, recordDownstreamCancelled } from "./transaction-capture";
+import { applyClientIdentitySnapshot } from "./transaction-client-capture";
 import { markActivity } from "../lib/sidecar-tracker";
 import { knownModelIdsForProvider } from "../router";
 import {
@@ -1161,6 +1163,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             admission,
             websocketLease,
             sessionLaneIdFromRequest(req.headers),
+            req.headers,
           ),
         })) return undefined as unknown as Response;
         websocketLease.release();
@@ -1763,6 +1766,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           inboundProtocol: "responses",
           inboundTransport: "http",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
           try {
@@ -1799,6 +1803,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundTransport: "http",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         const endpoint = url.pathname.endsWith("/edits") ? "edits" as const : "generations" as const;
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           const response = await handleImages(req, config, endpoint, logCtx, turnAdmissionLease);
@@ -1855,6 +1860,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundTransport: "http",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           const response = await handleSearch(req, config, logCtx, turnAdmissionLease, admission);
           addFinalRequestLog(requestId, start, logCtx, response.status,
@@ -1881,6 +1887,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           inboundProtocol: "responses",
           inboundTransport: "http",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;
         const finalizeNativePassthroughLog = (
@@ -1956,6 +1963,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           inboundProtocol: "messages",
           inboundTransport: "http",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         // Logging is finalized inside handleClaudeMessages (Responses-vocab tap on the
         // pre-translation stream + native passthrough callbacks) — do not re-wrap the
         // translated Anthropic stream here.
@@ -1987,6 +1995,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           inboundProtocol: "chat",
           inboundTransport: "http",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => withCors(
           await handleChatCompletions(req, config, logCtx, { requestId, start, turnAdmissionLease, admission }),
           req,
@@ -2018,6 +2027,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundTransport: "http",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           const response = await handleLive(req, config, logCtx, turnAdmissionLease);
           addFinalRequestLog(
@@ -2056,6 +2066,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ...admissionFields(admission),
           inboundTransport: "websocket",
         };
+        observeRequestTransport(logCtx, "http", req, requestId, start);
         const turnAdmissionLease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
         if (!turnAdmissionLease) return serverBusyResponse(req, "active turns", policy);
         let resolved;
@@ -2070,7 +2081,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           addFinalRequestLog(requestId, start, logCtx, resolved.status);
           return withCors(resolved, req, policy);
         }
-        addFinalRequestLog(requestId, start, logCtx, 101);
         if (requestServer.upgrade(req, {
           data: {
             kind: "live-sideband",
@@ -2081,8 +2091,12 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             liveOpened: false,
             liveTurnAdmissionLease: turnAdmissionLease,
           } satisfies WsData,
-        })) return undefined as unknown as Response;
+        })) {
+          addFinalRequestLog(requestId, start, logCtx, 101);
+          return undefined as unknown as Response;
+        }
         turnAdmissionLease.release();
+        addFinalRequestLog(requestId, start, logCtx, 426);
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
       }
 
@@ -2253,7 +2267,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         ws.data.turnId = turnId;
         const isCurrent = () => ws.data.turnId === turnId;
         const turnAbort = new AbortController();
+        let observeTurnCancellation: (() => void) | undefined;
         const cancelTurn = () => {
+          observeTurnCancellation?.();
           turnAbort.abort("websocket turn superseded or closed");
         };
         ws.data.cancel = cancelTurn;
@@ -2301,6 +2317,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             inboundProtocol: "responses",
             inboundTransport: "websocket",
           };
+          observeTurnCancellation = () => recordDownstreamCancelled(logCtx,
+            ws.readyState === 1 ? "turn_replaced" : "client_disconnect");
           let logged = false;
           const finalizeLog = (
             status: number,
@@ -2318,6 +2336,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             headers: fwd,
             body: JSON.stringify({ ...payload, stream: true }),
           });
+          ws.data.requestSequenceOnConnection = (ws.data.requestSequenceOnConnection ?? 0) + 1;
+          observeRequestTransport(logCtx, "websocket", req, requestId, start,
+            ws.data.connectionId, ws.data.requestSequenceOnConnection);
+          applyClientIdentitySnapshot(logCtx.diagnostics, ws.data.clientIdentitySnapshot);
+          recordRequestShape(logCtx, payload, rawBytes);
           try {
             let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;
             const response = await handleResponses(req, config, logCtx, {
@@ -2335,6 +2358,13 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             });
             await sendResponseToWebSocket(ws, response, isCurrent, {
               onSsePayload: payload => inspectResponseLogSsePayload(logCtx, payload),
+              onCancelled: reason => recordDownstreamCancelled(logCtx, reason),
+              onFrameSent: (type, outputKind) => {
+                if (outputKind) recordDeliveredOutput(logCtx, outputKind);
+                if (["response.completed", "response.failed", "response.incomplete", "error"].includes(type)) {
+                  recordDownstreamTerminal(logCtx);
+                }
+              },
               onTerminal: status => {
                 terminalRecorder?.(status, logCtx.terminalHttpStatus);
                 finalizeLog(httpStatusForRequestLogTerminal(status, logCtx), {
@@ -2346,9 +2376,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             if (!logged) finalizeLog(turnAbort.signal.aborted ? 499 : response.status);
           } catch (err) {
             if (!isCurrent()) return;
+            const failureStatus = err instanceof CodexAccountCooldownError ? 429 : 502;
             try {
               if (err instanceof CodexAccountCooldownError) {
-                finalizeLog(429);
                 // Codex Desktop rides this WS transport, so it must carry the same
                 // actionable text as HTTP; a frame has no headers, hence message-only.
                 const accountSelector = typeof payload.model === "string"
@@ -2358,17 +2388,21 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
                   type: "rate_limit_error",
                   message: cooldownErrorMessage(err, accountSelector),
                 }));
+                recordDownstreamTerminal(logCtx);
                 return;
               }
-              finalizeLog(502);
               sendJsonFrame(ws, buildWsErrorFrame(502, {
                 type: "proxy_error",
                 message: err instanceof Error ? err.message : String(err),
               }));
+              recordDownstreamTerminal(logCtx);
             } catch {
               /* socket already gone or send dropped */
+            } finally {
+              finalizeLog(failureStatus);
             }
           } finally {
+            observeTurnCancellation = undefined;
             turnAdmissionLease.release();
             if (!logged && turnAbort.signal.aborted) finalizeLog(499);
             if (ws.data.cancel === cancelTurn) ws.data.cancel = undefined;

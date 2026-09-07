@@ -159,7 +159,7 @@ describe("agent task recovery cache", () => {
     }
   });
 
-  test("recovery_unavailable does not imply a fetch when all flight slots are occupied", async () => {
+  test("queued cancellation does not fetch while all flight slots are occupied", async () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const pending = Array.from({ length: 32 }, (_, index) => resolveCachedAgentTaskRecovery(
@@ -167,17 +167,26 @@ describe("agent task recovery cache", () => {
     ));
     let fetches = 0;
     globalThis.fetch = (async () => { fetches += 1; throw new Error("must-not-fetch"); }) as typeof fetch;
+    const controller = new AbortController();
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const input = encryptedInput();
+    let settled = false;
+    const overflow = recoverEncryptedAgentTaskWithResult(req, input, {}, routedConfig(), {
+      abortSignal: controller.signal,
+    }).finally(() => { settled = true; });
     try {
-      const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
-      const input = encryptedInput();
-      expect(await recoverEncryptedAgentTaskWithResult(req, input, {}, routedConfig()))
-        .toEqual({ recovered: false, reason: "recovery_unavailable" });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+      expect(fetches).toBe(0);
+      controller.abort();
+      expect(await overflow).toEqual({ recovered: false, reason: "caller_cancelled" });
       expect(fetches).toBe(0);
       expect(input).toEqual(encryptedInput());
       expect(agentTaskRecoveryCacheSnapshotForTests()).toEqual({ entries: 0, bytes: 0 });
     } finally {
+      controller.abort();
       release?.();
-      await Promise.all(pending);
+      await Promise.all([...pending, overflow]);
     }
   });
 

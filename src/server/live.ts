@@ -1,3 +1,5 @@
+import { transportObserver, recordUpstreamResponse } from "./transaction-capture";
+import { diagnosticTarget } from "./responses/fetch-helpers";
 /**
  * /v1/live and /v1/realtime/calls relay (issue #371).
  *
@@ -657,6 +659,8 @@ export async function handleLive(
   const linkedSignal = signalWithTimeout(LIVE_UPSTREAM_TIMEOUT_MS, req.signal);
   const sidecarExit = sidecarEnter("live");
   try {
+    transportObserver(logCtx)({ kind: "send", transport: "http", body: outboundBody,
+      target: diagnosticTarget(url, { method: "POST" }) });
     observeRequestTransport(logCtx, "http");
     const upstreamResponse = await fetch(url, {
       method: "POST",
@@ -668,6 +672,7 @@ export async function handleLive(
       // `session_id`, and `x-codex-turn-metadata` to the redirect target.
       redirect: "manual",
     });
+    recordUpstreamResponse(logCtx, upstreamResponse);
     // Record every completed upstream response before body size handling so account health /
     // cooldown still updates when we reject an oversized payload.
     relay.recordOutcome?.(upstreamResponse.status);

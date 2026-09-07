@@ -7,7 +7,7 @@ import {
 } from "./ws-upstream";
 import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
-import { waitForProviderRequestSlot } from "../../providers/request-pacing";
+import { waitForProviderRequestSlot, type RequestPacingObservation } from "../../providers/request-pacing";
 import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 
@@ -53,6 +53,7 @@ export interface PaceAwareFetch {
 export type ProviderFetch = typeof globalThis.fetch & PaceAwareFetch;
 
 export interface ProviderFetchOptions {
+  observeTransport?: (event: TransportObservation) => void;
   providerName?: string;
   modelId?: string;
   /** One pacing slot was acquired immediately before this fetch wrapper was created. */
@@ -72,11 +73,53 @@ export interface ProviderFetchOptions {
   ) => Promise<Response>;
 }
 
+export type TransportObservation =
+  | { kind: "queue"; observation: RequestPacingObservation }
+  | { kind: "prepared" }
+  | { kind: "send"; transport: "http" | "websocket"; body?: unknown; target?: DiagnosticTarget }
+  | { kind: "response"; transport: "http" | "websocket"; response: Response }
+  | { kind: "event"; payload: unknown; bytes: number }
+  | { kind: "stream_failure"; reason: "client_cancel" | "request_abort" | "owner_cancel" | "prelude_timeout" | "frame_overflow" | "queue_overflow" | "transport_error" | "upstream_close" | "stream_closed" | "protocol_error"; bytes?: number; timeoutMs?: number }
+  | { kind: "connect" | "open" | "connection" | "close" | "mismatch"; connectionId?: string; reused?: boolean; code?: number; reason?: string; sequence?: number; generation?: number; ageMs?: number };
+
+export function notifyTransport(observer: ProviderFetchOptions["observeTransport"], event: TransportObservation): void {
+  try { observer?.(event); } catch { /* diagnostics cannot alter dispatch or fallback */ }
+}
+
+export interface DiagnosticTarget {
+  endpointClass?: string;
+  upstreamHostname: string;
+  method?: string;
+}
+
+/** Closed classes only: configured destinations may contain private tenant names. */
+export function diagnosticTarget(input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit): DiagnosticTarget | undefined {
+  try {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const host = url.hostname.toLowerCase();
+    const upstreamHostname = host === "api.openai.com" ? "api_openai"
+      : host === "chatgpt.com" ? "chatgpt"
+      : host === "api.anthropic.com" ? "api_anthropic"
+      : host === "generativelanguage.googleapis.com" ? "google_api"
+      : ["localhost", "127.0.0.1", "[::1]"].includes(host) ? "loopback" : "custom";
+    const path = url.pathname;
+    const endpointClass = path.endsWith("/responses/compact") ? "compact"
+      : path.endsWith("/responses") ? "responses"
+      : path.endsWith("/chat/completions") ? "chat"
+      : path.endsWith("/messages") ? "messages"
+      : /\/images\/(?:generations|edits|variations)$/.test(path) ? "images" : undefined;
+    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    return { upstreamHostname, endpointClass,
+      ...(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].includes(method) ? { method } : {}) };
+  } catch { return undefined; }
+}
+
 export function providerFetch(
   provider: OcxProviderConfig,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   options: ProviderFetchOptions = {},
 ): ProviderFetch {
+  notifyTransport(options.observeTransport, { kind: "prepared" });
   const base = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
@@ -85,14 +128,23 @@ export function providerFetch(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
       options.beforeDispatch?.(new Headers(dispatchInit.headers ?? (input instanceof Request ? input.headers : undefined)));
+      // Recovery may rebuild the destination and body at the dispatch boundary.
+      // Observe the executor's arguments so diagnostics describe that actual send.
+      const execute = Object.assign(async (wireInput: Parameters<typeof globalThis.fetch>[0], wireInit?: RequestInit) => {
+        notifyTransport(options.observeTransport, { kind: "send", transport: "http", body: wireInit?.body,
+          target: options.observeTransport ? diagnosticTarget(wireInput, wireInit) : undefined });
+        const response = await base(wireInput, wireInit);
+        notifyTransport(options.observeTransport, { kind: "response", transport: "http", response });
+        return response;
+      }, { preconnect });
       const onHttpDispatch = (): void => {
         try { options.onTransport?.("http"); } catch { /* telemetry is observational */ }
       };
       if (options.dispatchOverride) {
-        return options.dispatchOverride(input, dispatchInit, base, onHttpDispatch);
+        return options.dispatchOverride(input, dispatchInit, execute, onHttpDispatch);
       }
       onHttpDispatch();
-      return base(input, dispatchInit);
+      return execute(input, dispatchInit);
     },
     { preconnect },
   ) as typeof globalThis.fetch;
@@ -106,15 +158,11 @@ export function providerFetch(
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(
-        input,
-        init,
-        httpFetch,
-        runtime,
-        options.onCodexWsQuota,
-        options.beforeDispatch,
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch,
         options.onTransport,
-      );
+        options.observeTransport ? event => notifyTransport(options.observeTransport,
+          event.kind === "send" && event.transport === "websocket"
+            ? { ...event, target: diagnosticTarget(input, init) } : event) : undefined);
     }
     return httpFetch(input, init);
   };
@@ -125,7 +173,8 @@ export function providerFetch(
       return Promise.resolve();
     }
     return options.providerName
-      ? waitForProviderRequestSlot(options.providerName, provider, options.modelId, signal)
+      ? waitForProviderRequestSlot(options.providerName, provider, options.modelId, signal,
+        observation => notifyTransport(options.observeTransport, { kind: "queue", observation }))
       : Promise.resolve();
   };
   const wrapped = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {

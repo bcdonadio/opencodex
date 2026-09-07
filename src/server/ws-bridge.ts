@@ -8,14 +8,45 @@ import type { DataPlaneAdmission } from "./auth-cors";
 import type { AdmissionLease, AdmissionReservation } from "../lib/admission";
 import { BoundedSseFrameBuffer } from "./sse-frame-buffer";
 import { safeResponseHeaders } from "./safe-response-headers";
+import { snapshotClientIdentity, type ClientIdentitySnapshot } from "./transaction-client-capture";
 
 export { safeResponseHeaders } from "./safe-response-headers";
 
 const OPEN = 1;
 type ResponsesTerminalReporter = (status: ResponsesTerminalStatus) => void;
 type ResponsesPayloadObserver = (payload: string) => void;
+type ResponsesDeliveryObserver = (type: string, outputKind?: string) => void;
+const OUTPUT_DELTA_KINDS = new Map([
+  ["response.output_text.delta", "text"], ["response.refusal.delta", "refusal"],
+  ["response.reasoning_text.delta", "reasoning"], ["response.reasoning_summary_text.delta", "reasoning"],
+  ["response.function_call_arguments.delta", "tool_call"], ["response.custom_tool_call_input.delta", "tool_call"],
+  ["response.audio.delta", "audio"], ["response.output_audio.delta", "audio"],
+]);
+
+function observeDelivery(observer: ResponsesDeliveryObserver | undefined, type: string, payload?: string | Record<string, unknown>): void {
+  if (!observer) return;
+  try {
+    const event = typeof payload === "string" ? JSON.parse(payload) : payload;
+    let outputKind = typeof event?.delta === "string" && event.delta.length > 0 ? OUTPUT_DELTA_KINDS.get(type) : undefined;
+    const item = type === "response.output_item.done" ? event?.item : undefined;
+    if (item && typeof item === "object") {
+      if (item.type === "message" && Array.isArray(item.content)) {
+        for (const part of item.content) {
+          if (part?.type === "output_text" && typeof part.text === "string" && part.text.length > 0) outputKind = "text";
+          if (part?.type === "refusal" && typeof part.refusal === "string" && part.refusal.length > 0) outputKind = "refusal";
+        }
+      } else if ((item.type === "function_call" && typeof item.arguments === "string" && item.arguments.length > 0)
+        || (item.type === "custom_tool_call" && typeof item.input === "string" && item.input.length > 0)) outputKind = "tool_call";
+      else if (item.type === "image_generation_call" && typeof item.result === "string" && item.result.length > 0) outputKind = "image";
+    }
+    observer(type, outputKind);
+  } catch { /* diagnostics cannot alter delivery */ }
+}
 
 export interface WsData {
+  clientIdentitySnapshot?: ClientIdentitySnapshot;
+  connectionId?: string;
+  requestSequenceOnConnection?: number;
   headers?: Headers; // base inbound forward headers only; per-turn auth refresh injects current pool tokens
   /**
    * Resolved once at the handshake. Auth is handshake-time only on this path, so
@@ -61,12 +92,16 @@ export function buildResponsesWsData(
   admission: DataPlaneAdmission,
   admissionLease?: AdmissionReservation<ServerWebSocket<WsData>>,
   sessionLaneId?: string,
+  clientHeaders?: Headers,
 ): WsData {
   // Auth is handshake-time only on this path: the per-frame contexts have no
   // request headers left to re-resolve from, so the decision rides along here.
   return {
+    ...(clientHeaders ? { clientIdentitySnapshot: snapshotClientIdentity(clientHeaders) } : {}),
     headers,
     admission,
+    connectionId: `ws_${crypto.randomUUID()}`,
+    requestSequenceOnConnection: 0,
     ...(admissionLease ? { admissionLease } : {}),
     ...(sessionLaneId ? { sessionLaneId } : {}),
   };
@@ -197,6 +232,8 @@ export async function pumpResponsesSseToWebSocket(
     isCurrent?: () => boolean;
     onTerminal?: ResponsesTerminalReporter;
     onSsePayload?: ResponsesPayloadObserver;
+    onFrameSent?: ResponsesDeliveryObserver;
+    onCancelled?: (reason: "client_disconnect" | "turn_replaced") => void;
   } = {},
 ): Promise<void> {
   const reader = sseStream.getReader();
@@ -209,6 +246,9 @@ export async function pumpResponsesSseToWebSocket(
     options.onTerminal?.(status);
   };
   const cancel = () => {
+    if (!clientCancelled && !terminalSeen) {
+      try { options.onCancelled?.(ws.readyState === OPEN ? "turn_replaced" : "client_disconnect"); } catch { /* optional diagnostics */ }
+    }
     clientCancelled = true;
     void reader.cancel().catch(() => {});
   };
@@ -228,14 +268,16 @@ export async function pumpResponsesSseToWebSocket(
     }
     const type = payloadType(payload);
     if (!type) {
-      reportTerminal("incomplete");
       sendProtocolError(ws, 502, "Invalid JSON payload in upstream SSE frame");
+      observeDelivery(options.onFrameSent, "error");
+      reportTerminal("incomplete");
       terminalSeen = true;
       void reader.cancel().catch(() => {});
       return true;
     }
     if (terminalSeen) return true;
     sendTextFrame(ws, payload);
+    observeDelivery(options.onFrameSent, type, payload);
     const terminalStatus = terminalStatusFromType(type);
     if (terminalStatus) {
       reportTerminal(terminalStatus);
@@ -261,8 +303,9 @@ export async function pumpResponsesSseToWebSocket(
       if (payload) handlePayload(payload);
     }
     if (!terminalSeen && isCurrent() && !clientCancelled) {
-      reportTerminal("incomplete");
       sendProtocolError(ws, 502, "Upstream stream ended before response terminal event");
+      observeDelivery(options.onFrameSent, "error");
+      reportTerminal("incomplete");
     }
   } catch (err) {
     framer.dispose();
@@ -271,9 +314,10 @@ export async function pumpResponsesSseToWebSocket(
       && isCurrent()
       && ws.readyState === OPEN
       && !(err instanceof WsSendDroppedError)) {
-      reportTerminal("incomplete");
       try {
         sendProtocolError(ws, 502, err instanceof Error ? err.message : String(err));
+        observeDelivery(options.onFrameSent, "error");
+        reportTerminal("incomplete");
       } catch (sendErr) {
         // If delivery is already dropped, there is no useful error frame left
         // to send. Swallow only that expected transport signal; other failures
@@ -295,6 +339,7 @@ export function sendResponsesJsonAsEvents(
   response: Record<string, unknown>,
   onTerminal?: ResponsesTerminalReporter,
   onPayload?: ResponsesPayloadObserver,
+  onFrameSent?: ResponsesDeliveryObserver,
 ): void {
   const sendObservedFrame = (payload: Record<string, unknown>) => {
     const text = JSON.stringify(payload);
@@ -304,6 +349,7 @@ export function sendResponsesJsonAsEvents(
       /* payload observation must not affect WebSocket delivery */
     }
     sendTextFrame(ws, text);
+    observeDelivery(onFrameSent, typeof payload.type === "string" ? payload.type : "unknown", payload);
   };
   const finalStatus = response.status === "failed" || response.status === "incomplete"
     ? response.status
@@ -336,6 +382,8 @@ export async function sendResponseToWebSocket(
   options: {
     onTerminal?: ResponsesTerminalReporter;
     onSsePayload?: ResponsesPayloadObserver;
+    onFrameSent?: ResponsesDeliveryObserver;
+    onCancelled?: (reason: "client_disconnect" | "turn_replaced") => void;
   } = {},
 ): Promise<void> {
   if (!isCurrent()) {
@@ -347,17 +395,19 @@ export async function sendResponseToWebSocket(
     const text = await response.text().catch(() => "");
     if (!isCurrent()) return;
     sendJsonFrame(ws, buildWsErrorFrame(response.status, errorPayloadFromText(text), response.headers));
+    observeDelivery(options.onFrameSent, "error");
     return;
   }
 
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   if (!response.body) {
-    options.onTerminal?.("incomplete");
     sendJsonFrame(ws, buildWsErrorFrame(502, {
       type: "protocol_error",
       code: "websocket_protocol_error",
       message: `Unexpected successful upstream response without a body (${response.status})`,
     }, response.headers));
+    observeDelivery(options.onFrameSent, "error");
+    options.onTerminal?.("incomplete");
     return;
   }
 
@@ -366,6 +416,8 @@ export async function sendResponseToWebSocket(
       isCurrent,
       onTerminal: options.onTerminal,
       onSsePayload: options.onSsePayload,
+      onFrameSent: options.onFrameSent,
+      onCancelled: options.onCancelled,
     });
     return;
   }
@@ -374,7 +426,7 @@ export async function sendResponseToWebSocket(
     const text = await response.text();
     if (!isCurrent()) return;
     const json = JSON.parse(text) as Record<string, unknown>;
-    sendResponsesJsonAsEvents(ws, json, options.onTerminal, options.onSsePayload);
+    sendResponsesJsonAsEvents(ws, json, options.onTerminal, options.onSsePayload, options.onFrameSent);
     return;
   }
 
@@ -388,6 +440,8 @@ export async function sendResponseToWebSocket(
       isCurrent,
       onTerminal: options.onTerminal,
       onSsePayload: options.onSsePayload,
+      onFrameSent: options.onFrameSent,
+      onCancelled: options.onCancelled,
     });
     return;
   }
@@ -397,16 +451,17 @@ export async function sendResponseToWebSocket(
   const trimmed = text.trim();
   if (trimmed.startsWith("{")) {
     const json = JSON.parse(trimmed) as Record<string, unknown>;
-    sendResponsesJsonAsEvents(ws, json, options.onTerminal, options.onSsePayload);
+    sendResponsesJsonAsEvents(ws, json, options.onTerminal, options.onSsePayload, options.onFrameSent);
     return;
   }
 
-  options.onTerminal?.("incomplete");
   sendJsonFrame(ws, buildWsErrorFrame(502, {
     type: "protocol_error",
     code: "websocket_protocol_error",
     message: `Unexpected successful non-SSE upstream response (${contentType || "missing content-type"})`,
   }, response.headers));
+  observeDelivery(options.onFrameSent, "error");
+  options.onTerminal?.("incomplete");
 }
 
 export async function readBoundedPrefix(

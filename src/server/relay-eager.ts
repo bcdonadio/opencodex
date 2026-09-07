@@ -44,6 +44,10 @@ import type { TranslatorBudget } from "../lib/translator-budget";
 export type EagerRelayHooks = {
   /** Feed one upstream chunk through SSE inspection (createSseInspector.feed). */
   inspectChunk: (chunk: Uint8Array) => void;
+  /** Optional diagnostics after successful downstream queue handoff, never during discard-drain. */
+  onDeliveredChunk?: (chunk: Uint8Array) => void;
+  /** Caller stopped consuming; separate from the later discard-drain outcome. */
+  onClientGone?: () => void;
   /**
    * Optional inline client-facing payload rewrite, framed to complete SSE
    * blocks inside the single reader. This is what lets win32 rewrite traffic
@@ -229,6 +233,7 @@ export function relaySseEagerBounded(
   const markClientGone = () => {
     if (cancelled || doneFired) return;
     cancelled = true;
+    try { hooks.onClientGone?.(); } catch { /* optional diagnostics */ }
     drainDeadline = now() + drainMs;
     armDrainTimer();
     wakeUp();
@@ -238,6 +243,13 @@ export function relaySseEagerBounded(
     // Also re-check after error serialization, which can re-enter caller abort.
     if (clientGoneSignal?.aborted) markClientGone();
     return !cancelled && !upstream.signal.aborted;
+  };
+  // Keep the enqueue exception semantics at each existing call site. Diagnostic
+  // exceptions are contained separately and cannot enter rewrite/failure recovery.
+  const enqueue = (chunk: Uint8Array): void => {
+    if (!controllerRef) return;
+    controllerRef.enqueue(chunk);
+    try { hooks.onDeliveredChunk?.(chunk); } catch { /* optional diagnostics */ }
   };
 
   const producer = async () => {
@@ -290,19 +302,19 @@ export function relaySseEagerBounded(
             if (safeTail && canDeliver()) {
               if (!hooks.sawTerminal()) syntheticKind = "failed";
               queuedBytes += safeTail.byteLength;
-              try { controllerRef?.enqueue(safeTail); } catch { /* client already torn down */ }
+              try { enqueue(safeTail); } catch { /* client already torn down */ }
               try { controllerRef?.close(); } catch { /* client already gone */ }
             }
             break;
           }
           if (clientTail.byteLength > 0 && !cancelled) {
             queuedBytes += clientTail.byteLength;
-            try { controllerRef?.enqueue(clientTail); } catch { /* client already gone */ }
+            try { enqueue(clientTail); } catch { /* client already gone */ }
           }
           if (terminalBoundary.terminalSeen()) {
             if (!terminalBoundary.doneSeen() && !cancelled) {
               queuedBytes += terminalSentinel.byteLength;
-              try { controllerRef?.enqueue(terminalSentinel); } catch { /* client already gone */ }
+              try { enqueue(terminalSentinel); } catch { /* client already gone */ }
             }
           } else if (!hooks.sawTerminal() && canDeliver()) {
             // A clean 200 EOF without a Responses terminal must be visible to
@@ -313,8 +325,8 @@ export function relaySseEagerBounded(
               : upstreamErrorTailFrame(terminalEncoder, upstreamError);
             queuedBytes += upstreamErrorFrame.byteLength + terminalSentinel.byteLength;
             try {
-              controllerRef?.enqueue(upstreamErrorFrame);
-              controllerRef?.enqueue(terminalSentinel);
+              enqueue(upstreamErrorFrame);
+              enqueue(terminalSentinel);
             } catch { /* client already gone */ }
             syntheticKind = upstreamError === undefined ? "incomplete" : "failed";
             syntheticReason = upstreamError === undefined ? undefined : "upstream_error";
@@ -349,7 +361,7 @@ export function relaySseEagerBounded(
         if (outbound.byteLength > 0) {
           queuedBytes += outbound.byteLength;
           try {
-            controllerRef?.enqueue(outbound);
+            enqueue(outbound);
           } catch {
             // Controller already torn down (client went away without cancel()).
             markClientGone();
@@ -362,7 +374,7 @@ export function relaySseEagerBounded(
           // sentinel and stop the single-reader relay at that protocol boundary.
           if (!terminalBoundary.doneSeen()) {
             queuedBytes += terminalSentinel.byteLength;
-            try { controllerRef?.enqueue(terminalSentinel); } catch { /* client already gone */ }
+            try { enqueue(terminalSentinel); } catch { /* client already gone */ }
           }
           reader.cancel("Responses terminal event received").catch(() => {});
           break;
@@ -410,7 +422,7 @@ export function relaySseEagerBounded(
       }
       if (clientTail.byteLength > 0 && canDeliver()) {
         queuedBytes += clientTail.byteLength;
-        try { controllerRef?.enqueue(clientTail); } catch { /* client already torn down */ }
+        try { enqueue(clientTail); } catch { /* client already torn down */ }
       }
       if (rewriteFailed && canDeliver()) {
         // Never bypass a client rewrite after it fails: boundedTail can contain
@@ -423,13 +435,13 @@ export function relaySseEagerBounded(
           if (!hooks.sawTerminal()) syntheticKind = "failed";
           deliveryFallbackSent = true;
           queuedBytes += safeTail.byteLength;
-          try { controllerRef?.enqueue(safeTail); } catch { /* client already torn down */ }
+          try { enqueue(safeTail); } catch { /* client already torn down */ }
           try { controllerRef?.close(); } catch { /* client already gone */ }
         }
       } else if (tailTerminal && canDeliver()) {
         if (!tailDone) {
           queuedBytes += terminalSentinel.byteLength;
-          try { controllerRef?.enqueue(terminalSentinel); } catch { /* client already gone */ }
+          try { enqueue(terminalSentinel); } catch { /* client already gone */ }
         }
       } else if (!tailTerminal && canDeliver()) {
         // Serializing `err` can run user-defined accessors (Error.message
@@ -445,7 +457,7 @@ export function relaySseEagerBounded(
           if (!hooks.sawTerminal()) syntheticKind = "failed";
           deliveryFallbackSent = true;
           queuedBytes += tail.byteLength;
-          try { controllerRef?.enqueue(tail); } catch { /* client already torn down */ }
+          try { enqueue(tail); } catch { /* client already torn down */ }
           try { controllerRef?.close(); } catch { /* client already torn down */ }
         }
       }

@@ -1,9 +1,11 @@
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
+import { sanitizeDiagnosticError } from "../../diagnostics/transaction";
 import { isSafeResponseHeader } from "../safe-response-headers";
 import { CodexWsMetadata, type CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { CODEX_RESPONSES_HTTP_URL, type PreparedCodexWsRequest } from "./codex-ws-request";
 import { CodexWsCorrelation } from "./codex-ws-correlation";
 import type { CodexWsSession } from "./codex-ws-session";
+import type { ProviderFetchOptions, TransportObservation } from "./fetch-helpers";
 import { UPGRADE_DEADLINE_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES,
   MAX_CODEX_WS_QUEUE_BYTES, markCodexWsResponse, normalizeResponsesWsRelayEvent, closedBeforeTerminalMessage } from "./codex-ws-wire";
 
@@ -15,6 +17,7 @@ interface ExchangeOptions {
   sseFallback: typeof globalThis.fetch;
   onQuota?: CodexWsQuotaObserver;
   beforeDispatch?: (headers: Headers) => void;
+  observeTransport?: ProviderFetchOptions["observeTransport"];
   onTransport?: (transport: "http" | "websocket") => void;
 }
 
@@ -85,7 +88,11 @@ function wrappedRejectionResponse(payload: Record<string, unknown>, prelude: Hea
 export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
   const { session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport } = options;
   const { frameText, headers } = prepared;
+  const observe = (event: TransportObservation): void => {
+    try { options.observeTransport?.(event); } catch { /* optional diagnostics */ }
+  };
   const signal = init.signal ?? undefined;
+  if (!session.opened) observe({ kind: "connect", connectionId: session.connectionId, generation: session.generation });
   return new Promise<Response>((resolve, reject) => {
     const ws = session.socket;
 
@@ -98,13 +105,16 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
     const encoder = new TextEncoder();
     const metadata = url === CODEX_RESPONSES_HTTP_URL ? new CodexWsMetadata(onQuota) : null;
-    const correlation = session.retainable ? new CodexWsCorrelation(session.reused, id => session.hasCompleted(id)) : null;
+    let rejectedCorrelation = false;
+    const correlation = session.retainable ? new CodexWsCorrelation(session.reused, id => session.hasCompleted(id),
+      () => { rejectedCorrelation = true; observe({ kind: "mismatch" }); }) : null;
     let detachOwner = () => {};
     let preludeTimer: ReturnType<typeof setTimeout> | undefined;
     const stream = new ReadableStream<Uint8Array>({
       start(c) { controller = c; },
       cancel() {
         if (terminal) return;
+        observe({ kind: "stream_failure", reason: "client_cancel" });
         terminal = true;
         cleanup();
         session.dispose();
@@ -133,11 +143,15 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const response = new Response(stream, { status: 200, headers: responseHeaders });
       metadata?.commit();
       markCodexWsResponse(response, Boolean(metadata && onQuota));
+      observe({ kind: "response", transport: "websocket", response });
       resolve(response);
     };
 
-    const failStream = (error: unknown) => {
+    const failStream = (error: unknown,
+      reason: "request_abort" | "owner_cancel" | "prelude_timeout" | "frame_overflow" | "queue_overflow" | "transport_error" | "upstream_close" | "stream_closed" | "protocol_error",
+      evidence?: { bytes?: number; timeoutMs?: number }) => {
       if (terminal) return;
+      observe({ kind: "stream_failure", reason, ...evidence });
       terminal = true;
       // A frame may already be executing upstream. Settle as a body failure,
       // never a fetch rejection/5xx that the pre-stream wrapper could resend.
@@ -155,9 +169,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       resolve(sseFallback(url, init));
     }, UPGRADE_DEADLINE_MS);
 
-    const cancelExchange = (reason: unknown) => {
+    const cancelExchange = (reason: unknown, source: "request_abort" | "owner_cancel") => {
       if (terminal || settledPreOpen) return;
       if (!sent) {
+        observe({ kind: "stream_failure", reason: source });
         settledPreOpen = true;
         terminal = true;
         cleanup();
@@ -165,15 +180,19 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         reject(reason);
         return;
       }
-      failStream(reason);
+      failStream(reason, source);
     };
-    const onAbort = () => cancelExchange(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+    const onAbort = () => cancelExchange(signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"), "request_abort");
     signal?.addEventListener("abort", onAbort, { once: true });
 
     const onOpen = () => {
       if (settledPreOpen) return;
       clearTimeout(upgradeTimer);
       opened = true;
+      const connection = { connectionId: session.connectionId, reused: session.reused,
+        sequence: ++session.requestSequence, generation: session.generation,
+        ageMs: Math.max(0, performance.now() - session.createdMonotonic) };
+      observe({ kind: "open", ...connection });
       try {
         beforeDispatch?.(new Headers(headers));
       } catch (error) {
@@ -198,7 +217,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       } catch {
         if (received || responseCommitted) {
           if (terminal) session.dispose();
-          failStream("codex websocket send failed after response activity");
+          failStream("codex websocket send failed after response activity", "transport_error");
           return;
         }
         // send() throwing means the frame never left, so no upstream turn
@@ -217,11 +236,15 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       // the send catch: a telemetry failure must never trigger an HTTP resend
       // after a frame was accepted by the socket.
       if (sentSuccessfully) {
+        observe({ kind: "send", transport: "websocket", body: frameText });
+        // Connection metadata belongs only to a successfully dispatched frame.
+        observe({ kind: "connection", ...connection });
         try { onTransport?.("websocket"); } catch { /* telemetry is observational */ }
       }
       if (!metadata) commitResponse();
       else if (!responseCommitted && !terminal) {
-        preludeTimer = setTimeout(() => failStream("codex websocket response prelude timed out"), CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS);
+        preludeTimer = setTimeout(() => failStream("codex websocket response prelude timed out", "prelude_timeout",
+          { timeoutMs: CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS }), CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS);
       }
     };
 
@@ -234,12 +257,12 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       // cheap lower bound before parsing so an obviously oversized frame does
       // not create another large object graph.
       if (text.length > MAX_CODEX_WS_FRAME_BYTES) {
-        failStream("codex websocket frame exceeds the response size limit");
+        failStream("codex websocket frame exceeds the response size limit", "frame_overflow");
         return;
       }
       const rawEncodedText = encoder.encode(text);
       if (rawEncodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
-        failStream("codex websocket frame exceeds the response size limit");
+        failStream("codex websocket frame exceeds the response size limit", "frame_overflow", { bytes: rawEncodedText.byteLength });
         return;
       }
       const normalized = normalizeResponsesWsRelayEvent(text);
@@ -255,29 +278,32 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             controlFrame = true;
           }
         } catch (error) {
-          failStream(error);
+          failStream(error, "protocol_error");
           return;
         }
       }
       const encodedText = relayText === text ? rawEncodedText : encoder.encode(relayText);
       if (encodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
-        failStream("codex websocket frame exceeds the response size limit");
+        failStream("codex websocket frame exceeds the response size limit", "frame_overflow", { bytes: encodedText.byteLength });
         return;
       }
       if (!controlFrame && !type.startsWith("response.") && type !== "error") return;
       if (!controlFrame) {
-        try { correlation?.accept(normalized.payload); } catch (error) { failStream(error); return; }
+        rejectedCorrelation = false;
+        try { correlation?.accept(normalized.payload); } catch (error) { failStream(error, "protocol_error"); return; }
+        if (!rejectedCorrelation) observe({ kind: "event", payload: normalized.payload, bytes: rawEncodedText.byteLength });
         // Correlation must run first: a reused socket's foreign-stream error
         // must not become an HTTP refusal that could authorize account replay.
         if (metadata && sent && !responseCommitted && type === "error") {
           let rejection: Response | null;
           try { rejection = wrappedRejectionResponse(normalized.payload, metadata.snapshot()); }
-          catch (error) { failStream(error); return; }
+          catch (error) { failStream(error, "protocol_error"); return; }
           if (rejection) {
             terminal = true;
             cleanup();
             try { controller.close(); } catch { /* unused stream already closed */ }
             session.dispose();
+            observe({ kind: "response", transport: "websocket", response: rejection });
             resolve(rejection);
             return;
           }
@@ -288,12 +314,12 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const suffix = encoder.encode("\n\n");
       const frameBytes = prefix.byteLength + encodedText.byteLength + suffix.byteLength;
       if (frameBytes > MAX_CLIENT_SSE_FRAME_BYTES) {
-        failStream("codex websocket frame exceeds the response size limit");
+        failStream("codex websocket frame exceeds the response size limit", "frame_overflow", { bytes: frameBytes });
         return;
       }
       const availableBytes = controller.desiredSize ?? 0;
       if (frameBytes > availableBytes) {
-        failStream("codex websocket response exceeded the buffered queue limit");
+        failStream("codex websocket response exceeded the buffered queue limit", "queue_overflow", { bytes: frameBytes });
         return;
       }
       const sseFrame = new Uint8Array(frameBytes);
@@ -303,7 +329,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       try {
         controller.enqueue(sseFrame);
       } catch {
-        failStream("codex websocket response stream closed while enqueueing");
+        failStream("codex websocket response stream closed while enqueueing", "stream_closed");
         return;
       }
       if (type === "response.completed" || type === "response.failed" || type === "response.incomplete" || type === "error") {
@@ -316,6 +342,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     };
 
     const onClose = (event: unknown) => {
+      const close = event as { code?: number; reason?: unknown } | null;
+      observe({ kind: "close", connectionId: session.connectionId, code: close?.code,
+        reason: sanitizeDiagnosticError(close?.reason) });
       cleanup();
       if (!opened) {
         if (settledPreOpen) return;
@@ -326,7 +355,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         resolve(sseFallback(url, init));
         return;
       }
-      if (sent && !terminal) failStream(closedBeforeTerminalMessage(event));
+      if (sent && !terminal) failStream(closedBeforeTerminalMessage(event), "upstream_close");
     };
 
     const onError = () => {
@@ -337,9 +366,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         cleanup();
         session.dispose();
         resolve(sseFallback(url, init));
-      } else failStream("codex websocket transport error");
+      } else failStream("codex websocket transport error", "transport_error");
     };
-    detachOwner = session.bindOwner(reason => cancelExchange(reason));
+    detachOwner = session.bindOwner(reason => cancelExchange(reason, "owner_cancel"));
     ws.addEventListener("open", onOpen);
     ws.addEventListener("message", onMessage);
     ws.addEventListener("close", onClose);

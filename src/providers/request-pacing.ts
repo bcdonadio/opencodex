@@ -30,6 +30,8 @@ export class RequestPacingProviderRemovedError extends Error {
 }
 
 interface Waiter {
+  observe?: RequestPacingObserver;
+  queuedMonotonicAt?: number;
   modelId?: string;
   providerIntervalMs: number;
   modelIntervalMs: number;
@@ -38,6 +40,23 @@ interface Waiter {
   resolve: () => void;
   reject: (reason: unknown) => void;
   abort?: () => void;
+}
+
+export type RequestPacingObservation =
+  | { kind: "queued"; at: number }
+  | { kind: "admitted"; at: number; queueMs: number };
+export type RequestPacingObserver = (event: RequestPacingObservation) => void;
+
+function observePacing(waiter: Waiter, kind: "queued" | "admitted"): void {
+  try {
+    if (!waiter.observe) return;
+    if (kind === "queued") {
+      waiter.queuedMonotonicAt = performance.now();
+      waiter.observe({ kind, at: Date.now() });
+    } else if (waiter.queuedMonotonicAt !== undefined) {
+      waiter.observe({ kind, at: Date.now(), queueMs: Math.max(0, performance.now() - waiter.queuedMonotonicAt) });
+    }
+  } catch { /* Optional diagnostics cannot alter queue admission. */ }
 }
 
 interface ProviderPacer {
@@ -190,6 +209,7 @@ function runQueue(providerName: string, state: ProviderPacer): void {
   if (waiter.modelId && waiter.modelIntervalMs > 0) {
     state.modelNextStartAt.set(waiter.modelId, startedAt + waiter.modelIntervalMs);
   }
+  observePacing(waiter, "admitted");
   waiter.resolve();
   runtime.enqueueMicrotask(() => runQueue(providerName, state));
 }
@@ -199,6 +219,7 @@ export async function waitForProviderRequestSlot(
   provider: OcxProviderConfig,
   modelId?: string,
   signal?: AbortSignal,
+  observe?: RequestPacingObserver,
 ): Promise<void> {
   const intervals = requestPacingIntervals(provider, modelId);
   if (Math.max(intervals.providerIntervalMs, intervals.modelIntervalMs) <= 0) return;
@@ -226,7 +247,7 @@ export async function waitForProviderRequestSlot(
   }
 
   await new Promise<void>((resolve, reject) => {
-    const waiter: Waiter = { modelId, ...intervals, queuedAt: runtime.now(), signal, resolve, reject };
+    const waiter: Waiter = { modelId, ...intervals, queuedAt: runtime.now(), signal, resolve, reject, observe };
     waiter.abort = () => {
       const index = state.queue.indexOf(waiter);
       if (index >= 0) state.queue.splice(index, 1);
@@ -239,6 +260,7 @@ export async function waitForProviderRequestSlot(
     };
     signal?.addEventListener("abort", waiter.abort, { once: true });
     state.queue.push(waiter);
+    observePacing(waiter, "queued");
     // Abort may race between the eager check above and listener registration.
     if (signal?.aborted) {
       waiter.abort();

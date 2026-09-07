@@ -81,6 +81,18 @@ describe("capability table is a leaf data module", () => {
     expect(follow?.summary).toBe("Poll for new rows; add --jsonl to emit JSONL.");
   });
 
+  test("logs export declares the canonical support-export route and bounded selectors", () => {
+    const exported = CAPABILITIES.find(c => c.command.join(" ") === "logs export");
+    expect(exported?.routes).toEqual([
+      { method: "GET", path: "/api/transaction-diagnostics/export" },
+    ]);
+    expect(exported?.mutates).toBe(false);
+    expect(exported?.json).toBe("payload");
+    expect(exported?.flags.map(flag => flag.name)).toEqual([
+      "--request", "--from", "--to", "--out", "--force", "--json",
+    ]);
+  });
+
   test("the check-only Codex CLI updater is declared as a local read capability", () => {
     const cap = CAPABILITIES.find(c => c.command.join(" ") === "system codex-cli-update check");
     expect(cap).toBeDefined();

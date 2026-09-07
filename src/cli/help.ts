@@ -70,7 +70,8 @@ Usage:
   ocx observe <sub>           Logs, usage, storage, memory, and debug data
   ocx inspect <sub>           Effective config, catalog, analytics, pacing, client-config
   ocx route <sub>             Routing features (combo, policy)
-  ocx logs [filters]          Alias of ocx observe logs
+  ocx logs [filters]          Inspect request logs (alias of ocx observe logs)
+  ocx logs export <selector>  Print or explicitly write a sanitized support bundle
   ocx usage [--range <today|1d|7d|30d|all>] [--provider <name>] [--model <id>]
                               Token and estimated-cost report (alias of ocx observe usage)
   ocx storage <sub>           Storage report, cleanup, trash, and the cleanup policy

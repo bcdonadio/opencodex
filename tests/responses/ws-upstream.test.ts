@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, jest, test } from "bun:test";
 import { providerFetch } from "../../src/server/responses/fetch-helpers";
+import { transportObserver } from "../../src/server/transaction-capture";
+import { beginRequestAttempt, type RequestLogContext } from "../../src/server/request-log";
 import { handleResponses } from "../../src/server/responses";
 import { isEagerRelaySseResponse } from "../../src/server/relay";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { addFinalRequestLog, httpStatusForRequestLogTerminal } from "../../src/server/request-log";
+import { readUsageEntries, resetUsageReadCacheForTests } from "../../src/usage/log";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { isWin32EagerRewrite } from "../../src/lib/bun-stream-caps";
 import { fetchWithTransientRetry } from "../../src/lib/upstream-retry";
 import { codexWsExchange } from "../../src/server/responses/codex-ws-exchange";
@@ -241,6 +249,82 @@ function installFake(script: (ws: FakeWebSocket) => void) {
 }
 
 describe("providerFetch routing", () => {
+  test("HTTP diagnostics retain actual status and closed destination classes without consuming bodies", async () => {
+    const ctx: RequestLogContext = { provider: "test", model: "test" };
+    const original = new Response("unchanged", { status: 503 });
+    const body = new Uint8Array([1, 2, 3]);
+    const base = { fetch: async (_input: unknown, init: RequestInit) => {
+      expect(init.body).toBe(body);
+      return original;
+    } } as any;
+    const wrapped = providerFetch(base, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(ctx) });
+    const response = await wrapped("https://private-tenant.example/v1/chat/completions?token=secret", { method: "POST", body });
+    expect(response).toBe(original);
+    expect(response.bodyUsed).toBe(false);
+    expect(ctx.diagnostics?.httpStatus).toBe(503);
+    expect(ctx.diagnostics?.upstreamHostname).toBe("custom");
+    expect(ctx.diagnostics?.endpointClass).toBe("chat");
+    expect(ctx.diagnostics?.method).toBe("POST");
+    expect(ctx.activeAttempt?.sends?.[0]?.endpointClass).toBe("chat");
+    expect(ctx.activeAttempt?.sends?.[0]?.httpStatus).toBe(503);
+    expect(ctx.activeAttempt?.sends?.[0]?.bytesForwarded).toBe(3);
+    expect(ctx.diagnostics?.bytesReceived).toBeUndefined();
+    expect(JSON.stringify(ctx.diagnostics)).not.toContain("private-tenant");
+    expect(JSON.stringify(ctx.diagnostics)).not.toContain("secret");
+    expect(await response.text()).toBe("unchanged");
+  });
+
+  test("dispatch recovery diagnostics capture the rebuilt physical request exactly once", async () => {
+    const events: unknown[] = [];
+    const transports: string[] = [];
+    const sentinel = new Response("unchanged", { status: 201 });
+    const rebuiltBody = new Uint8Array([1, 2, 3]);
+    const wrapped = providerFetch({ fetch: async (input: unknown, init: RequestInit) => {
+      expect(input).toBe("https://api.anthropic.com/v1/messages");
+      expect(init.body).toBe(rebuiltBody);
+      return sentinel;
+    } } as any, BOUNDED_WS_RUNTIME, {
+      observeTransport: event => { events.push(event); },
+      onTransport: transport => { transports.push(transport); },
+      dispatchOverride: async (_input, init, execute, onHttpDispatch) => {
+        onHttpDispatch();
+        return execute("https://api.anthropic.com/v1/messages", { ...init, body: rebuiltBody });
+      },
+    });
+    expect(await wrapped("https://api.openai.com/v1/responses", { method: "POST", body: "stale" })).toBe(sentinel);
+    expect(transports).toEqual(["http"]);
+    expect(events).toEqual([
+      { kind: "prepared" },
+      { kind: "send", transport: "http", body: rebuiltBody,
+        target: { upstreamHostname: "api_anthropic", endpointClass: "messages", method: "POST" } },
+      { kind: "response", transport: "http", response: sentinel },
+    ]);
+    expect(sentinel.bodyUsed).toBe(false);
+  });
+
+  test("Request body streams stay unread and unknown destinations clear stale endpoint classes", async () => {
+    const ctx: RequestLogContext = { provider: "test", model: "test" };
+    const request = new Request("https://private.example/custom/tenant", { method: "POST", body: "private-body" });
+    const wrapped = providerFetch({ fetch: async (input: unknown) => {
+      expect(input).toBe(request);
+      expect(request.bodyUsed).toBe(false);
+      return new Response("ok");
+    } } as any, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(ctx) });
+    await wrapped(request);
+    expect(ctx.diagnostics?.method).toBe("POST");
+    expect(ctx.diagnostics?.endpointClass).toBeUndefined();
+    expect(ctx.diagnostics?.forwardedRequestBytes).toBeUndefined();
+    expect(ctx.diagnostics?.fieldAvailability.forwardedRequestBytes?.status).toBe("not_observed");
+    expect(request.bodyUsed).toBe(false);
+    expect(JSON.stringify(ctx.diagnostics)).not.toContain("private-body");
+  });
+
+  test("throwing HTTP observers preserve the original fetch response", async () => {
+    const response = new Response("unchanged");
+    const wrapped = providerFetch({ fetch: async () => response } as any, BOUNDED_WS_RUNTIME,
+      { observeTransport: () => { throw new Error("diagnostic failure"); } });
+    expect(await wrapped("https://api.openai.com/v1/responses", { method: "POST", body: "{}" })).toBe(response);
+  });
   test("a canary runtime identity cannot open the WS transport", async () => {
     const sentinel = new Response("base");
     let baseCalls = 0;
@@ -404,6 +488,120 @@ describe("handleResponses Codex WS relay selection", () => {
     expect(text).toContain("data: [DONE]");
   });
 
+  test.each(["completed", "failed", "incomplete"] as const)("eager HTTP %s persists handoff before exactly-once finalization", async status => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-eager-handoff-"));
+    process.env.OPENCODEX_HOME = home;
+    resetUsageReadCacheForTests();
+    try {
+      const frames = [
+        { type: "response.created", response: { id: "handoff-response" } },
+        { type: "response.output_text.delta", response_id: "handoff-response", delta: "fixture text" },
+        { type: `response.${status}`, response: { id: "handoff-response", status, output: [],
+          ...(status === "failed" ? { error: { code: "server_error" } } : {}) } },
+      ];
+      installFake(ws => {
+        ws.emit("open", {});
+        for (const frame of frames) ws.emit("message", { data: JSON.stringify(frame) });
+      });
+      const ctx: RequestLogContext = { model: "", provider: "", inboundTransport: "http" };
+      let finalizations = 0;
+      const response = await handleResponses(request(), forwardConfig(), ctx, {
+        codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
+        onNativePassthroughTerminal: terminal => {
+          finalizations++;
+          addFinalRequestLog("eager-handoff", Date.now(), ctx, httpStatusForRequestLogTerminal(terminal, ctx),
+            { terminalStatus: terminal, closeReason: "terminal" });
+        },
+      });
+      const actual = await response.text();
+      expect(response.status).toBe(200);
+      expect(finalizations).toBe(1);
+      const rows = readUsageEntries().filter(row => row.requestId === "eager-handoff");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.diagnostics?.downstreamTerminalSentAt).toBeNumber();
+      expect(rows[0]?.diagnostics?.lastOutputKind).toBe("text");
+      if (status === "failed") expect(rows[0]?.diagnostics?.outputDeliveredBeforeFailure).toBe(true);
+
+      // The same eager path without HTTP delivery observation emits identical bytes.
+      const reference = await handleResponses(request(), forwardConfig(), { model: "", provider: "" }, {
+        codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
+      });
+      expect(reference.status).toBe(response.status);
+      expect(await reference.text()).toBe(actual);
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      resetUsageReadCacheForTests();
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test.each([true, false])("eager HTTP discard-drain persists exactly once without terminal handoff (terminal=%s)", async terminalArrives => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-eager-disconnect-"));
+    process.env.OPENCODEX_HOME = home;
+    resetUsageReadCacheForTests();
+    try {
+      installFake(ws => {
+        ws.emit("open", {});
+        ws.emit("message", { data: JSON.stringify({ type: "response.created", response: { id: "drain-response" } }) });
+      });
+      const ctx: RequestLogContext = { model: "", provider: "", inboundTransport: "http" };
+      const logged = Promise.withResolvers<void>();
+      let finalizations = 0;
+      const response = await handleResponses(request(), forwardConfig(), ctx, {
+        codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME,
+        onNativePassthroughTerminal: terminal => {
+          finalizations++;
+          addFinalRequestLog("eager-disconnect", Date.now(), ctx, httpStatusForRequestLogTerminal(terminal, ctx),
+            { terminalStatus: terminal, closeReason: "terminal" });
+          logged.resolve();
+        },
+        onNativePassthroughCancel: () => {
+          finalizations++;
+          addFinalRequestLog("eager-disconnect", Date.now(), ctx, 499, { closeReason: "client_cancel" });
+          logged.resolve();
+        },
+      });
+      const reader = response.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      if (terminalArrives) FakeWebSocket.instances.at(-1)!.emit("message", { data: JSON.stringify({ type: "response.completed",
+        response: { id: "drain-response", status: "completed", output: [] } }) });
+      else FakeWebSocket.instances.at(-1)!.close();
+      await logged.promise;
+      expect(finalizations).toBe(1);
+      const rows = readUsageEntries().filter(row => row.requestId === "eager-disconnect");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.status).toBe(terminalArrives ? 200 : 499);
+      expect(rows[0]?.diagnostics?.downstreamTerminalSentAt).toBeUndefined();
+      expect(rows[0]?.diagnostics?.downstreamClosedAt).toBeNumber();
+      if (terminalArrives) expect(rows[0]?.diagnostics?.cancellationReason).toBe("client_disconnect");
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      resetUsageReadCacheForTests();
+      removeTreeWithRetry(home);
+    }
+  });
+
+  test("review: ordinary upstream WS error retains the later synthetic failed provenance", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: '{"type":"response.created","response":{"id":"ordinary-error"}}' });
+      ws.emit("message", { data: '{"type":"error","error":{"code":"server_error","message":"fixture refusal"}}' });
+    });
+    const ctx: RequestLogContext = { model: "", provider: "" };
+    const response = await handleResponses(request(), forwardConfig(), ctx, { codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME });
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(text).toContain('"type":"error"');
+    expect(text).toContain('"type":"response.failed"');
+    expect(ctx.diagnostics?.events.filter(event => ["upstream.error", "response.failed"].includes(event.type))
+      .map(event => [event.type, event.source])).toEqual([["upstream.error", "upstream"], ["response.failed", "proxy"]]);
+  });
+
   test("an HTTP fallback remains on the configured legacy tee path", async () => {
     installFake(ws => ws.close());
     globalThis.fetch = (async () => new Response(
@@ -528,6 +726,119 @@ describe("isWin32EagerRewrite", () => {
 });
 
 describe("codexWsUpstreamFetch", () => {
+  test("close facts preserve sanitized event reasons without guessing the initiator", async () => {
+    for (const [reason, expected] of [
+      ["maintenance restart", "maintenance restart"],
+      ["https://example.invalid/?token=ws-close-private-token", undefined],
+      ["", undefined],
+      ["界".repeat(1000), "界".repeat(166)],
+    ] as const) {
+      installFake(ws => {
+        ws.emit("open", {});
+        ws.emit("close", { code: 1006, reason });
+      });
+      const ctx: RequestLogContext = { provider: "test", model: "test",
+        activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+      const capture = transportObserver(ctx);
+      const closes: unknown[] = [];
+      const response = await rawCodexWsUpstreamFetch(CODEX_URL, streamingInit(),
+        (async () => { throw new Error("fallback forbidden"); }) as typeof fetch,
+        BOUNDED_WS_RUNTIME, undefined, undefined, undefined, event => {
+          if (event.kind === "close") closes.push(event);
+          capture(event);
+        });
+      await expect(response.text()).rejects.toThrow();
+      expect(ctx.diagnostics?.closedBy).toBe("unknown");
+      expect(ctx.diagnostics?.websocketCloseCode).toBe(1006);
+      expect(ctx.diagnostics?.websocketCloseReason).toBe(expected);
+      expect(closes).toHaveLength(1);
+      expect(closes[0]).toMatchObject({ kind: "close", code: 1006, reason: expected });
+      expect(JSON.stringify(closes)).not.toContain("ws-close-private-token");
+      expect(JSON.stringify(ctx.diagnostics)).not.toContain("ws-close-private-token");
+      capture({ kind: "connect", connectionId: "replacement-socket" });
+      expect(ctx.diagnostics?.websocketCloseReason).toBeUndefined();
+      expect(ctx.diagnostics?.closedBy).toBeUndefined();
+    }
+  });
+
+  test("stream failures expose fixed classifications without raw error or close text", async () => {
+    for (const reason of ["upstream_close", "transport_error", "frame_overflow"] as const) {
+      installFake(ws => {
+        ws.emit("open", {});
+        if (reason === "upstream_close") ws.emit("close", { code: 1006, reason: "private close detail" });
+        if (reason === "transport_error") ws.emit("error", { message: "private error detail" });
+        if (reason === "frame_overflow") ws.emit("message", { data: "x".repeat(MAX_CODEX_WS_FRAME_BYTES + 1) });
+      });
+      const failures: unknown[] = [];
+      const response = await rawCodexWsUpstreamFetch(CODEX_URL, streamingInit(),
+        (async () => { throw new Error("fallback forbidden"); }) as typeof fetch,
+        BOUNDED_WS_RUNTIME, undefined, undefined, undefined,
+        event => { if (event.kind === "stream_failure") failures.push(event); });
+      await expect(response.text()).rejects.toThrow();
+      expect(failures).toEqual([{ kind: "stream_failure", reason }]);
+      expect(JSON.stringify(failures)).not.toContain("private");
+    }
+  });
+
+  test("request abort is observed exactly once and keeps the original abort error", async () => {
+    const opened = Promise.withResolvers<void>();
+    installFake(ws => { ws.emit("open", {}); opened.resolve(); });
+    const controller = new AbortController();
+    const failures: unknown[] = [];
+    const pending = rawCodexWsUpstreamFetch(CODEX_URL, { ...streamingInit(), signal: controller.signal },
+      (async () => { throw new Error("fallback forbidden"); }) as typeof fetch,
+      BOUNDED_WS_RUNTIME, undefined, undefined, undefined,
+      event => { if (event.kind === "stream_failure") failures.push(event); });
+    await opened.promise;
+    controller.abort(new Error("private abort detail"));
+    const response = await pending;
+    await expect(response.text()).rejects.toThrow("private abort detail");
+    expect(failures).toEqual([{ kind: "stream_failure", reason: "request_abort" }]);
+  });
+
+  test("diagnostics distinguish pre-open HTTP fallback from a sent WS policy error without usage", async () => {
+    installFake(ws => ws.close());
+    const ctx: RequestLogContext = { provider: "test", model: "test", activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+    const base = { fetch: async () => new Response("fallback", { status: 429 }) } as any;
+    const response = await providerFetch(base, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(ctx) })(CODEX_URL, streamingInit());
+    expect(await response.text()).toBe("fallback");
+    expect(ctx.diagnostics?.httpStatus).toBe(429);
+    expect(ctx.diagnostics?.upstreamHostname).toBe("chatgpt");
+    expect(ctx.activeAttempt?.sends?.[0]?.httpStatus).toBe(429);
+    expect(ctx.activeAttempt?.sends?.map(send => send.upstreamTransport)).toEqual(["http"]);
+    expect(ctx.diagnostics?.websocketHandshakeStatus).toBeUndefined();
+
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: '{"type":"response.created","response":{"id":"resp-policy"}}' });
+      ws.emit("message", { data: '{"type":"error","error":{"code":"cyber_policy","message":"blocked"}}' });
+    });
+    const wsCtx: RequestLogContext = { provider: "test", model: "test", activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+    const wsResponse = await providerFetch(base, BOUNDED_WS_RUNTIME, { observeTransport: transportObserver(wsCtx) })(CODEX_URL, streamingInit());
+    const bytes = await wsResponse.text();
+    expect(bytes).toContain('"code":"cyber_policy"');
+    expect(wsCtx.diagnostics?.httpStatus).toBeUndefined();
+    expect(wsCtx.diagnostics?.upstreamHostname).toBe("chatgpt");
+    expect(wsCtx.diagnostics?.endpointClass).toBe("responses");
+    expect(wsCtx.diagnostics?.method).toBe("POST");
+    expect(wsCtx.activeAttempt?.sends?.[0]?.endpointClass).toBe("responses");
+    expect(wsCtx.diagnostics?.websocketHandshakeStatus).toBe(101);
+    expect(wsCtx.diagnostics?.upstreamResponseId).toBe("resp-policy");
+    expect(wsCtx.diagnostics?.upstreamErrorCode).toBe("cyber_policy");
+    expect(wsCtx.activeAttempt?.sends?.length).toBe(1);
+    expect(wsCtx.diagnostics?.usageReportedAt).toBeUndefined();
+  });
+
+  test("throwing WS diagnostic observers cannot trigger fallback or alter client frames", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: '{"type":"response.completed","response":{"id":"unchanged"}}' });
+    });
+    const response = await rawCodexWsUpstreamFetch(CODEX_URL, streamingInit(),
+      (async () => { throw new Error("fallback forbidden"); }) as typeof fetch,
+      BOUNDED_WS_RUNTIME, undefined, undefined, () => { throw new Error("observer failure"); });
+    expect(await response.text()).toContain('"id":"unchanged"');
+  });
   test("the complete HTTP adapter dispatch maps Lite and final routing intent onto the actual WS", async () => {
     const frames: Record<string, unknown>[] = [];
     const seenHeaders: Record<string, string>[] = [];

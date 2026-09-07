@@ -12,6 +12,8 @@ import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import { EmptyState, Notice } from "../ui";
 import Debug from "./Debug";
+import { sanitizeLogEvidence } from "./log-diagnostics";
+import { LogDiagnosticsDetails } from "./log-diagnostics-details";
 import { LogsFilterBar } from "./logs-filter-bar";
 import { logsClockAnchor, logsClockNow, type LogsClockAnchor } from "./logs-clock";
 import { DEFAULT_LOG_FILTER_STATE, extractLogFilterOptions, filterLogs, hasActiveLogFilters, type LogFilterState } from "./logs-filter";
@@ -136,6 +138,7 @@ interface LogAttempt {
 }
 
 export interface LogEntry {
+  diagnostics?: unknown;
   requestId?: string;
   timestamp: number;
   model: string;
@@ -207,7 +210,7 @@ function validCachedLogs(cached: LogEntry[] | null): LogEntry[] | null {
       return null;
     }
   }
-  return cached;
+  return cached.map(sanitizeLogEvidence);
 }
 
 function displayTokenTotal(log: LogEntry): number | undefined {
@@ -535,7 +538,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       const body: unknown = await res.json();
       const receivedAt = performance.now();
       const parsed = parseLogPollResponse<LogEntry>(body);
-      const incoming = parsed.rows.map(sanitizeLogEntryRouteDecision);
+      const incoming = parsed.rows.map(sanitizeLogEntryRouteDecision).map(sanitizeLogEvidence);
       const next = cursor && parsed.cursor && !parsed.reset
         ? mergeLogDelta(poll.rows, incoming) : incoming;
       // The resource-store generation guard runs only after this loader returns.
@@ -944,6 +947,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
 
       {detail && (
         <LogDetailDialog
+          apiBase={apiBase}
           detail={detail}
           detailInfo={detailInfo}
           localeCode={locale}
@@ -975,8 +979,9 @@ function useModalDialog(open: boolean) {
 }
 
 function LogDetailDialog({
-  detail, detailInfo, localeCode, localeTag, serverTimeZone, t, accountAliases, onClose, onFilterConversation,
+  apiBase, detail, detailInfo, localeCode, localeTag, serverTimeZone, t, accountAliases, onClose, onFilterConversation,
 }: {
+  apiBase: string;
   detail: LogEntry;
   detailInfo: ReturnType<typeof statusCodeInfo> | null;
   localeCode: string;
@@ -1064,6 +1069,8 @@ function LogDetailDialog({
             {detail.upstreamError && (<><span className="muted">{t("logs.col.upstreamReason")}</span><span className="mono log-detail-break">{detail.upstreamError}</span></>)}
           </div>
         </section>
+
+        <LogDiagnosticsDetails key={`${apiBase}:${detail.requestId}`} diagnostics={detail.diagnostics} attempts={detail.attempts} requestId={detail.requestId} apiBase={apiBase} />
 
         <section className="log-detail-section" aria-labelledby="log-detail-route">
           <h4 id="log-detail-route" className="log-detail-section-title">{t("logs.detail.route.section")}</h4>

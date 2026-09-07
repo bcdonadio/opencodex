@@ -360,6 +360,22 @@ describe("native compact usage reporting", () => {
     const body = await response.json() as { usage?: Record<string, unknown> };
     expect(body.usage).toMatchObject({ input_tokens: 10, output_tokens: 5, total_tokens: 15 });
     expect(logCtx.usage).toMatchObject({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
+    expect(logCtx.diagnostics?.compactionOccurred).toBeUndefined();
+  });
+
+  test("native compact output records one real completion without retaining its envelope", async () => {
+    const config = { defaultProvider: "openai-apikey", providers: { "openai-apikey": {
+      adapter: "openai-responses", baseUrl: "https://api.openai.com/v1", authMode: "key", apiKey: "sk-test",
+    } } } as unknown as OcxConfig;
+    globalThis.fetch = (async () => jsonResponse({ output: [{ type: "compaction", encrypted_content: "private-compaction-envelope" }] })) as typeof fetch;
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const response = await handleResponsesCompact(compactionRequest(baseCompactionBody({ model: "openai-apikey/gpt-5.5" })), config, logCtx);
+    expect(response.status).toBe(200);
+    expect(logCtx.diagnostics?.compactionOccurred).toBe(true);
+    expect(logCtx.diagnostics?.compactionCount).toBe(1);
+    expect(logCtx.diagnostics?.fieldAvailability.lastCompactionAt).toEqual({ status: "observed", source: "upstream" });
+    expect(JSON.stringify(logCtx.diagnostics)).not.toContain("private-compaction-envelope");
+    expect(await response.json()).toEqual({ output: [{ type: "compaction", encrypted_content: "private-compaction-envelope" }] });
   });
 
   test("main-pool and legacy added accounts carry their effective usage labels", async () => {
@@ -775,6 +791,10 @@ describe("bare native compaction model without canonical openai (#2901)", () => 
     expect(JSON.stringify(calls[0]!.body.messages)).toContain("CONTEXT CHECKPOINT COMPACTION");
     expect(logCtx.provider).toBe("gw");
     expect(logCtx.routeDecision?.selected).toMatchObject({ provider: "gw", reason: "compaction-default-provider" });
+    expect(logCtx.diagnostics?.contextTransformationKinds).toContain("synthetic_compaction");
+    expect(logCtx.diagnostics?.locallyInjectedItemCounts).toMatchObject({ message: 1 });
+    expect(logCtx.diagnostics?.droppedItemCounts).toMatchObject({ tool_definition: 1 });
+    expect(logCtx.diagnostics?.compactionOccurred).toBe(true);
     const json = await res.json() as { output?: Array<{ type?: string }> };
     expect((json.output ?? []).filter(item => item.type === "compaction").length).toBe(1);
   });

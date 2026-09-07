@@ -14,10 +14,188 @@ import {
 import { relaySseEagerBounded, type EagerRelayHooks } from "../../src/server/relay-eager";
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import type { RequestLogContext } from "../../src/server/request-log";
+import { beginRequestAttempt, addFinalRequestLog, noteAttemptSend } from "../../src/server/request-log";
+import { observeRequestTransport, recordRequestShape, transportObserver, recordProtocolEvent, recordForwardedRequest, recordUpstreamResponse, finalizeDiagnostics, recordReconstructedContext, recordContextEstimate } from "../../src/server/transaction-capture";
+import { readJsonRequestBody, observeDecodedRequestBody } from "../../src/server/request-decompress";
+import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../../src/server/sse-frame-buffer";
 
 import { watchdogMs } from "../helpers/ci-watchdog";
 const enc = new TextEncoder();
+
+test("review: transformed correlation IDs never become direct prefix keys", () => {
+  for (const id of ["x".repeat(256) + "A", "x".repeat(256) + "B", "sk-" + "abcdefghijklmnopqrstuvwxyz"]) {
+    const ctx: RequestLogContext = { provider: "test", model: "test" };
+    observeRequestTransport(ctx, "http", new Request("http://localhost", { headers: { "x-request-id": id } }));
+    recordRequestShape(ctx, { client_metadata: { thread_id: id }, previous_response_id: id });
+    recordUpstreamResponse(ctx, new Response(null, { headers: { "x-request-id": id } }));
+    recordProtocolEvent(ctx, { type: "response.created", response: { id } });
+    for (const field of ["clientRequestId", "codexThreadId", "previousResponseId", "upstreamRequestId", "upstreamResponseId"]) {
+      expect(ctx.diagnostics?.[field]).toBeUndefined();
+      expect(ctx.diagnostics?.fieldAvailability[field]?.status).toBe(id.startsWith("sk-") ? "redacted" : "truncated");
+    }
+    expect(ctx.diagnostics?.correlationConfidence).not.toBe("direct");
+  }
+});
+
+test.each([200, 502])("review: combo parent adoption finalizes each child's actual send (%i)", finalStatus => {
+  const parent: RequestLogContext = { provider: "combo", model: "combo" };
+  observeRequestTransport(parent, "http");
+  const children: RequestLogContext[] = [];
+  for (const index of [0, 1]) {
+    const child: RequestLogContext = { provider: "test", model: `model-${index}`, diagnostics: parent.diagnostics,
+      activeAttempt: beginRequestAttempt(index + 1, "test", `model-${index}`, "openai-responses") };
+    recordForwardedRequest(child, "http");
+    recordProtocolEvent(child, { type: "response.created", response: { id: `response-${index}` } });
+    recordProtocolEvent(child, { type: index === 1 && finalStatus === 200 ? "response.completed" : "response.failed",
+      response: { id: `response-${index}`, error: { code: "server_error" } } });
+    Object.assign(parent, child);
+    children.push(child);
+  }
+  finalizeDiagnostics(parent, finalStatus, "combo", Date.now());
+  expect(children.map(child => child.activeAttempt?.sends?.[0]?.upstreamResponseId)).toEqual(["response-0", "response-1"]);
+  expect(children.map(child => child.activeAttempt?.sends?.[0]?.status)).toEqual([502, finalStatus]);
+  expect(children.every(child => child.activeAttempt?.sends?.[0]?.endedAt !== undefined)).toBe(true);
+});
+
+test("review: independent recovery sends do not inherit terminal identity or duplicate flags", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test" };
+  for (const index of [0, 1, 2]) {
+    recordForwardedRequest(ctx, "http");
+    recordProtocolEvent(ctx, { type: "response.created", response: { id: `response-${index}` } });
+    recordProtocolEvent(ctx, { type: index === 2 ? "response.completed" : "response.failed", response: { id: `response-${index}`, error: { code: "server_error" } } });
+  }
+  finalizeDiagnostics(ctx, 200, "retry", Date.now());
+  expect(ctx.diagnostics?.responseIdMismatch).toBeUndefined();
+  expect(ctx.diagnostics?.duplicateTerminalSuppressed).toBeUndefined();
+  expect(ctx.activeAttempt?.sends?.map(send => send.status)).toEqual([502, 502, 200]);
+  expect(ctx.activeAttempt?.sends?.map(send => send.upstreamResponseId)).toEqual(["response-0", "response-1", "response-2"]);
+});
+
+test("review: direct WS error and proxy incomplete remain distinct diagnostic terminals", () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test" };
+  recordForwardedRequest(ctx, "websocket");
+  recordProtocolEvent(ctx, { type: "error", error: { code: "server_error" } }, 40, true);
+  ctx.terminalSource = "synthetic";
+  recordProtocolEvent(ctx, { type: "response.incomplete", response: { incomplete_details: { reason: "adapter_eof" } } });
+  expect(ctx.diagnostics?.events.filter(event => ["upstream.error", "response.incomplete"].includes(event.type))
+    .map(event => [event.type, event.source])).toEqual([["upstream.error", "upstream"], ["response.incomplete", "proxy"]]);
+});
+
+test("physical HTTP diagnostics snapshot each model without retaining body or secrets", async () => {
+  const ctx: RequestLogContext = { model: "model-one", provider: "test", conversationId: "opaque-not-a-thread" };
+  const request = new Request("http://localhost/v1/responses", { method: "POST" });
+  observeRequestTransport(ctx, "http", request, "transaction", Date.now());
+  recordRequestShape(ctx, { input: [{ role: "user", content: "private-prompt" }], client_metadata: { thread_id: "explicit-thread", turn_id: "turn-1", secret: "private-secret" } });
+  ctx.activeAttempt = beginRequestAttempt(1, "test", "model-one", "openai-responses");
+  const fetcher = providerFetch({ adapter: "openai-responses", fetch: async () => new Response("{}", { headers: { "x-request-id": "upstream-1" } }) } as any,
+    undefined, { observeTransport: transportObserver(ctx) });
+  await fetcher("https://example.com/v1/responses?secret=private-query", { method: "POST", body: '{"model":"model-one","input":"private-prompt"}' });
+  ctx.model = "model-two";
+  await fetcher("https://example.com/v1/responses", { method: "POST", body: '{"model":"model-two"}' });
+  expect(ctx.activeAttempt.sends?.map(send => send.forwardedModel)).toEqual(["model-one", "model-two"]);
+  expect(ctx.activeAttempt.sendCount).toBe(2);
+  expect(ctx.diagnostics?.codexThreadId).toBe("explicit-thread");
+  expect(ctx.diagnostics?.httpStatus).toBe(200);
+  expect(JSON.stringify(ctx.diagnostics)).not.toMatch(/private-|opaque-not-a-thread/);
+});
+
+test("capture acceptance: local completion, lifecycle and bounded request facts", () => {
+  const ctx: RequestLogContext = { model: "model-one", provider: "test", admissionKind: "loopback" };
+  observeRequestTransport(ctx, "http", new Request("http://localhost/v1/responses"), "local", Date.now());
+  recordRequestShape(ctx, { input: "private-input", tools: [], stream: false });
+  finalizeDiagnostics(ctx, 400, "local", Date.now());
+  expect(ctx.diagnostics?.upstreamCallMade).toBe(false);
+  expect(ctx.diagnostics?.firstEventAt).toBeUndefined();
+  expect(ctx.diagnostics?.inputItemCount).toBe(1);
+  expect(ctx.diagnostics?.proxyVersion).toBeString();
+  expect(ctx.diagnostics?.admittedAt).toBeNumber();
+  expect(ctx.diagnostics?.events.map(event => event.type)).toContain("request.received");
+  expect(ctx.diagnostics?.fieldAvailability.modelSwitchApplied?.status).toBe("unsupported");
+  expect(ctx.diagnostics?.fieldAvailability.subscriptionPlan?.status).toBe("unknown");
+});
+
+test("capture acceptance: original decoded request bytes and chat shape precede translation", async () => {
+  const raw = ' {"messages":[{"role":"assistant","tool_calls":[{},{}]},{"role":"tool","content":"é"}]} ';
+  const req = new Request("http://localhost/v1/chat/completions", { method: "POST", body: raw });
+  const ctx: RequestLogContext = { model: "test", provider: "test" };
+  observeRequestTransport(ctx, "http", req);
+  await readJsonRequestBody(req);
+  recordRequestShape(ctx, { input: [] });
+  expect(ctx.diagnostics?.requestBytes).toBe(Buffer.byteLength(raw));
+  expect(ctx.diagnostics?.toolCallCount).toBe(2);
+  expect(ctx.diagnostics?.toolResultBytes).toBe(2);
+  expect(ctx.diagnostics?.largestToolResultBytes).toBe(2);
+  expect(ctx.diagnostics?.inputItemCount).toBe(2);
+  const throwing = new Request("http://localhost", { method: "POST", body: "{}" });
+  observeDecodedRequestBody(throwing, () => { throw new Error("observer"); });
+  expect(await readJsonRequestBody(throwing)).toEqual({});
+});
+
+test("capture acceptance: physical event timing derives monotonic durations", () => {
+  const ctx: RequestLogContext = { model: "model-one", provider: "test", providerAdapter: "openai-responses" };
+  observeRequestTransport(ctx, "http", undefined, "timing", Date.now());
+  recordForwardedRequest(ctx, "http", '{"model":"model-one","input":[]}');
+  recordProtocolEvent(ctx, { type: "response.created", response: { id: "timed-response" } });
+  recordProtocolEvent(ctx, { type: "response.failed", response: { id: "timed-response", error: { code: "server_error" } } });
+  finalizeDiagnostics(ctx, 502, "timing", Date.now());
+  expect(ctx.diagnostics?.upstreamTimeToFirstEventMs).toBeNumber();
+  expect(ctx.diagnostics?.upstreamDurationMs).toBeNumber();
+  expect(ctx.diagnostics?.idleBeforeFailureMs).toBeNumber();
+  expect(ctx.diagnostics?.derivedFields).toContain("upstreamDurationMs");
+  expect(ctx.diagnostics?.derivedFields).toContain("finalizationLagMs");
+  expect(ctx.diagnostics?.adapterName).toBe("openai-responses");
+  expect(ctx.diagnostics?.upstreamProtocol).toBe("responses");
+});
+
+test("capture acceptance: replay counts and estimates retain their source semantics", () => {
+  const ctx: RequestLogContext = { model: "test", provider: "test", usageLogInputTokens: 50 };
+  recordRequestShape(ctx, { previous_response_id: "previous", input: [{ role: "user", content: "private" }] });
+  recordReconstructedContext(ctx, { input: [{}, {}, {}] }, 2);
+  recordContextEstimate(ctx, 100);
+  recordForwardedRequest(ctx, "http", '{"model":"test","input":[{},{},{}]}');
+  expect(ctx.diagnostics?.deltaInputCount).toBe(1);
+  expect(ctx.diagnostics?.reconstructedInputCount).toBe(3);
+  expect(ctx.diagnostics?.replayedItemCount).toBe(2);
+  expect(ctx.diagnostics?.contextTransformationKinds).toEqual(["previous_response_replay"]);
+  expect(ctx.diagnostics?.contextUsageRatioEstimate).toBe(0.5);
+  expect(ctx.diagnostics?.previousResponseRewriteApplied).toBe(true);
+  expect(JSON.stringify(ctx.diagnostics)).not.toContain("private");
+});
+
+test("diagnostic observer exceptions preserve HTTP response and semantic admission rejection", async () => {
+  let sends = 0;
+  const provider = { adapter: "openai-responses", fetch: async () => { sends++; return new Response("unchanged", { status: 201 }); } } as any;
+  const fetcher = providerFetch(provider, undefined, { observeTransport() { throw new Error("observer"); } });
+  const response = await fetcher("https://example.com", {});
+  expect(response.status).toBe(201); expect(await response.text()).toBe("unchanged");
+  const denied = providerFetch(provider, undefined, { observeTransport() { throw new Error("observer"); }, beforeDispatch() { throw new Error("admission"); } });
+  await expect(denied("https://example.com", {})).rejects.toThrow("admission");
+  expect(sends).toBe(1);
+});
+
+test("no-response cancellation records no invented HTTP status or response ID", () => {
+  const ctx: RequestLogContext = { model: "test", provider: "test" };
+  observeRequestTransport(ctx, "websocket", undefined, "cancel", Date.now(), "connection-one", 2);
+  let row: any;
+  addFinalRequestLog("cancel", Date.now(), ctx, 499, { closeReason: "client_cancel" }, entry => { row = entry; });
+  expect(row.diagnostics?.httpStatus).toBeUndefined();
+  expect(row.diagnostics?.upstreamResponseId).toBeUndefined();
+  expect(row.diagnostics?.streamAborted).toBe(true);
+  expect(row.diagnostics?.requestSequenceOnConnection).toBe(2);
+});
+
+test("a dispatch admission refusal does not become a physical send", async () => {
+  const ctx: RequestLogContext = { provider: "test", model: "test", activeAttempt: beginRequestAttempt(1, "test", "test", "openai-responses") };
+  noteAttemptSend(ctx.activeAttempt, undefined);
+  const executor = providerFetch({ adapter: "openai-responses" } as any, undefined, {
+    observeTransport: transportObserver(ctx), beforeDispatch() { throw new Error("admission"); },
+  });
+  await expect(executor("https://example.com", {})).rejects.toThrow("admission");
+  addFinalRequestLog("no-send", Date.now(), ctx, 403, undefined, () => {});
+  expect(ctx.activeAttempt?.sendCount).toBe(0);
+  expect(ctx.activeAttempt?.sends).toBeUndefined();
+});
 
 function sse(event: string): Uint8Array {
   return enc.encode(`data: ${event}\n\n`);
@@ -367,6 +545,130 @@ function joinBytes(chunks: Uint8Array[]): Uint8Array {
   }
   return joined;
 }
+
+describe("relaySseEagerBounded — delivered chunk observation", () => {
+  test.each([false, true])("observes exact UTF-8 output and terminal sentinel (observer throws: %s)", async throws => {
+    const { hooks, rec } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => {
+      delivered.push(chunk.slice());
+      if (throws) throw new Error("delivery observer failed");
+    };
+    const up = controlledUpstream();
+    const output = readAllBytes(relaySseEagerBounded(up.stream, new AbortController(), hooks));
+    const delta = sse(JSON.stringify({ type: "response.output_text.delta", delta: "olá €" }));
+    up.push(delta);
+    up.push(sse(COMPLETED));
+    up.close();
+
+    const actual = await output;
+    expect(actual).toEqual(joinBytes([delta, sse(COMPLETED), doneFrame(enc)]));
+    expect(joinBytes(delivered)).toEqual(actual);
+    expect(rec.dones).toBe(1);
+    expect(rec.synthetics).toEqual([]);
+  });
+
+  test("observes rewritten and injected blocks without retaining the original payload", async () => {
+    const { hooks } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => delivered.push(chunk.slice());
+    hooks.rewriteBlocks = block => block.includes("ORIGINAL")
+      ? [block.replace("ORIGINAL", "réécrit"), ': injected keepalive']
+      : [block];
+    const up = controlledUpstream();
+    const output = readAllBytes(relaySseEagerBounded(up.stream, new AbortController(), hooks));
+    const original = sse(JSON.stringify({ type: "response.output_text.delta", delta: "ORIGINAL" }));
+    up.push(original.subarray(0, 17));
+    up.push(original.subarray(17));
+    up.push(sse(COMPLETED));
+    up.close();
+
+    const actual = await output;
+    expect(joinBytes(delivered)).toEqual(actual);
+    const text = new TextDecoder().decode(actual);
+    expect(text).toContain("réécrit");
+    expect(text).toContain(": injected keepalive\n\n");
+    expect(text).not.toContain("ORIGINAL");
+    expect(text.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
+
+  test.each([false, true])("observes partial EOF bytes and synthetic incomplete tail (rewrite: %s)", async rewrite => {
+    const { hooks, rec } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => delivered.push(chunk.slice());
+    if (rewrite) hooks.rewritePayload = payload => payload.replace("ORIGINAL", "restored");
+    const up = controlledUpstream();
+    const output = readAllBytes(relaySseEagerBounded(up.stream, new AbortController(), hooks));
+    up.push(enc.encode('data: {"type":"response.output_text.delta","delta":"ORIGINAL"}'));
+    up.close();
+
+    const actual = await output;
+    expect(joinBytes(delivered)).toEqual(actual);
+    expect(new TextDecoder().decode(actual)).toContain(rewrite ? "restored" : "ORIGINAL");
+    expect(new TextDecoder().decode(actual)).toContain('"reason":"adapter_eof"');
+    expect(actual.slice(-doneFrame(enc).byteLength)).toEqual(doneFrame(enc));
+    expect(rec.synthetics).toEqual(["incomplete"]);
+  });
+
+  test.each(["upstream", "rewrite", "rewrite-eof"] as const)("observes synthetic failed output after %s failure", async failure => {
+    const { hooks, rec } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => delivered.push(chunk.slice());
+    if (failure !== "upstream") hooks.rewritePayload = () => { throw new Error("rewrite failure"); };
+    const up = controlledUpstream();
+    const output = readAllBytes(relaySseEagerBounded(up.stream, new AbortController(), hooks));
+    if (failure === "upstream") up.fail(new Error("upstream failure"));
+    else {
+      up.push(failure === "rewrite" ? sse(DELTA) : enc.encode(`data: ${DELTA}`));
+      up.close();
+    }
+
+    const actual = await output;
+    expect(joinBytes(delivered)).toEqual(actual);
+    const text = new TextDecoder().decode(actual);
+    expect(failedPayload(text).response.status).toBe("failed");
+    expect(countOccurrences(text, FAILED_EVENT_MARKER)).toBe(1);
+    expect(countOccurrences(text, "data: [DONE]\n\n")).toBe(1);
+    expect(rec.synthetics).toEqual(["failed"]);
+  });
+
+  test.each(["reader", "signal"] as const)("does not observe upstream terminal during discard-drain after %s cancellation", async cancellation => {
+    const { hooks, rec } = makeHooks();
+    const delivered: Uint8Array[] = [];
+    hooks.onDeliveredChunk = chunk => delivered.push(chunk.slice());
+    let resolveDone!: () => void;
+    const done = new Promise<void>(resolve => { resolveDone = resolve; });
+    const onDone = hooks.onDone;
+    hooks.onDone = () => { onDone(); resolveDone(); };
+    const up = controlledUpstream();
+    const client = new AbortController();
+    const upstream = new AbortController();
+    const reader = relaySseEagerBounded(up.stream, upstream, hooks, {
+      clientGoneSignal: client.signal,
+      postCancelDrainMs: watchdogMs(2_000),
+    }).getReader();
+    try {
+      up.push(sse(DELTA));
+      expect((await reader.read()).value).toEqual(sse(DELTA));
+      // Consumer promises run after the producer's synchronous enqueue observer.
+      const beforeCancel = joinBytes(delivered);
+      expect(beforeCancel).toEqual(sse(DELTA));
+      if (cancellation === "reader") await reader.cancel();
+      else client.abort();
+      up.push(sse(COMPLETED));
+      up.close();
+      await done;
+
+      expect(rec.terminals.map(terminal => terminal.status)).toEqual(["completed"]);
+      expect(joinBytes(delivered)).toEqual(beforeCancel);
+      expect(rec.cancels).toBe(0);
+      expect(rec.dones).toBe(1);
+    } finally {
+      upstream.abort();
+      reader.releaseLock();
+    }
+  });
+});
 
 describe("relaySseEagerBounded — side-effect parity", () => {
   test("(a) relays bytes verbatim; terminal recorded once; completed captured; onDone once", async () => {

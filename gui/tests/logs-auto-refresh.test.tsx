@@ -5,6 +5,7 @@ import type { Root } from "react-dom/client";
 import { LanguageProvider } from "../src/i18n/provider";
 import { clearClientResourceStoresForTests } from "../src/client-resource";
 import Logs from "../src/pages/Logs";
+import { parseLogDiagnostics, parseAttemptEvidence, sanitizeLogEvidence } from "../src/pages/log-diagnostics";
 
 const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "IS_REACT_ACT_ENVIRONMENT", "ResizeObserver"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
@@ -31,6 +32,156 @@ const updatedLog = {
   requestId: "req-2",
   model: "gpt-updated",
 };
+
+const forwardedShape = {
+  forwardedInputItemCount: 9, forwardedConversationItemCount: 9, forwardedMessageCount: 3,
+  forwardedToolDefinitionCount: 1, forwardedToolCallCount: 2, forwardedToolResultCount: 2,
+  forwardedReasoningItemCount: 1, forwardedEncryptedItemCount: 1, forwardedImageCount: 1,
+  forwardedAudioCount: 0, forwardedFileCount: 0, forwardedAttachmentBytes: 128,
+  forwardedToolResultBytes: 512, forwardedLargestToolResultBytes: 320,
+};
+const settingsEvidence = { callerEffort: "low", configuredEffort: "high", configuredEffortSource: "model" };
+const sendEvidence = {
+  sendId: "send-settings", sendOrdinal: 1, startedAt: sampleLog.timestamp,
+  callerEffort: "low", configuredEffort: "high", callerServiceTier: "auto", configuredServiceTier: "priority",
+};
+
+const diagnosticLog = {
+  ...sampleLog, requestId: "req/selected?", status: 400,
+  attempts: [{ attemptId: "attempt-settings", ordinal: 1, sendCount: 1, sends: [sendEvidence],
+    provider: "openai", model: "gpt-test", adapter: "openai-responses", status: 400,
+    durationMs: 42, recoveryKinds: [], usageStatus: "unreported" }],
+  diagnostics: {
+    schemaVersion: 1, diagnosticCaptureVersion: 1, transactionId: "tx-selected",
+    recordKind: "request", receivedAt: sampleLog.timestamp, timestampSource: "proxy_wall_clock",
+    correlationSource: "upstream", correlationConfidence: "direct", retentionClass: "usage_ledger",
+    redactionVersion: 1, redactionApplied: true, captureTruncated: true, droppedDiagnosticEventCount: 2,
+    httpStatus: 200, terminalMappedStatus: 400, upstreamResponseId: "resp-created",
+    outputDeliveredBeforeFailure: true, terminalSource: "upstream", transportPhase: "mid_stream",
+    usageMissingReason: "terminal_without_usage", inputItemCount: 3,
+    contextUsageRatioEstimate: 0.375, closeReason: "body_stall", policyFallbackOutcome: "failed",
+    ...forwardedShape,
+    ...settingsEvidence,
+    events: [{ eventSequence: 1, type: "response.created", at: sampleLog.timestamp,
+      source: "upstream", responseId: "resp-created", rawBody: "DO-NOT-RENDER" },
+      { eventSequence: 2, type: "context.compacted", at: sampleLog.timestamp + 1, source: "proxy" }],
+    fieldAvailability: { usageSource: { status: "not_observed", source: "upstream" },
+      forwardedImageCount: { status: "observed", source: "adapter" },
+      contextUsageRatioEstimate: { status: "derived", source: "derived" } },
+    rawBody: "DO-NOT-RENDER",
+  },
+};
+
+test("Logs: strict diagnostic projection survives cache round trips without unknown or malformed fields", () => {
+  const input = { ...diagnosticLog, diagnostics: { ...diagnosticLog.diagnostics,
+    derivedFields: ["httpStatus", { secret: "hidden" }],
+    outputItemCountsByType: { message: 3, broken: "hidden" },
+    toolCallCount: { secret: "hidden" },
+    fieldAvailability: { ...diagnosticLog.diagnostics.fieldAvailability, rawBody: { status: "observed" } },
+  } };
+  const once = sanitizeLogEvidence(input);
+  const twice = sanitizeLogEvidence(once);
+  expect(twice).toEqual(once);
+  const parsed = parseLogDiagnostics(twice.diagnostics)!;
+  expect(parsed.fields["derivedFields.0"]).toBe("httpStatus");
+  expect(parsed.fields["outputItemCountsByType.message"]).toBe(3);
+  expect(parsed.fields.contextUsageRatioEstimate).toBe(0.375);
+  expect(parsed.fields.closeReason).toBe("body_stall");
+  expect(parsed.fields.policyFallbackOutcome).toBe("failed");
+  expect(parsed.fields).toMatchObject(forwardedShape);
+  expect(parsed.fields).toMatchObject(settingsEvidence);
+  expect(parseAttemptEvidence(twice.attempts)).toEqual([{ attemptId: "attempt-settings", ordinal: 1, sendCount: 1,
+    provider: "openai", model: "gpt-test", adapter: "openai-responses", status: 400, ...sendEvidence }]);
+  expect(parsed.events[1]).toEqual({ eventSequence: 2, type: "context.compacted", at: sampleLog.timestamp + 1, source: "proxy" });
+  expect(parsed.availability.forwardedImageCount).toEqual({ status: "observed", source: "adapter" });
+  expect(parsed.availability.contextUsageRatioEstimate).toEqual({ status: "derived", source: "derived" });
+  expect(parsed.fields.toolCallCount).toBeUndefined();
+  expect(parsed.availability.rawBody).toBeUndefined();
+  expect(JSON.stringify(twice)).not.toContain("DO-NOT-RENDER");
+  expect(JSON.stringify(twice)).not.toContain("hidden");
+  for (const invalid of [null, [], { ...diagnosticLog.diagnostics, schemaVersion: 2 }, { ...diagnosticLog.diagnostics, receivedAt: NaN }]) expect(parseLogDiagnostics(invalid)).toBeUndefined();
+});
+
+test("Logs: newly supported telemetry still rejects malformed values and unknown enums", () => {
+  const parsed = parseLogDiagnostics({ ...diagnosticLog.diagnostics,
+    contextUsageRatioEstimate: -1, forwardedImageCount: NaN, forwardedAudioCount: "0",
+    forwardedFileCount: { privatePayload: "hidden" }, closeReason: "unknown-close",
+    policyFallbackOutcome: "unknown-outcome",
+    events: [{ eventSequence: 2, type: "context.compacted", at: -1, source: "proxy" }],
+  })!;
+  for (const key of ["contextUsageRatioEstimate", "forwardedImageCount", "forwardedAudioCount", "forwardedFileCount", "closeReason", "policyFallbackOutcome"]) expect(parsed.fields[key]).toBeUndefined();
+  expect(parsed.events).toEqual([]);
+});
+
+test("Logs: attempt evidence retains timing and transport and drops malformed sends", () => {
+  const evidence = parseAttemptEvidence([{ ordinal: 2, attemptId: "attempt-2", attemptStartedAt: 10,
+    attemptEndedAt: 40, upstreamTransport: "http", sendCount: 2,
+    sends: [{ sendId: "send-1", sendOrdinal: 1, startedAt: 12, httpStatus: 200 },
+      { sendId: "bad", sendOrdinal: 0, startedAt: 15, rawBody: "hidden" }] }]);
+  expect(evidence).toEqual([{ ordinal: 2, attemptId: "attempt-2", attemptStartedAt: 10,
+    attemptEndedAt: 40, upstreamTransport: "http", sendCount: 2,
+    sendId: "send-1", sendOrdinal: 1, startedAt: 12, httpStatus: 200 }]);
+});
+
+test("Logs: diagnostics disclosure preserves table and exports only the selected request on click", async () => {
+  const requests: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = String(input); requests.push(url);
+    if (url.includes("/export?")) return jsonResponse({ exportSchemaVersion: 1, records: [] });
+    return jsonResponse(url.includes("/api/logs") ? [diagnosticLog] : {});
+  }) as typeof fetch;
+  const create = jest.spyOn(URL, "createObjectURL").mockReturnValue("blob:test-export");
+  const revoke = jest.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const downloads: string[] = [];
+  const click = jest.spyOn(testWindow.HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) { downloads.push(this.download); });
+  const { root, container } = await mountLogs();
+  try {
+    await flushMicrotasks();
+    const table = container.querySelector("table")!.textContent;
+    await act(async () => { container.querySelector<HTMLButtonElement>(".log-detail-btn")!.click(); });
+    const disclosure = container.querySelector("dialog details")!;
+    expect(disclosure).not.toBeNull();
+    expect(disclosure.hasAttribute("open")).toBe(false);
+    const summary = disclosure.querySelector("summary")!;
+    expect(summary.textContent).toBe("Diagnostics");
+    summary.focus();
+    expect(document.activeElement).toBe(summary);
+    expect(container.querySelector("table")!.textContent).toBe(table);
+    for (const value of ["Raw HTTP status", "200", "Mapped status", "400", "resp-created", "Output before failure", "Terminal source", "Transport phase", "terminal_without_usage", "Truncated", "Not observed"]) expect(disclosure.textContent).toContain(value);
+    expect(disclosure.textContent).not.toContain("DO-NOT-RENDER");
+    for (const value of ["contextUsageRatioEstimate", "0.375", "closeReason", "body_stall", "policyFallbackOutcome", "failed"]) expect(disclosure.textContent).toContain(value);
+    for (const key of Object.keys(forwardedShape)) expect(disclosure.textContent).toContain(key);
+    expect(disclosure.textContent).toContain("context.compacted");
+    for (const key of ["callerEffort", "configuredEffort", "configuredEffortSource", "callerServiceTier", "configuredServiceTier"]) expect(disclosure.textContent).toContain(key);
+    expect(requests.some(url => url.includes("/export?"))).toBe(false);
+    const button = [...disclosure.querySelectorAll("button")].find(el => el.textContent === "Download support bundle")!;
+    await act(async () => { button.click(); });
+    await flushMicrotasks();
+    expect(requests.filter(url => url.includes("/export?"))).toEqual(["http://localhost/api/transaction-diagnostics/export?requestId=req%2Fselected%3F"]);
+    expect(downloads).toEqual(["transaction-diagnostics.json"]);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledWith("blob:test-export");
+    expect(container.querySelector("dialog")).not.toBeNull();
+  } finally { await act(async () => { root.unmount(); }); create.mockRestore(); revoke.mockRestore(); click.mockRestore(); }
+});
+
+test("Logs: failed export keeps details open and shows a localized error", async () => {
+  globalThis.fetch = (async input => String(input).includes("/export?")
+    ? jsonResponse({ error: "private error" }, 503)
+    : jsonResponse(String(input).includes("/api/logs") ? [diagnosticLog] : {})) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    await flushMicrotasks();
+    await act(async () => { container.querySelector<HTMLButtonElement>(".log-detail-btn")!.click(); });
+    const button = [...container.querySelectorAll<HTMLButtonElement>("dialog button")].find(el => el.textContent === "Download support bundle");
+    expect(button).toBeDefined();
+    await act(async () => { button!.click(); });
+    await flushMicrotasks();
+    expect(container.querySelector("dialog [role=alert]")?.textContent).toBe("Could not download the support bundle. Try again.");
+    expect(container.querySelector("dialog")).not.toBeNull();
+    expect(button!.disabled).toBe(false);
+  } finally { await act(async () => { root.unmount(); }); }
+});
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

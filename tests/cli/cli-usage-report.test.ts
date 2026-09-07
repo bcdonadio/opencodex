@@ -7,6 +7,9 @@
  * tests pin the cost down where a user can see it.
  */
 import { describe, expect, spyOn, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { handleObserveCommand } from "../../src/cli/observe";
 import { formatUsageReport } from "../../src/cli/usage-report";
@@ -312,6 +315,73 @@ describe("ocx logs --follow output contract", () => {
       console.log = originalLog;
       console.error = originalError;
       sleep.mockRestore();
+    }
+  });
+});
+
+describe("ocx logs export", () => {
+  test.each([
+    ["--json", "--request", "ocx-one"],
+    ["--request", "ocx-one", "--json"],
+    ["--from", "1000", "--json", "--to", "2000"],
+  ])("explicit JSON accepts any option position: %j", async (...args) => {
+    const bundle = { exportSchemaVersion: 1, records: [] };
+    const result = await run(["logs", "export", ...args], bundle);
+    expect(result.code).toBe(0);
+    expect(result.out.trim()).toBe(JSON.stringify(bundle));
+    expect(result.urls).toHaveLength(1);
+  });
+  const bundle = { exportSchemaVersion: 1, records: [{ requestId: "ocx-one" }] };
+
+  test("repeats requestId selectors and prints only JSON by default", async () => {
+    const result = await run(["logs", "export", "--request", "ocx-one", "--request", "ocx-two"], bundle);
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.out)).toEqual(bundle);
+    const url = new URL(result.urls[0]!);
+    expect(url.pathname).toBe("/api/transaction-diagnostics/export");
+    expect(result.out.trim()).toBe(JSON.stringify(bundle));
+    expect(url.searchParams.getAll("requestId")).toEqual(["ocx-one", "ocx-two"]);
+  });
+
+  test("accepts only a complete time range and never mixes selector modes", async () => {
+    const byTime = await run(["logs", "export", "--from", "1000", "--to", "2000"], bundle);
+    const url = new URL(byTime.urls[0]!);
+    expect(url.searchParams.get("from")).toBe("1000");
+    expect(url.searchParams.get("to")).toBe("2000");
+
+    for (const args of [
+      ["logs", "export"],
+      ["logs", "export", "--from", "1000"],
+      ["logs", "export", "--request", "ocx-one", "--from", "1000", "--to", "2000"],
+    ]) {
+      expect((await run(args, bundle)).code).toBe(2);
+    }
+  });
+
+  test("--out creates exclusively and --force replaces without printing the path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-support-export-"));
+    const target = join(dir, "private-support.json");
+    try {
+      const created = await run(["logs", "export", "--request", "ocx-one", "--out", target], bundle);
+      expect(created.code).toBe(0);
+      expect(created.out).toBe("");
+      expect(JSON.parse(readFileSync(target, "utf8"))).toEqual(bundle);
+      expect(readFileSync(target, "utf8")).toBe(JSON.stringify(bundle));
+
+      writeFileSync(target, "owner bytes", "utf8");
+      const refused = await run(["logs", "export", "--request", "ocx-one", "--out", target], bundle);
+      expect(refused.code).toBe(2);
+      expect(readFileSync(target, "utf8")).toBe("owner bytes");
+
+      const replaced = await run([
+        "logs", "export", "--request", "ocx-one", "--out", target, "--force",
+      ], bundle);
+      expect(replaced.code).toBe(0);
+      expect(replaced.out).toBe("");
+      expect(JSON.parse(readFileSync(target, "utf8"))).toEqual(bundle);
+      expect(`${created.out}${refused.out}${replaced.out}`).not.toContain(target);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

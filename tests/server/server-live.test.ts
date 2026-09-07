@@ -2,7 +2,7 @@
  * /v1/live relay: Codex App / ChatGPT voice POSTs call-create against the injected base_url,
  * so the proxy must relay it to an OpenAI upstream instead of the /v1/* JSON-404 guard.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
@@ -26,6 +26,33 @@ import type { OcxConfig } from "../../src/types";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { clearRequestLogsForTests, getRequestLogEntries } from "../../src/server/request-log";
+
+test("failed live sideband upgrade records its actual final status once", async () => {
+  saveConfig(forwardConfig());
+  clearRequestLogsForTests();
+  const server = startServer(0);
+  const upgrade = spyOn(server, "upgrade").mockReturnValue(false);
+  try {
+    const request = new Request(new URL("/v1/live/rtc_status", server.url), {
+      headers: {
+        upgrade: "websocket",
+        authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`,
+        "chatgpt-account-id": "acct-123",
+      },
+    });
+    const response = await fetch(request);
+    expect(response?.status).toBe(426);
+    const rows = getRequestLogEntries();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe(426);
+    expect(rows[0].diagnostics?.terminalMappedStatus).toBe(426);
+    expect(rows[0].diagnostics?.events.filter(event => event.type === "request.finalized")).toHaveLength(1);
+  } finally {
+    upgrade.mockRestore();
+    await server.stop(true);
+  }
+});
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -157,6 +184,33 @@ function multipartLiveBody(
     contentType: `multipart/form-data; boundary=${boundary}`,
   };
 }
+
+test("live diagnostics classify the actual HTTP destination", async () => {
+  const { handleLive } = await import("../../src/server/live");
+  const { observeRequestTransport } = await import("../../src/server/transaction-capture");
+  const logCtx: import("../../src/server/request-log").RequestLogContext = { model: "", provider: "" };
+  const targets: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    targets.push(input instanceof Request ? input.url : String(input));
+    return new Response("v=0-answer", { status: 200 });
+  }) as typeof fetch;
+  const request = new Request("http://localhost/v1/live", {
+    method: "POST",
+    headers: { "content-type": "application/sdp",
+      authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`, "chatgpt-account-id": "acct-123" },
+    body: "v=0",
+  });
+  observeRequestTransport(logCtx, "http", request);
+  const response = await handleLive(request, forwardConfig(), logCtx);
+  expect(response.status).toBe(200);
+  expect(targets).toHaveLength(1);
+  expect(new URL(targets[0]!).hostname).toBe("chatgpt.com");
+  expect(logCtx.diagnostics).toMatchObject({ upstreamHostname: "chatgpt", method: "POST" });
+  expect(logCtx.diagnostics?.endpointClass).toBe("live");
+  expect(logCtx.diagnostics?.fieldAvailability.endpointClass?.status).not.toBe("not_observed");
+  expect(logCtx.attempts?.[0]?.sends?.[0]?.endpointClass).toBe("live");
+  expect(logCtx.attempts?.[0]?.sendCount).toBe(1);
+});
 
 test("POST /v1/live rewrites ChatGPT multipart into backend realtime/calls JSON", async () => {
   const captured: CapturedRequest[] = [];

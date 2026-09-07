@@ -1,4 +1,5 @@
 import type { ResponsesTerminalStatus } from "../bridge";
+import { observeRequestTransport, recordReceivedBytes, recordUpstreamResponse, recordSyntheticTerminal, recordDeliveredOutput, recordDownstreamTerminal } from "./transaction-capture";
 import {
   cyberPolicyErrorType,
   CYBER_POLICY_ERROR_CODE,
@@ -628,9 +629,23 @@ export function trackSseForRequestLog(
   // Reuse the byte-bounded inspector so translated responses cannot retain an
   // unterminated upstream frame or parse the same event once per observer.
   const inspector = createSseInspector({
-    onTerminal: reportTerminal,
+    onTerminal: status => {
+      if (logCtx) recordDownstreamTerminal(logCtx);
+      reportTerminal(status);
+    },
     logCtx,
-    onFirstOutput,
+    onParsedPayload: payload => {
+      if (!logCtx || !payload || typeof payload !== "object") return;
+      const event = payload as { type?: unknown; delta?: unknown };
+      if (typeof event.delta === "string" && event.delta.length > 0 && typeof event.type === "string"
+        && ["response.output_text.delta", "response.reasoning_summary_text.delta",
+          "response.function_call_arguments.delta", "response.refusal.delta"].includes(event.type))
+        recordDeliveredOutput(logCtx, event.type);
+    },
+    onFirstOutput: () => {
+      if (logCtx) recordDeliveredOutput(logCtx);
+      onFirstOutput?.();
+    },
   });
 
   return new ReadableStream<Uint8Array>({
@@ -646,8 +661,10 @@ export function trackSseForRequestLog(
           controller.close();
           return;
         }
-        inspector.feed(value);
         controller.enqueue(value);
+        // Only the client-facing queue establishes delivery evidence. Upstream
+        // preflight and background inspection can observe output never relayed.
+        inspector.feed(value);
       } catch (err) {
         // The upstream read rejected: the 200 body died mid-flight. Client
         // cancellation is the caller's separate 499 path, so a cancel-drained
@@ -677,6 +694,10 @@ export function responseWithDeferredRequestLog(
   addLog: (entry: RequestLogEntry) => void = addRequestLog,
 ): Response {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const directResponseObservation = !logCtx.diagnostics && !logCtx.localTerminalReason;
+  if (!logCtx.diagnostics) observeRequestTransport(logCtx, logCtx.inboundTransport ?? "http", undefined, requestId, start);
+  // A native WS fetch returns a synthetic HTTP facade; its owner observed the handshake.
+  if (directResponseObservation) recordUpstreamResponse(logCtx, response, logCtx.upstreamTransport === "websocket" ? "websocket" : "http");
   if (isUsageDebugEnabled() && !logCtx.usageDebugContentType && contentType) {
     logCtx.usageDebugContentType = contentType;
   }
@@ -692,13 +713,15 @@ export function responseWithDeferredRequestLog(
         // client below, unchanged. JSON bodies keep full inspection (usage parsing).
         const isJson = contentType.includes("application/json");
         inspectResponseLogJson(logCtx, isJson ? text : text.slice(0, 8192));
-        addFinalRequestLog(requestId, start, logCtx, response.status, { closeReason: "non_stream" }, addLog);
         return text;
       };
       const body = new ReadableStream<Uint8Array>({
         async start(controller) {
           try {
-            controller.enqueue(new TextEncoder().encode(await finalizeJsonLog()));
+            const text = await finalizeJsonLog();
+            controller.enqueue(new TextEncoder().encode(text));
+            recordDownstreamTerminal(logCtx);
+            addFinalRequestLog(requestId, start, logCtx, response.status, { closeReason: "non_stream" }, addLog);
             controller.close();
           } catch (err) {
             addFinalRequestLog(requestId, start, logCtx, 502, { closeReason: "non_stream" }, addLog);
@@ -871,6 +894,22 @@ export type SseInspectorHandlers = {
   pinCompletedResponseIdToFirstSeen?: boolean;
 };
 
+/** Inspect only bytes accepted by the downstream owner. No upstream metadata writes. */
+export function createDownstreamDiagnosticInspector(logCtx: RequestLogContext): SseInspector {
+  return createSseInspector({
+    onTerminal: () => recordDownstreamTerminal(logCtx),
+    onFirstOutput: () => recordDeliveredOutput(logCtx),
+    onParsedPayload: payload => {
+      if (!payload || typeof payload !== "object") return;
+      const event = payload as { type?: unknown; delta?: unknown };
+      if (typeof event.delta === "string" && event.delta.length > 0 && typeof event.type === "string"
+        && ["response.output_text.delta", "response.reasoning_summary_text.delta",
+          "response.function_call_arguments.delta", "response.refusal.delta"].includes(event.type))
+        recordDeliveredOutput(logCtx, event.type);
+    },
+  });
+}
+
 type CompletedOutputItem = { item: unknown; sourceBytes: number };
 
 function delimiterLengthAt(
@@ -1032,6 +1071,7 @@ export function createSseInspector(handlers: SseInspectorHandlers): SseInspector
     );
   };
 
+  const diagnosticObserver = {};
   const scanPayload = (payload: string | null, sourceBytes: number): void => {
     if (!payload) return;
     let parsed: unknown | undefined;
@@ -1043,7 +1083,7 @@ export function createSseInspector(handlers: SseInspectorHandlers): SseInspector
       }
     }
     if (!reported && handlers.logCtx) {
-      inspectResponseLogSsePayloadParsed(handlers.logCtx, payload, parsed);
+      inspectResponseLogSsePayloadParsed(handlers.logCtx, payload, parsed, diagnosticObserver);
     }
     // Before any terminal handling: a consumer deciding on the whole turn must observe this
     // payload even when the terminal snapshot that follows no longer mentions it.
@@ -1188,6 +1228,7 @@ export function createSseInspector(handlers: SseInspectorHandlers): SseInspector
 
   return {
     feed(chunk) {
+      if (!disposed && handlers.logCtx) recordReceivedBytes(handlers.logCtx, chunk.byteLength);
       if (!disposed) scanChunk(chunk);
     },
     finish() {
@@ -1406,7 +1447,10 @@ export function consumeForInspection(
     onCancel,
     onCleanEof: () => {
       if (!inspector.reported()) {
-        if (logCtx) logCtx.terminalSource = "synthetic";
+        if (logCtx) {
+          logCtx.terminalSource = "synthetic";
+          recordSyntheticTerminal(logCtx, bareUpstreamError !== undefined ? "response.failed" : "response.incomplete");
+        }
         if (bareUpstreamError !== undefined) {
           onTerminal("failed", httpStatusForRequestLogTerminal("failed", logCtx));
         } else {
@@ -1422,6 +1466,7 @@ export function consumeForInspection(
         if (logCtx) {
           logCtx.transportPhase = "mid_stream";
           logCtx.terminalSource = "synthetic";
+          recordSyntheticTerminal(logCtx, "response.failed");
           // A truncated 200 body must not meter as a success the client never
           // received; the router's equivalent turn carries 502 + streamAborted
           // (codex-router #139).

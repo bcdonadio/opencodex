@@ -1,0 +1,77 @@
+import { useState } from "react";
+import { useI18n, type TKey } from "../i18n/shared";
+import { parseLogDiagnostics, parseAttemptEvidence, type EvidenceFields } from "./log-diagnostics";
+
+const labels: Record<string, TKey> = {
+  httpStatus: "logs.diagnostics.http", terminalMappedStatus: "logs.diagnostics.mapped",
+  outputDeliveredBeforeFailure: "logs.diagnostics.output", terminalSource: "logs.diagnostics.terminal",
+  transportPhase: "logs.diagnostics.phase", usageMissingReason: "logs.diagnostics.usage",
+};
+const states: Record<string, TKey> = {
+  observed: "logs.diagnostics.observed", derived: "logs.diagnostics.derived",
+  unsupported: "logs.diagnostics.unsupported", not_observed: "logs.diagnostics.notObserved",
+  redacted: "logs.diagnostics.redacted", truncated: "logs.diagnostics.truncated", unknown: "logs.diagnostics.unknown",
+};
+export function LogDiagnosticsDetails({ diagnostics, attempts, requestId, apiBase }: {
+  diagnostics?: unknown; attempts?: unknown; requestId?: string; apiBase: string;
+}) {
+  const { t } = useI18n();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const evidence = parseLogDiagnostics(diagnostics);
+  const download = async () => {
+    if (!requestId || busy) return;
+    setBusy(true);
+    setFailed(false);
+    try {
+      // The app's installed fetch wrapper supplies the dashboard session, as for /api/logs.
+      const response = await fetch(`${apiBase}/api/transaction-diagnostics/export?requestId=${encodeURIComponent(requestId)}`);
+      if (!response.ok) throw new Error("export_failed");
+      const bundle: unknown = await response.json();
+      if (!bundle || typeof bundle !== "object" || !("exportSchemaVersion" in bundle) || bundle.exportSchemaVersion !== 1) throw new Error("invalid_export");
+      const url = URL.createObjectURL(new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      try {
+        anchor.href = url;
+        anchor.download = "transaction-diagnostics.json";
+        document.body.append(anchor);
+        anchor.click();
+      } finally {
+        anchor.remove();
+        URL.revokeObjectURL(url);
+      }
+    } catch { setFailed(true); } finally { setBusy(false); }
+  };
+  const renderFields = (fields: EvidenceFields) => (
+    <dl className="log-diagnostics-grid">
+      {Object.entries(fields).map(([key, value]) => (
+        <div key={key}>
+          <dt>{labels[key] ? t(labels[key]) : <code>{key}</code>}</dt>
+          <dd>{typeof value === "boolean" ? t(value ? "logs.diagnostics.yes" : "logs.diagnostics.no") : <code>{String(value)}</code>}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+  return (
+    <details className="log-diagnostics log-detail-section">
+      <summary>{t("logs.diagnostics.title")}</summary>
+      {!evidence ? <p>{t("logs.diagnostics.unavailable")}</p> : <>
+        {evidence.fields.captureTruncated && <p>{t("logs.diagnostics.truncated")}</p>}
+        <h4>{t("logs.diagnostics.evidence")}</h4>
+        {renderFields(evidence.fields)}
+        <h4>{t("logs.diagnostics.lifecycle")}</h4>
+        {evidence.events.length ? <ol>{evidence.events.map((event, i) => <li key={i}>{renderFields(event)}</li>)}</ol> : <p>{t("logs.diagnostics.unavailable")}</p>}
+        <h4>{t("logs.diagnostics.availability")}</h4>
+        <dl className="log-diagnostics-grid">{Object.entries(evidence.availability).map(([key, value]) => <div key={key}>
+          <dt><code>{key}</code></dt><dd>{t(states[value.status])}{value.source && <> · <code>{value.source}</code></>}</dd>
+        </div>)}</dl>
+      </>}
+      <h4>{t("logs.diagnostics.attempts")}</h4>
+      {parseAttemptEvidence(attempts).length ? parseAttemptEvidence(attempts).map((attempt, i) => <div key={i}>{renderFields(attempt)}</div>) : <p>{t("logs.diagnostics.unavailable")}</p>}
+      <button type="button" className="btn btn-ghost btn-sm" disabled={!requestId || busy} onClick={() => void download()}>
+        {t(busy ? "logs.diagnostics.downloading" : "logs.diagnostics.download")}
+      </button>
+      {failed && <p role="alert">{t("logs.diagnostics.failed")}</p>}
+    </details>
+  );
+}

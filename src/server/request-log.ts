@@ -14,6 +14,8 @@ import {
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
 import type { AttemptTierOutcome, OcxProviderConfig, OcxUsage } from "../types";
+import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordContextTransformation, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
+import { noteRecoveryDispatch } from "./transaction-recovery-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import type { AdapterRequest } from "../adapters/base";
 import type { AdapterTierMetadata } from "../providers/fastwire";
@@ -27,6 +29,7 @@ import {
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
   isValidReasoningWireValue,
+  normalizeUsageAttempts,
   normalizeClaudeCompatibilityUsageLog,
   readRecentUsageEntries,
   usageForFinalLog,
@@ -52,6 +55,13 @@ import { capEstimateAtContextWindow } from "../lib/token-estimate";
 import { inferCursorContextWindow } from "../adapters/cursor/discovery";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { modelRecordValue } from "../reasoning-effort";
+import {
+  clearDiagnosticPersistenceOutcome,
+  createDiagnosticAttemptId,
+  normalizeTransactionDiagnostics,
+  sanitizeUpstreamDisplayError,
+  type TransactionDiagnosticsV1,
+} from "../diagnostics/transaction";
 
 export interface RequestLogContext {
   model: string;
@@ -71,6 +81,7 @@ export interface RequestLogContext {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  diagnostics?: TransactionDiagnosticsV1;
   inboundTransport?: "http" | "websocket";
   /** Actual primary upstream wire observed at dispatch time. */
   upstreamTransport?: UsageTransport;
@@ -175,6 +186,7 @@ export interface RequestLogEntry {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  diagnostics?: TransactionDiagnosticsV1;
   inboundTransport?: "http" | "websocket";
   upstreamTransport?: UsageTransport;
   accountLogLabel?: string;
@@ -281,6 +293,14 @@ function asCloseReason(value: string | undefined): RequestLogEntry["closeReason"
   }
 }
 
+/** Prefer recorded diagnostic transports; standalone actual-wire observations remain valid fallbacks. */
+function diagnosticTransports(diagnostics: TransactionDiagnosticsV1 | undefined): Pick<RequestLogEntry, "inboundTransport" | "upstreamTransport"> {
+  const result: Pick<RequestLogEntry, "inboundTransport" | "upstreamTransport"> = {};
+  if (diagnostics?.inboundTransport === "http" || diagnostics?.inboundTransport === "websocket") result.inboundTransport = diagnostics.inboundTransport;
+  if (diagnostics?.upstreamTransport === "http" || diagnostics?.upstreamTransport === "websocket" || diagnostics?.upstreamTransport === "mixed") result.upstreamTransport = diagnostics.upstreamTransport;
+  return result;
+}
+
 /** Project a persisted usage.jsonl row back into the in-memory /api/logs shape. */
 export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): RequestLogEntry {
   const terminalStatus = asTerminalStatus(entry.terminalStatus);
@@ -294,6 +314,11 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     provider: entry.provider,
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
+    ...(typeof entry.apiKeyId === "string" && entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
+    ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
+    ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+    ...(entry.diagnostics ? { diagnostics: entry.diagnostics } : {}),
+    ...(entry.localTerminalReason ? { localTerminalReason: entry.localTerminalReason } : {}),
     ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
@@ -302,6 +327,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(isKnownUsageTransport(entry.upstreamTransport)
       ? { upstreamTransport: entry.upstreamTransport }
       : {}),
+    ...diagnosticTransports(entry.diagnostics),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
     ...(entry.requestedAlias ? { requestedAlias: entry.requestedAlias } : {}),
     ...(entry.shadowCallRewrittenFrom
@@ -332,6 +358,9 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.usage ? { usage: entry.usage } : {}),
     ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
     ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+    ...(entry.affinity ? { affinity: entry.affinity } : {}),
+    ...(entry.transportPhase ? { transportPhase: entry.transportPhase } : {}),
+    ...(entry.terminalSource ? { terminalSource: entry.terminalSource } : {}),
     ...(routeDecision ? { routeDecision } : {}),
     ...(claudeCompatibility ? { claudeCompatibility } : {}),
   };
@@ -389,27 +418,57 @@ export function addRequestLog(entry: RequestLogEntry) {
   // line-oriented viewer — while `usage.jsonl` looked clean, which is the worst shape for a
   // sanitization bug because the safe surface is the one you check.
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
+  const upstreamError = sanitizeUpstreamDisplayError(entry.upstreamError);
+  const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
+  let diagnostics: TransactionDiagnosticsV1 | undefined;
+  let persistenceStarted: number | undefined;
   const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
-  const retained: RequestLogEntry = shadowCallRewrittenFrom === entry.shadowCallRewrittenFrom && entry.claudeCompatibility === undefined
-    ? entry
-    : { ...entry, ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}) };
-  if (!shadowCallRewrittenFrom && retained !== entry) delete retained.shadowCallRewrittenFrom;
-  if (claudeCompatibility) retained.claudeCompatibility = claudeCompatibility;
-  else if (retained !== entry) delete retained.claudeCompatibility;
-  entry = retained;
-  retainRequestLogEntry(entry);
   try {
-    // Failure diagnostics survive the 200-entry ring buffer by riding the persisted
-    // usage entry (devlog/_plan/260716_claudecode_hardening/030). Success rows stay
-    // in their existing shape; the >=400 gate deliberately includes 499 client-cancels.
-    const failureDiagnostics = entry.status >= 400 || (entry.terminalStatus && entry.terminalStatus !== "completed")
-      ? {
-        ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
-        ...(entry.terminalStatus ? { terminalStatus: entry.terminalStatus } : {}),
-        ...(entry.closeReason ? { closeReason: entry.closeReason } : {}),
-        ...(entry.upstreamError ? { upstreamError: entry.upstreamError } : {}),
-      }
-      : {};
+    persistenceStarted = diagnosticFinalizedClock(entry.diagnostics);
+    diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
+  } catch {
+    // Diagnostics are optional observation only. A hostile getter, corrupt row, or
+    // normalization defect must not prevent the canonical request log from completing.
+    diagnostics = undefined;
+  }
+  const retained: RequestLogEntry = { ...entry };
+  if (claudeCompatibility) retained.claudeCompatibility = claudeCompatibility;
+  else delete retained.claudeCompatibility;
+  if (entry.attempts !== undefined) {
+    try {
+      // The finalized ring row owns a snapshot, not handles still writable by
+      // late transport callbacks after usage.jsonl has already been appended.
+      retained.attempts = normalizeUsageAttempts(entry.attempts);
+    } catch {
+      delete retained.attempts;
+    }
+  }
+  if (shadowCallRewrittenFrom) retained.shadowCallRewrittenFrom = shadowCallRewrittenFrom;
+  else delete retained.shadowCallRewrittenFrom;
+  if (upstreamError) retained.upstreamError = upstreamError;
+  else delete retained.upstreamError;
+  if (localTerminalReason) retained.localTerminalReason = localTerminalReason;
+  else delete retained.localTerminalReason;
+  if (diagnostics) retained.diagnostics = diagnostics;
+  else delete retained.diagnostics;
+  if (!isKnownInboundTransport(retained.inboundTransport)) delete retained.inboundTransport;
+  if (!isKnownUsageTransport(retained.upstreamTransport)) delete retained.upstreamTransport;
+  Object.assign(retained, diagnosticTransports(diagnostics));
+  entry = retained;
+  captureSafely(() => {
+    if (entry.diagnostics) {
+      clearDiagnosticPersistenceOutcome(entry.diagnostics);
+    }
+  });
+  try {
+    // Terminal provenance is diagnostic evidence on successful and failed rows alike.
+    // Keeping it only for failures makes a restart erase the comparison baseline.
+    const terminalMetadata = {
+      ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
+      ...(entry.terminalStatus ? { terminalStatus: entry.terminalStatus } : {}),
+      ...(entry.closeReason ? { closeReason: entry.closeReason } : {}),
+      ...(entry.upstreamError ? { upstreamError: entry.upstreamError } : {}),
+    };
     appendUsageEntry({
       requestId: entry.requestId,
       timestamp: entry.timestamp,
@@ -422,6 +481,8 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+      ...(entry.diagnostics ? { diagnostics: entry.diagnostics } : {}),
+      ...(entry.localTerminalReason ? { localTerminalReason: entry.localTerminalReason } : {}),
       ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
       ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
@@ -457,13 +518,19 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.usage ? { usage: entry.usage } : {}),
       ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
       ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
-      ...failureDiagnostics,
+      ...terminalMetadata,
+      ...(entry.affinity ? { affinity: entry.affinity } : {}),
+      ...(entry.transportPhase ? { transportPhase: entry.transportPhase } : {}),
+      ...(entry.terminalSource ? { terminalSource: entry.terminalSource } : {}),
       ...(entry.routeDecision ? { routeDecision: entry.routeDecision } : {}),
       ...(entry.claudeCompatibility ? { claudeCompatibility: entry.claudeCompatibility } : {}),
     });
+    recordPersistenceOutcome(entry.diagnostics, true, persistenceStarted);
   } catch {
+    recordPersistenceOutcome(entry.diagnostics, false, persistenceStarted);
     /* request logging must never fail a user request */
   }
+  retainRequestLogEntry(entry);
 }
 
 export function nextRequestLogId(_timestamp = Date.now()): string {
@@ -504,11 +571,26 @@ export function recordAttemptRequestedEffort(logCtx: RequestLogContext): void {
   }
 }
 
+const contextObservationOwners = new WeakMap<RequestLogContext, WeakSet<AdapterRequest>>();
+
+/** Copy adapter-owned bounded observations without retaining the built request. */
+function recordAdapterContext(logCtx: RequestLogContext, request: AdapterRequest): void {
+  captureSafely(() => {
+    let seen = contextObservationOwners.get(logCtx);
+    if (!seen) { seen = new WeakSet(); contextObservationOwners.set(logCtx, seen); }
+    if (seen.has(request)) return;
+    seen.add(request);
+    if (!Array.isArray(request.contextLog)) return;
+    for (const observation of request.contextLog.slice(0, 16)) recordContextTransformation(logCtx, observation);
+  });
+}
+
 /** Copy the adapter's exact outbound reasoning parameter into the durable request log. */
 export function recordAdapterReasoning(
   logCtx: RequestLogContext,
   request: AdapterRequest,
 ): void {
+  recordAdapterContext(logCtx, request);
   delete logCtx.effectiveEffort;
   delete logCtx.reasoningWireField;
   delete logCtx.reasoningWireValue;
@@ -641,6 +723,14 @@ export function readConfiguredCodexServiceTier(): string | undefined {
   }
 }
 
+/** Local root config provenance only; never an assertion about a remote client. */
+export function readConfiguredCodexEffort(): string | undefined {
+  try {
+    if (!existsSync(CODEX_CONFIG_PATH)) return undefined;
+    return readRootTomlString(readFileSync(CODEX_CONFIG_PATH, "utf-8"), "model_reasoning_effort") ?? undefined;
+  } catch { return undefined; }
+}
+
 export function catalogModelSupportsServiceTier(modelId: string, serviceTier: string | undefined): boolean | undefined {
   if (!serviceTier) return undefined;
   const requestTier = serviceTier.trim().toLowerCase() === "fast" ? "priority" : serviceTier.trim();
@@ -664,7 +754,8 @@ export function catalogModelSupportsServiceTier(modelId: string, serviceTier: st
   }
 }
 
-export function applyResponseLogMetadata(logCtx: RequestLogContext, payload: unknown): void {
+export function applyResponseLogMetadata(logCtx: RequestLogContext, payload: unknown, diagnosticObserver?: object): void {
+  recordProtocolEvent(logCtx, payload, 0, false, false, diagnosticObserver);
   if (!payload || typeof payload !== "object") return;
   const source = "response" in payload && typeof (payload as { response?: unknown }).response === "object"
     ? (payload as { response?: unknown }).response
@@ -747,7 +838,17 @@ export function usageFromResponsesPayload(usage: unknown): OcxUsage | undefined 
 
 export function inspectResponseLogJson(logCtx: RequestLogContext, text: string): void {
   try {
-    applyResponseLogMetadata(logCtx, JSON.parse(text));
+    const parsed: unknown = JSON.parse(text);
+    const response = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown> : undefined;
+    // Responses JSON has a status rather than an SSE event type. Observe its
+    // explicit terminal even when the provider supplied no usage. Translated
+    // bridge responses do not establish an upstream protocol terminal.
+    const status = response?.status;
+    const terminal = response?.object === "response" && !response.type
+      && !logCtx.usageFromBridge && logCtx.terminalSource !== "synthetic"
+      && (status === "completed" || status === "failed" || status === "incomplete");
+    applyResponseLogMetadata(logCtx, terminal ? { type: `response.${status}`, response } : parsed);
   } catch {
     logCtx.activeTierMetadata?.markResponseUnparseable();
     /* body may not be JSON; request log metadata is best-effort only */
@@ -775,11 +876,12 @@ export function inspectResponseLogSsePayloadParsed(
   logCtx: RequestLogContext,
   payload: string | null,
   parsed: unknown | undefined,
+  diagnosticObserver?: object,
 ): void {
   if (!payload || payload.trim() === "[DONE]") return;
   const debugEnabled = isUsageDebugEnabled();
   const sseAlreadyMarked = logCtx.usageDebugBodyKind === "sse";
-  if (parsed !== undefined) applyResponseLogMetadata(logCtx, parsed);
+  if (parsed !== undefined) applyResponseLogMetadata(logCtx, parsed, diagnosticObserver);
   else logCtx.activeTierMetadata?.markResponseUnparseable();
   captureUpstreamErrorParsed(logCtx, payload, parsed);
   if (debugEnabled) {
@@ -994,6 +1096,8 @@ export function addFinalRequestLog(
   const effectiveStatus = status >= 500 && logCtx.upstreamError && isClientClosedMessage(logCtx.upstreamError)
     ? 499
     : status;
+  finalizeDiagnostics(logCtx, effectiveStatus, requestId, start, meta?.closeReason === "terminal");
+  captureSafely(() => recordContextEstimate(logCtx, contextWindowForModel(logCtx.providerAdapter ?? logCtx.provider, logCtx.model)));
   // A locally assigned code wins: it names a refusal this proxy made itself, which no
   // status-plus-upstream-message classification can reconstruct.
   const errorCode = logCtx.errorCode ?? requestLogErrorCode(
@@ -1056,6 +1160,7 @@ export function addFinalRequestLog(
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
+    ...(logCtx.diagnostics ? { diagnostics: logCtx.diagnostics } : {}),
     ...(isKnownInboundTransport(logCtx.inboundTransport) ? { inboundTransport: logCtx.inboundTransport } : {}),
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
@@ -1064,6 +1169,7 @@ export function addFinalRequestLog(
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
     ...(isKnownUsageTransport(upstreamTransport) ? { upstreamTransport } : {}),
+    ...diagnosticTransports(logCtx.diagnostics),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
     ...(logCtx.requestedModel ? { requestedModel: logCtx.requestedModel } : {}),
     ...(logCtx.requestedAlias ? { requestedAlias: logCtx.requestedAlias } : {}),
@@ -1258,6 +1364,8 @@ export function beginRequestAttempt(
 ): PersistedUsageAttempt {
   return {
     ordinal,
+    attemptId: createDiagnosticAttemptId(),
+    attemptStartedAt: Date.now(),
     provider,
     model,
     adapter,
@@ -1339,6 +1447,7 @@ export function noteAttemptSend(
   recovery?: AttemptRecoveryKind,
 ): void {
   if (!attempt) return;
+  noteRecoveryDispatch(attempt, recovery);
   attempt.sendCount += 1;
   if (typeof inputTokenEstimate === "number"
     && Number.isFinite(inputTokenEstimate)
@@ -1361,6 +1470,7 @@ export function finishRequestAttempt(
   durationMs: number,
   usage?: OcxUsage,
 ): PersistedUsageAttempt {
+  finishAttemptDiagnostics(attempt, status);
   const finalized = finalizedUsage(
     attempt.adapter,
     usage ?? attempt.usage,
@@ -1370,6 +1480,9 @@ export function finishRequestAttempt(
   );
   attempt.status = status;
   attempt.durationMs = Math.max(0, durationMs);
+  attempt.attemptEndedAt = attempt.attemptStartedAt === undefined
+    ? Date.now()
+    : attempt.attemptStartedAt + attempt.durationMs;
   attempt.usageStatus = finalized.status;
   if (finalized.usage) attempt.usage = finalized.usage;
   else delete attempt.usage;

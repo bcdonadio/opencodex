@@ -1,3 +1,4 @@
+import { transportObserver, recordRequestedReasoning } from "./transaction-capture";
 import { buildOpenAIChatPassthroughRequest, createOpenAIChatAdapter } from "../adapters/openai-chat";
 import type { AdapterRequest, ProviderAdapter } from "../adapters/base";
 import {
@@ -41,7 +42,7 @@ import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport
 import type { OcxProviderTransport } from "../providers/xai-transport";
 import type { RouteResult } from "../router";
 import type { OcxConfig, OcxProviderConfig } from "../types";
-import { fetchWithHeaderTimeout, providerFetch, safeHostLabel } from "./responses/fetch-helpers";
+import { diagnosticTarget, fetchWithHeaderTimeout, providerFetch, safeHostLabel } from "./responses/fetch-helpers";
 import { linkAbortSignal } from "./responses";
 import {
   addFinalRequestLog,
@@ -154,6 +155,8 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
   logCtx.requestedServiceTier = typeof options.chatBody.service_tier === "string"
     ? options.chatBody.service_tier
     : undefined;
+  logCtx.callerServiceTier = logCtx.requestedServiceTier;
+  recordRequestedReasoning(logCtx, logCtx.requestedEffort, undefined);
 
   const upstream = new AbortController();
   const cleanupAbort = linkAbortSignal(upstream, req.signal);
@@ -242,6 +245,7 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
             connectMs,
             requestedStream,
             providerFetch(activeProvider, undefined, {
+              observeTransport: transportObserver(logCtx),
               providerName: route.providerName,
               modelId: route.modelId,
               onTransport: transport => observeRequestTransport(logCtx, transport),
@@ -267,11 +271,18 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
                 if (!headers.has("accept-encoding") && encoding) headers.set("accept-encoding", encoding);
                 if (init.signal?.aborted) throw init.signal.reason;
                 noteAttemptSend(attempt, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
-                const fetchImpl = (activeProvider as OcxProviderTransport).fetch ?? execute;
+                const customFetch = (activeProvider as OcxProviderTransport).fetch;
                 onHttpDispatch();
-                return fetchImpl(request.url, applyUpstreamRecoveryInit({
+                const wireInit = applyUpstreamRecoveryInit({
                   ...init, method: request.method, headers, body: request.body,
-                }, transportRecovery));
+                }, transportRecovery);
+                if (!customFetch) return execute(request.url, wireInit);
+                const observe = transportObserver(logCtx);
+                observe({ kind: "send", transport: "http", body: wireInit.body,
+                  target: diagnosticTarget(request.url, wireInit) });
+                const response = await customFetch(request.url, wireInit);
+                observe({ kind: "response", transport: "http", response });
+                return response;
               },
             }),
           );

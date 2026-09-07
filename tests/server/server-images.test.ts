@@ -131,6 +131,29 @@ function keyedProvider(_baseUrl = "") {
   return { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1", apiKey: "sk-platform-key" };
 }
 
+test("images diagnostics classify the actual HTTP destination", async () => {
+  const { handleImages } = await import("../../src/server/images");
+  const logCtx: import("../../src/server/request-log").RequestLogContext = { model: "", provider: "" };
+  const targets: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    targets.push(input instanceof Request ? input.url : String(input));
+    return new Response(JSON.stringify({ data: [], output: "result" }), { status: 200 });
+  }) as typeof fetch;
+  const response = await handleImages(new Request("http://localhost/v1/images/generations", {
+    method: "POST",
+    headers: { "content-type": "application/json",
+      authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`, "chatgpt-account-id": "acct-123" },
+    body: JSON.stringify({ model: "gpt-image-1", prompt: "test" }),
+  }), forwardConfig(), "generations", logCtx);
+  expect(response.status).toBe(200);
+  expect(targets).toHaveLength(1);
+  expect(new URL(targets[0]!).hostname).toBe("chatgpt.com");
+  expect(logCtx.diagnostics).toMatchObject({ upstreamHostname: "chatgpt", method: "POST" });
+  expect(logCtx.diagnostics?.endpointClass).toBe("images");
+  expect(logCtx.attempts?.[0]?.sends?.[0]?.endpointClass).toBe("images");
+  expect(logCtx.attempts?.[0]?.sendCount).toBe(1);
+});
+
 test("image response byte reader enforces the stream cap when Content-Length is understated", async () => {
   const chunks = [
     new Uint8Array(5),
