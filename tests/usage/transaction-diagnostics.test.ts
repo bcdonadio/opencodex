@@ -45,7 +45,51 @@ import type { AdapterRequest } from "../../src/adapters/base";
 import { captureAdapterExecution, finalizeDiagnostics, transportObserver } from "../../src/server/transaction-capture";
 import { providerFetch } from "../../src/server/responses/fetch-helpers";
 import { noteAttemptSend } from "../../src/server/request-log";
+import { recordDeliveredOutput } from "../../src/server/transaction-capture";
 import type { OcxProviderConfig } from "../../src/types";
+
+test("stream capture sanitizes new facts without rereading retained events", () => {
+  const ctx = { provider: "fixture", model: "fixture" } as RequestLogContext;
+  recordProtocolEvent(ctx, { type: "response.created", response: { id: "resp-fixture", model: "safe-model" } });
+  const diagnostics = ctx.diagnostics!;
+  let historicalReads = 0;
+  const first = diagnostics.events[0]!;
+  const originalType = first.type;
+  Object.defineProperty(first, "type", { configurable: true, get() { historicalReads++; return originalType; } });
+  for (let i = 0; i < 1000; i++) {
+    recordProtocolEvent(ctx, { type: "response.output_text.delta", response_id: "resp-fixture", delta: "private content" }, 8);
+    recordDeliveredOutput(ctx, "text");
+  }
+  expect(ctx.diagnostics).toBe(diagnostics);
+  expect(historicalReads).toBe(0);
+  expect(diagnostics.streamEventCount).toBe(1001);
+  expect(diagnostics.bytesReceived).toBe(8000);
+  expect(diagnostics.events.length).toBe(MAX_DIAGNOSTIC_EVENTS);
+  expect(diagnostics.droppedDiagnosticEventCount).toBe(1002 - MAX_DIAGNOSTIC_EVENTS);
+  expect(Object.keys(diagnostics.fieldAvailability).length).toBeLessThanOrEqual(64);
+  expect(JSON.stringify(diagnostics)).not.toContain("private content");
+  recordProtocolEvent(ctx, { type: "response.output_text.delta", model: "Bearer private-credential", reasoning: { effort: "invalid-effort" } }, Infinity);
+  expect(diagnostics.responseModel).toBeUndefined();
+  expect(diagnostics.responseEffort).toBeUndefined();
+  expect(diagnostics.fieldAvailability.responseModel?.status).toBe("redacted");
+  expect(diagnostics.fieldAvailability.responseEffort?.status).toBe("redacted");
+  expect(Number.isFinite(diagnostics.bytesReceived)).toBe(true);
+  recordProtocolEvent(ctx, { type: "response.output_text.delta", model: "m".repeat(80) });
+  expect(diagnostics.responseModel).toBe("m".repeat(64));
+  expect(diagnostics.fieldAvailability.responseModel?.status).toBe("truncated");
+  expect(diagnostics.captureTruncated).toBe(true);
+  recordProtocolEvent(ctx, { type: "response.failed", error: { request_id: "Bearer hidden-id", code: "private-error", message: "private content" } });
+  expect(diagnostics.terminalEventType).toBe("response.failed");
+  expect(diagnostics.events.at(-1)?.type).toBe("response.failed");
+  expect(diagnostics.fieldAvailability.upstreamRequestId?.status).toBe("redacted");
+  expect(diagnostics.fieldAvailability.upstreamErrorCode?.status).toBe("redacted");
+  expect(JSON.stringify(diagnostics)).not.toContain("hidden-id");
+  expect(JSON.stringify(diagnostics)).not.toContain("private content");
+  expect(normalizeTransactionDiagnostics(diagnostics)?.events.length).toBe(MAX_DIAGNOSTIC_EVENTS);
+  recordProtocolEvent(ctx, { type: "response.output_text.delta" }, Number.MAX_VALUE);
+  recordProtocolEvent(ctx, { type: "response.output_text.delta" }, Number.MAX_VALUE);
+  expect(diagnostics.bytesReceived).toBeUndefined();
+});
 
 test("custom adapter execution retains unobserved calls across retries and attempt changes", async () => {
   const ctx = { provider: "custom", model: "m" } as RequestLogContext;

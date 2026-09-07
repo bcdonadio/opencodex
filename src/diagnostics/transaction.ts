@@ -809,6 +809,27 @@ function assignOptionalDiagnostics(raw: Record<string, unknown>, result: Transac
   }
 }
 
+/** Capture owners pass only newly observed, fixed schema fields, never a provider object. */
+export function applyDiagnosticObservation(diagnostics: TransactionDiagnosticsV1,
+  fields: Partial<Record<"responseModel" | "responseEffort", unknown>>): void {
+  for (const field of Object.keys(fields)) delete diagnostics[field];
+  assignOptionalDiagnostics(fields, diagnostics);
+}
+
+/** Bound live provenance without rereading and redacting retained event history. */
+export function normalizeDiagnosticAvailability(result: TransactionDiagnosticsV1): void {
+  const upstreamAvailability = result.fieldAvailability.upstreamResponseId?.status;
+  if (upstreamAvailability === "redacted" || upstreamAvailability === "truncated") {
+    delete result.upstreamResponseId;
+    result.correlationConfidence = "unknown";
+  }
+  const boundedAvailability = normalizeAvailability(result.fieldAvailability);
+  result.fieldAvailability = boundedAvailability.values;
+  const availabilityStates = Object.values(result.fieldAvailability).map(value => value.status);
+  if (boundedAvailability.truncated || availabilityStates.includes("truncated")) result.captureTruncated = true;
+  if (availabilityStates.includes("redacted")) result.redactionApplied = true;
+}
+
 export function normalizeTransactionDiagnostics(raw: unknown): TransactionDiagnosticsV1 | undefined {
   if (!isPlainObject(raw)
     || raw.schemaVersion !== TRANSACTION_DIAGNOSTICS_SCHEMA_VERSION
@@ -859,16 +880,7 @@ export function normalizeTransactionDiagnostics(raw: unknown): TransactionDiagno
     recordSanitizationAvailability(result.fieldAvailability, "upstreamEventId", bounded.eventIdState, "upstream");
   }
   assignOptionalDiagnostics(raw, result);
-  const upstreamAvailability = result.fieldAvailability.upstreamResponseId?.status;
-  if (upstreamAvailability === "redacted" || upstreamAvailability === "truncated") {
-    delete result.upstreamResponseId;
-    result.correlationConfidence = "unknown";
-  }
-  const boundedAvailability = normalizeAvailability(result.fieldAvailability);
-  result.fieldAvailability = boundedAvailability.values;
-  const availabilityStates = Object.values(result.fieldAvailability).map(value => value.status);
-  if (boundedAvailability.truncated || availabilityStates.includes("truncated")) result.captureTruncated = true;
-  if (availabilityStates.includes("redacted")) result.redactionApplied = true;
+  normalizeDiagnosticAvailability(result);
   return result;
 }
 

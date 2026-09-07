@@ -1,6 +1,7 @@
 import {
   beginDiagnosticSend, createDiagnosticAttemptId, createTransactionDiagnostics, finishDiagnosticSend,
   normalizeTransactionDiagnostics, normalizeDiagnosticSend, recordDiagnosticEvent, observeDiagnosticIdentifier,
+  applyDiagnosticObservation, normalizeDiagnosticAvailability,
   sanitizeDiagnosticError,
   MAX_DIAGNOSTIC_SENDS,
   type DiagnosticEventTypeV1, type DiagnosticSendV1, type TransactionDiagnosticsV1,
@@ -530,8 +531,10 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
         d.lastEventAt = Date.now();
       }
     }
-    if (bytes > 0) {
-      d.bytesReceived = Number(d.bytesReceived ?? 0) + bytes;
+    if (Number.isFinite(bytes) && bytes > 0) {
+      const received = Number(d.bytesReceived ?? 0) + bytes;
+      if (Number.isFinite(received)) d.bytesReceived = received;
+      else delete d.bytesReceived;
       if (send) send.bytesReceived = Number(send.bytesReceived ?? 0) + bytes;
     }
     if (!synthetic && type) {
@@ -540,8 +543,8 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
       if (Number.isSafeInteger(p.sequence_number) && p.sequence_number >= 0) d.lastEventSequence = p.sequence_number;
     }
     if (!synthetic && type === "response.created") d.upstreamRequestAccepted = true;
-    if (response.model) d.responseModel = response.model;
-    if (response.reasoning?.effort) d.responseEffort = response.reasoning.effort;
+    if (response.model) applyDiagnosticObservation(d, { responseModel: response.model });
+    if (response.reasoning?.effort) applyDiagnosticObservation(d, { responseEffort: response.reasoning.effort });
     if (!synthetic) {
       captureUpstreamPayloadFacts(d, payload);
       if (response.usage && d.usageSource === "upstream") {
@@ -566,7 +569,8 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
       if (!synthetic && state?.terminalType) d.duplicateTerminalSuppressed = true;
       else {
         if (!synthetic && state) { state.terminalType = type; state.terminalObserver = observer; }
-        d.terminalEventType = type; clocks.get(diagnostics(ctx))!.terminal = performance.now();
+        d.terminalEventType = type;
+        clocks.get(diagnostics(ctx))!.terminal = performance.now();
       }
       if (type !== "response.completed" && clocks.get(d)!.output !== undefined) d.outputDeliveredBeforeFailure = true;
     }
@@ -585,7 +589,9 @@ export function recordProtocolEvent(ctx: RequestLogContext, payload: unknown, by
     if (send && !synthetic && type === "response.created") send.upstreamRequestAccepted = true;
     if (send && terminal) finishDiagnosticSend(send, { endedAt: Date.now(), status: type === "response.completed" ? 200
       : type === "response.incomplete" ? 502 : httpStatusFromTerminalError(response.error ?? p.error) });
-    clean(ctx);
+    // IDs, structural facts and each appended event are sanitized at observation.
+    // Full record normalization belongs to finalization and public/durable boundaries.
+    normalizeDiagnosticAvailability(d);
   });
 }
 
@@ -600,8 +606,8 @@ export function recordDeliveredOutput(ctx: RequestLogContext, kind?: string): vo
     const known: Record<string, string> = { text: "text", reasoning: "reasoning", tool_call: "tool_call", refusal: "refusal", audio: "audio", image: "image",
       "response.output_text.delta": "text", "response.reasoning_summary_text.delta": "reasoning",
       "response.function_call_arguments.delta": "tool_call", "response.refusal.delta": "refusal" };
+    // This is an internal enum, not provider text; no retained facts changed.
     if (kind && Object.hasOwn(known, kind)) d.lastOutputKind = known[kind];
-    clean(ctx);
   });
 }
 
