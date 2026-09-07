@@ -1675,7 +1675,7 @@ test("log cursors remain behind management admission and origin gates", async ()
     expect(initial.status).toBe(200);
     const body = await initial.json() as { cursor: string };
     expect(typeof body.cursor).toBe("string");
-    for (const suffix of ["", `?cursor=${body.cursor}`, "?cursor=malformed"]) {
+    for (const suffix of ["", `?cursor=${body.cursor}`, "?cursor=malformed", "?view=summary", "/detail?requestId=missing", "/detail"]) {
       const url = new URL(`/api/logs${suffix}`, server.url);
       for (const credential of [undefined, "data-secret", "wrong-admin"]) {
         const response = await fetch(url, { headers: credential ? { "x-opencodex-api-key": credential } : {} });
@@ -1687,7 +1687,7 @@ test("log cursors remain behind management admission and origin gates", async ()
       await foreign.text();
       for (const headers of acceptedHeaders) {
         const allowed = await fetch(url, { headers });
-        expect(allowed.status).toBe(suffix.includes("malformed") ? 400 : 200);
+        expect(allowed.status).toBe(suffix.includes("malformed") || suffix === "/detail" ? 400 : suffix.startsWith("/detail?") ? 404 : 200);
         await allowed.text();
       }
     }
@@ -1701,7 +1701,7 @@ test("unavailable management authority rejects log cursors before parsing", asyn
   const server = startServer(0, { managementAuthState: { available: false, reason: "fixture unavailable" } });
   try {
     const legacy = Buffer.from(JSON.stringify({ v: 1, t: 1, id: "fixture" })).toString("base64url");
-    for (const suffix of ["", `?cursor=${legacy}`, "?cursor=malformed"]) {
+    for (const suffix of ["", `?cursor=${legacy}`, "?cursor=malformed", "?view=summary", "/detail?requestId=missing", "/detail"]) {
       const response = await fetch(new URL(`/api/logs${suffix}`, server.url), {
         headers: { "x-opencodex-api-key": "admin-secret" },
       });

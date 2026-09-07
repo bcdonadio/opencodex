@@ -103,8 +103,35 @@ function refreshedUsageSummary<T extends UsageSummary & { historyTruncated: bool
   return { ...summary, since, generatedAt: now };
 }
 
+/** Copy metadata without even reading excluded evidence properties. */
+function withoutLogEvidence<T extends object>(value: T, excluded: readonly string[]): T {
+  return Object.fromEntries(Object.keys(value)
+    .filter(key => !excluded.includes(key))
+    .map(key => [key, (value as Record<string, unknown>)[key]])) as T;
+}
+
+function requestLogSummaryDto(entry: RequestLogEntry): Record<string, unknown> {
+  const summary = withoutLogEvidence(entry, ["diagnostics", "attempts"]);
+  if (entry.attempts) summary.attempts = entry.attempts.map(attempt => withoutLogEvidence(attempt, ["sends"]));
+  // Pricing uses the route trace; keep it intact while computing display metrics.
+  return { ...requestLogDto(summary), ...(entry.requestId ? { detailAvailable: true } : {}) };
+}
+
 export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, syncClaudeAgentDefsBestEffort } = ctx;
+
+  if (url.pathname === "/api/logs/detail" && req.method === "GET") {
+    const invalidId = () => jsonResponse({ error: { code: "invalid_request_id", message: "invalid request ID" } }, 400);
+    // URLSearchParams replaces malformed UTF-8; reject it before that lossy decode.
+    try { decodeURIComponent(url.search); } catch { return invalidId(); }
+    const ids = url.searchParams.getAll("requestId");
+    const requestId = ids[0];
+    if (ids.length !== 1 || !requestId?.trim() || requestId.length > 1024 || /[\u0000-\u001f\u007f]/.test(requestId)) return invalidId();
+    // The live ring is bounded. Never rebuild the durable history index for a click.
+    const entry = getRequestLogEntries().find(entry => entry.requestId === requestId);
+    if (!entry) return jsonResponse({ error: { code: "not_found", message: "request detail is no longer available" } }, 404);
+    return jsonResponse(requestLogDto(entry));
+  }
 
   if (url.pathname === "/api/logs" && req.method === "GET") {
     const rawCursor = url.searchParams.get("cursor");
@@ -114,7 +141,9 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     }
     const all = getRequestLogEntries();
     const total = filteredRequestLogCount(all, url.searchParams);
-    const logs = filterRequestLogs(all, url.searchParams).map(requestLogDto);
+    const logs = filterRequestLogs(all, url.searchParams).map(
+      url.searchParams.get("view") === "summary" ? requestLogSummaryDto : requestLogDto,
+    );
     const poll = selectRequestLogPoll(logs, url.searchParams, cursor);
     return jsonResponse({
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,

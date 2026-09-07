@@ -28,6 +28,8 @@ export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD";
 export type ExemptionReason =
   /** Invalidates dashboard state; the CLI reads the underlying resource directly. */
   | "gui-invalidation"
+  /** Lazy dashboard projection; the CLI already receives this evidence in full rows. */
+  | "dashboard-projection"
   /** Requires a dashboard browser session. Includes the user-consent star boundary. */
   | "session-only"
   /** Deliberately returns 405; there is nothing to drive. */
@@ -214,6 +216,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/debug/logs", module: "server/management/logs-usage-routes", mutates: false },
   { method: "GET", path: "/api/debug/usage-logs", module: "server/management/logs-usage-routes", mutates: false },
   { method: "GET", path: "/api/logs", module: "server/management/logs-usage-routes", mutates: false },
+  { method: "GET", path: "/api/logs/detail", module: "server/management/logs-usage-routes", mutates: false, exempt: { reason: "dashboard-projection", why: "The dashboard polls compact /api/logs?view=summary rows and lazily fetches one live row here. ocx logs already receives the same full evidence through its existing GET /api/logs request; no separate CLI verb is needed." } },
   { method: "GET", path: "/api/storage/cleanup-policy", module: "server/management/logs-usage-routes", mutates: false },
   { method: "GET", path: "/api/storage/cleanup-policy/test-stream", module: "server/management/logs-usage-routes", mutates: false, exempt: { reason: "test-seam", why: "Opt-in streaming seam declared at src/storage/policy-job.ts:71." } },
   { method: "GET", path: "/api/storage/trash", module: "server/management/logs-usage-routes", mutates: false },

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, jest, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { Window } from "happy-dom";
 import { act } from "react";
 import type { Root } from "react-dom/client";
@@ -147,6 +147,8 @@ test("Logs: diagnostics disclosure preserves table and exports only the selected
     summary.focus();
     expect(document.activeElement).toBe(summary);
     expect(container.querySelector("table")!.textContent).toBe(table);
+    expect(disclosure.querySelector("dl")).toBeNull();
+    await openDisclosures(disclosure as HTMLDetailsElement);
     for (const value of ["Raw HTTP status", "200", "Mapped status", "400", "resp-created", "Output before failure", "Terminal source", "Transport phase", "terminal_without_usage", "Truncated", "Not observed"]) expect(disclosure.textContent).toContain(value);
     expect(disclosure.textContent).not.toContain("DO-NOT-RENDER");
     for (const value of ["contextUsageRatioEstimate", "0.375", "closeReason", "body_stall", "policyFallbackOutcome", "failed"]) expect(disclosure.textContent).toContain(value);
@@ -173,6 +175,7 @@ test("Logs: failed export keeps details open and shows a localized error", async
   try {
     await flushMicrotasks();
     await act(async () => { container.querySelector<HTMLButtonElement>(".log-detail-btn")!.click(); });
+    await openDisclosures(container.querySelector<HTMLDetailsElement>("dialog .log-diagnostics")!);
     const button = [...container.querySelectorAll<HTMLButtonElement>("dialog button")].find(el => el.textContent === "Download support bundle");
     expect(button).toBeDefined();
     await act(async () => { button!.click(); });
@@ -189,6 +192,42 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { "content-type": "application/json" },
   });
 }
+
+async function openDisclosures(element: HTMLDetailsElement): Promise<void> {
+  await act(async () => { element.open = true; element.dispatchEvent(new testWindow.Event("toggle")); });
+  for (const child of element.querySelectorAll<HTMLDetailsElement>("details")) {
+    if (!child.open) await openDisclosures(child);
+  }
+}
+
+test("Logs: summary opens full details on demand without mounting hidden raw JSON", async () => {
+  let finish!: (response: Response) => void;
+  const requests: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = String(input); requests.push(url);
+    if (url.includes("/api/logs/detail?")) return new Promise<Response>(resolve => { finish = resolve; });
+    if (url.includes("/api/logs?")) return jsonResponse([{ ...sampleLog, detailAvailable: true }]);
+    return jsonResponse({});
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    expect(requests.filter(url => url.includes("/detail?")).length).toBe(0);
+    await act(async () => container.querySelector<HTMLButtonElement>(".log-detail-btn")!.click());
+    expect(container.querySelector("dialog [role=status]")?.textContent).toBe("Loading…");
+    expect(container.querySelector("dialog .log-diagnostics")).toBeNull();
+    expect(container.querySelector("dialog .log-detail-raw")).toBeNull();
+    await act(async () => finish(jsonResponse({ ...diagnosticLog, requestId: sampleLog.requestId })));
+    expect(requests.filter(url => url.includes("/detail?"))).toEqual(["http://localhost/api/logs/detail?requestId=req-1"]);
+    expect(container.querySelector("dialog [role=status]")).toBeNull();
+    const raw = container.querySelector<HTMLDetailsElement>("dialog .log-detail-raw")!;
+    expect(raw.querySelector("pre")).toBeNull();
+    await act(async () => { raw.open = true; raw.dispatchEvent(new testWindow.Event("toggle")); });
+    expect(raw.querySelector("pre")!.textContent).toContain("tx-selected");
+    expect(raw.textContent).not.toContain("DO-NOT-RENDER");
+    await act(async () => { raw.open = false; raw.dispatchEvent(new testWindow.Event("toggle")); });
+    expect(raw.querySelector("pre")).toBeNull();
+  } finally { await act(async () => root.unmount()); }
+});
 
 function installLayoutStubs(win: Window): void {
   const proto = win.HTMLElement.prototype as unknown as HTMLElement;
@@ -1131,6 +1170,116 @@ function cursorLogEnvelope(generatedAt: unknown, logs: unknown[], cursor: string
   return { ...proxyLogEnvelope(generatedAt, logs), cursor, reset };
 }
 
+test("Logs: a rich history seed is parsed once across filter renders and empty polls", async () => {
+  const rows = Array.from({ length: 1200 }, (_, index) => ({
+    ...diagnosticLog, requestId: `rich-${index}`, timestamp: sampleLog.timestamp + index,
+  }));
+  const rawSeed = JSON.stringify(rows);
+  sessionStorage.setItem("ocx.logs.list.v1:http://localhost", rawSeed);
+  const originalParse = JSON.parse;
+  let seedParses = 0;
+  const parse = spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+    if (text === rawSeed) seedParses++;
+    return originalParse(text, reviver);
+  });
+  let first = true;
+  globalThis.fetch = (async input => {
+    if (!String(input).includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    const incoming = first ? rows : [];
+    first = false;
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, incoming, "rich"));
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    await changeLogSelect(container, "Model", "gpt-test");
+    await changeLogSelect(container, "Model", "");
+    await advanceSilentRefresh();
+    expect(seedParses).toBe(1);
+    expect(container.textContent).not.toContain("DO-NOT-RENDER");
+  } finally {
+    parse.mockRestore();
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: an unchanged delta does not serialize or write the retained history", async () => {
+  let first = true;
+  globalThis.fetch = (async input => {
+    if (!String(input).includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    const incoming = first ? [diagnosticLog] : [];
+    first = false;
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, incoming, "same"));
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  const stringify = spyOn(JSON, "stringify");
+  const write = spyOn(sessionStorage, "setItem");
+  try {
+    await advanceSilentRefresh();
+    expect(write.mock.calls.filter(([key]) => key === "ocx.logs.list.v1:http://localhost")).toHaveLength(0);
+    expect(stringify.mock.calls.filter(([value]) => value?.requestId === diagnosticLog.requestId
+      || (Array.isArray(value) && value.some(row => row?.requestId === diagnosticLog.requestId)))).toHaveLength(0);
+    expect(visibleRequestIds(container)).toEqual([diagnosticLog.requestId]);
+  } finally {
+    stringify.mockRestore();
+    write.mockRestore();
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: a large legacy history caches a bounded tail with complete evidence", async () => {
+  const rows = Array.from({ length: 1200 }, (_, index) => ({
+    ...sampleLog, requestId: `legacy-${index}`, timestamp: sampleLog.timestamp + index,
+    model: index === 0 ? "older-model" : sampleLog.model,
+    diagnostics: {
+      schemaVersion: 1, diagnosticCaptureVersion: 1, transactionId: `tx-${index}`,
+      recordKind: "request", receivedAt: sampleLog.timestamp, timestampSource: "proxy_wall_clock",
+      correlationSource: "upstream", correlationConfidence: "direct", retentionClass: "usage_ledger",
+      redactionVersion: 1, redactionApplied: true, captureTruncated: false, droppedDiagnosticEventCount: 0,
+      events: diagnosticLog.diagnostics.events, fieldAvailability: diagnosticLog.diagnostics.fieldAvailability,
+    },
+  }));
+  globalThis.fetch = (async input => String(input).includes("/api/logs")
+    ? jsonResponse(rows) : jsonResponse({ timeZone: "UTC" })) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    const cached = JSON.parse(sessionStorage.getItem("ocx.logs.list.v1:http://localhost")!);
+    expect(cached).toHaveLength(100);
+    expect(cached[0].requestId).toBe("legacy-1100");
+    expect(cached.at(-1)).toEqual(sanitizeLogEvidence(rows.at(-1)!));
+    // Bounding only the persisted seed must not remove older live rows.
+    await changeLogSelect(container, "Model", "older-model");
+    expect(visibleRequestIds(container)).toEqual(["legacy-0"]);
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: oversized evidence clears the old seed while current rows remain available", async () => {
+  const key = "ocx.logs.list.v1:http://localhost";
+  sessionStorage.setItem(key, JSON.stringify([sampleLog]));
+  const row = {
+    ...diagnosticLog,
+    diagnostics: {
+      ...diagnosticLog.diagnostics,
+      events: Array.from({ length: 64 }, (_, index) => ({
+        eventSequence: index + 1, type: "response.created", at: sampleLog.timestamp,
+        source: "upstream", responseId: "r".repeat(500), eventId: "e".repeat(500),
+      })),
+    },
+  };
+  globalThis.fetch = (async input => String(input).includes("/api/logs")
+    ? jsonResponse(Array.from({ length: 100 }, (_, index) => ({ ...row, requestId: `large-${index}` })))
+    : jsonResponse({ timeZone: "UTC" })) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    expect(sessionStorage.getItem(key) === null).toBe(true);
+    expect(visibleRequestIds(container)).toContain("large-99");
+    expect(container.textContent).not.toContain("Could not load request logs.");
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
 test("Logs: append, empty delta, mutation reset and legacy fallback keep the complete window", async () => {
   const urls: string[] = [];
   let step = 0;
@@ -1152,7 +1301,7 @@ test("Logs: append, empty delta, mutation reset and legacy fallback keep the com
   const { root, container } = await mountLogs();
   try {
     await flushMicrotasks();
-    expect(urls[0]).toBe("http://localhost/api/logs?limit=2000");
+    expect(urls[0]).toBe("http://localhost/api/logs?limit=2000&view=summary");
     step = 1;
     await advanceSilentRefresh();
     expect(urls.at(-1)).toContain("cursor=c0");
@@ -1177,7 +1326,7 @@ test("Logs: append, empty delta, mutation reset and legacy fallback keep the com
     expect(visibleRequestIds(container)).toEqual(["req-2"]);
     step = 6;
     await advanceSilentRefresh();
-    expect(urls.at(-1)).toBe("http://localhost/api/logs?limit=2000");
+    expect(urls.at(-1)).toBe("http://localhost/api/logs?limit=2000&view=summary");
     expect(visibleRequestIds(container)).toEqual(["req-1"]);
   } finally {
     await act(async () => { root.unmount(); });
@@ -1233,7 +1382,7 @@ test("Logs: malformed polls preserve cursor/cache, back off, and explicit retry 
     failing = false;
     await act(async () => { clickRetry(container); });
     await flushMicrotasks();
-    expect(urls.at(-1)).toBe("http://localhost/api/logs?limit=2000");
+    expect(urls.at(-1)).toBe("http://localhost/api/logs?limit=2000&view=summary");
     expectTableLoaded(container, "gpt-test");
   } finally {
     await act(async () => { root.unmount(); });
@@ -1260,7 +1409,7 @@ test("Logs: A to B to A and remount start without a cached cursor", async () => 
       const start = urls.length;
       await renderLogsAt(first.root, `http://proxy-${name}`);
       await advanceSilentRefresh();
-      expect(urls[start]).toBe(`http://proxy-${name}/api/logs?limit=2000`);
+      expect(urls[start]).toBe(`http://proxy-${name}/api/logs?limit=2000&view=summary`);
       expect(visibleRequestIds(first.container)).toEqual([name]);
     }
   } finally {
@@ -1270,7 +1419,7 @@ test("Logs: A to B to A and remount start without a cached cursor", async () => 
   const remount = await mountLogs("http://proxy-a");
   try {
     await advanceSilentRefresh();
-    expect(urls[start]).toBe("http://proxy-a/api/logs?limit=2000");
+    expect(urls[start]).toBe("http://proxy-a/api/logs?limit=2000&view=summary");
     expect(visibleRequestIds(remount.container)).toEqual(["a"]);
   } finally {
     await act(async () => { remount.root.unmount(); });

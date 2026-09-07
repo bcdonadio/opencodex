@@ -7,7 +7,7 @@ import { hashLogConversationQuery } from "../log-conversation-id";
 import { statusCodeInfo } from "../status-codes";
 import { IconX } from "../icons";
 import { modelLabel } from "../model-display";
-import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
+import { clearSessionListCache, readSessionListCache } from "../session-list-cache";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import { EmptyState, Notice } from "../ui";
@@ -30,12 +30,34 @@ import {
   validCachedRouteDecision,
 } from "./log-route-decision";
 import { mergeLogDelta, parseLogPollResponse } from "./log-poll";
+import { useLogDetail } from "./log-detail-resource";
 
 function logsCacheKey(apiBase: string): string {
   return `ocx.logs.list.v1:${apiBase}`;
 }
 
 const EMPTY_LOGS: LogEntry[] = [];
+
+/** A revisit seed is a small intact tail; the resource retains the full live window. */
+function writeLogsSessionSeed(key: string, rows: readonly LogEntry[]): void {
+  const serializedRows: string[] = [];
+  let codeUnits = 2; // Array brackets; storage limits count UTF-16 code units.
+  try {
+    for (const row of rows.slice(-100)) {
+      const serialized = JSON.stringify(row);
+      codeUnits += serialized.length + (serializedRows.length ? 1 : 0);
+      if (codeUnits > 256 * 1024) {
+        clearSessionListCache(key);
+        return;
+      }
+      serializedRows.push(serialized);
+    }
+    sessionStorage.setItem(key, `[${serializedRows.join(",")}]`);
+  } catch {
+    // A failed replacement must not leave unrelated older requests as a seed.
+    clearSessionListCache(key);
+  }
+}
 
 interface UsageBreakdown {
   inputTokens: number;
@@ -138,6 +160,8 @@ interface LogAttempt {
 }
 
 export interface LogEntry {
+  /** Full diagnostic evidence is fetched only when this summary is selected. */
+  detailAvailable?: boolean;
   diagnostics?: unknown;
   requestId?: string;
   timestamp: number;
@@ -409,7 +433,12 @@ function summarizeFilteredLogs(entries: LogEntry[]): {
 export default function Logs({ apiBase }: { apiBase: string }) {
   const { t, locale } = useI18n();
   const resourceKey = logsCacheKey(apiBase);
-  const cachedLogs = validCachedLogs(readSessionListCache<LogEntry[]>(resourceKey));
+  // A session snapshot only seeds this resource. Parsing and validating its full
+  // diagnostic history again on filter changes or polling renders blocks input.
+  const cachedLogs = useMemo(
+    () => validCachedLogs(readSessionListCache<LogEntry[]>(resourceKey)),
+    [resourceKey],
+  );
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [failureStreak, setFailureStreak] = useState<{ error: unknown; count: number }>(
     { error: null, count: 0 },
@@ -531,7 +560,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
     if (retry.failures > 0 && Date.now() < retry.nextAttemptAt) throw retry.error;
     const poll = logPollRef.current;
     const cursor = poll.key === resourceKey ? poll.cursor : null;
-    const url = `${apiBase}/api/logs?limit=2000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const url = `${apiBase}/api/logs?limit=2000&view=summary${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     try {
       const res = await fetch(url, { signal });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
@@ -548,24 +577,27 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       // Reconcile when the accepted snapshot changes, using the latest user state
       // rather than filters captured when the request started. Persist disappearance
       // as All so a later ring cannot resurrect a cleared selection.
-      const options = extractLogFilterOptions(next);
-      setFilters(previous => {
-        const model = previous.model.trim().toLowerCase();
-        const provider = previous.provider.trim().toLowerCase();
-        const nextModel = model
-          ? options.models.find(option => option.trim().toLowerCase() === model) ?? ""
-          : "";
-        const nextProvider = provider
-          ? options.providers.find(option => option.trim().toLowerCase() === provider) ?? ""
-          : "";
-        if (previous.model === nextModel && previous.provider === nextProvider) return previous;
-        return { ...previous, model: nextModel, provider: nextProvider };
-      });
+      const rowsChanged = next !== poll.rows;
+      if (rowsChanged) {
+        const options = extractLogFilterOptions(next);
+        setFilters(previous => {
+          const model = previous.model.trim().toLowerCase();
+          const provider = previous.provider.trim().toLowerCase();
+          const nextModel = model
+            ? options.models.find(option => option.trim().toLowerCase() === model) ?? ""
+            : "";
+          const nextProvider = provider
+            ? options.providers.find(option => option.trim().toLowerCase() === provider) ?? ""
+            : "";
+          if (previous.model === nextModel && previous.provider === nextProvider) return previous;
+          return { ...previous, model: nextModel, provider: nextProvider };
+        });
+      }
       const sample = logsClockAnchor(parsed.generatedAt, receivedAt);
       if (sample) clock.anchor = sample;
       setFilterClockNow(logsClockNow(clock.anchor, receivedAt, Date.now()));
       logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
-      writeSessionListCache(resourceKey, next);
+      if (rowsChanged) writeLogsSessionSeed(resourceKey, next);
       return next;
     } catch (error) {
       if (!isCurrent()) throw error;
@@ -947,6 +979,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
 
       {detail && (
         <LogDetailDialog
+          key={`${apiBase}:${detail.requestId}:${detail.timestamp}`}
           apiBase={apiBase}
           detail={detail}
           detailInfo={detailInfo}
@@ -979,7 +1012,7 @@ function useModalDialog(open: boolean) {
 }
 
 function LogDetailDialog({
-  apiBase, detail, detailInfo, localeCode, localeTag, serverTimeZone, t, accountAliases, onClose, onFilterConversation,
+  apiBase, detail: summary, localeCode, localeTag, serverTimeZone, t, accountAliases, onClose, onFilterConversation,
 }: {
   apiBase: string;
   detail: LogEntry;
@@ -992,8 +1025,12 @@ function LogDetailDialog({
   onClose: () => void;
   onFilterConversation?: (conversationId: string) => void;
 }) {
+  const detailResource = useLogDetail(apiBase, summary);
+  const detail = detailResource.entry;
+  const detailInfo = statusCodeInfo(detail.status, localeCode);
   const dialogRef = useModalDialog(true);
   const [copied, setCopied] = useState(false);
+  const [rawOpen, setRawOpen] = useState(false);
   const tokenSplit = cacheSplit(detail);
   const cost = detail.displayMetrics?.cost;
   const reasoningWire = reasoningWireLabel(detail);
@@ -1070,7 +1107,12 @@ function LogDetailDialog({
           </div>
         </section>
 
-        <LogDiagnosticsDetails key={`${apiBase}:${detail.requestId}`} diagnostics={detail.diagnostics} attempts={detail.attempts} requestId={detail.requestId} apiBase={apiBase} />
+        {detailResource.loading ? <p role="status">{t("common.loading")}</p>
+          : detailResource.error ? <div role="alert">
+            <p>{t("logs.loadError")}</p>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={detailResource.retry}>{t("common.retry")}</button>
+          </div>
+          : <LogDiagnosticsDetails key={`${apiBase}:${detail.requestId}`} diagnostics={detail.diagnostics} attempts={detail.attempts} requestId={detail.requestId} apiBase={apiBase} />}
 
         <section className="log-detail-section" aria-labelledby="log-detail-route">
           <h4 id="log-detail-route" className="log-detail-section-title">{t("logs.detail.route.section")}</h4>
@@ -1243,10 +1285,10 @@ function LogDetailDialog({
           )}
         </section>
 
-        <details className="log-detail-raw">
+        {!detailResource.loading && !detailResource.error && <details className="log-detail-raw" onToggle={event => setRawOpen(event.currentTarget.open)}>
           <summary>{t("logs.detailRaw")}</summary>
-          <pre className="log-detail-json">{JSON.stringify(detail, null, 2)}</pre>
-        </details>
+          {rawOpen && <pre className="log-detail-json">{JSON.stringify(detail, null, 2)}</pre>}
+        </details>}
       </div>
     </dialog>
   );
