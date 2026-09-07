@@ -945,6 +945,8 @@ const asideProfileSyncSchema = z.object({
 const agentTaskRecoverySchema = z.object({
   enabled: z.boolean().optional(),
   model: z.string().trim().min(1).optional(),
+  reasoningEffort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
+  serviceTier: z.enum(["auto", "default", "flex", "priority"]).optional(),
   timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
   cacheEntries: z.number().int().min(1).max(512).optional(),
 }).strict();
