@@ -125,6 +125,9 @@ ocx logout <provider>
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport with an opt-in HTTP/1.1 compatibility path, and account-filtered model discovery. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
 
+Google Antigravity account and provider quota probes use fixed Google accounting endpoints, including the models fallback. They support transparent Fake-IP DNS for those destinations while retaining TLS verification, redirect rejection and private-address checks. A custom provider base URL changes model requests, not quota destinations; `NO_PROXY` continues to select the direct-route policy.
+
+
 After a terminal Nous refresh failure, run `ocx login nous` to reauthenticate.
 
 For the canonical Kimi Coding Plan presets (`kimi` account login and `kimi-code` API key),
@@ -737,3 +740,17 @@ no quota bars rather than a fabricated one, and windows the plan does not report
 absent instead of rendering as 0%.
 
 A provider using a non-canonical `baseUrl` is never sent the key for this probe.
+
+### xAI Responses continuations
+
+Grok 4.5 and 4.6 subscription routes use native Responses. OpenCodex adapts
+continuation instructions to xAI's request format while preserving the current
+instructions and tool results. API-key routes can also select `openai-responses`.
+
+When an encrypted subagent assignment has been recovered, `store: false` tool
+continuations use a separate memory-only replay cache bound to the authenticated
+recovery credential and client task. Recovered plaintext never
+enters the response snapshot or spill files. This cache is bounded to 128 entries
+and 8 MiB, with a 15-minute expiry inherited across the continuation chain; a proxy
+restart clears it. Start a fresh subagent if its continuation state has expired
+the recovery credential changed, or the proxy restarted.

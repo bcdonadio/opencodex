@@ -207,8 +207,8 @@ try {
   if (readRootTomlString(injected, "openai_base_url") !== `http://127.0.0.1:${port}/v1`) {
     throw new Error("runtime Codex injection does not reference the active proxy port");
   }
-  if (readRootTomlString(injected, "model_catalog_json") !== sync.catalogPath) {
-    throw new Error("runtime Codex injection does not reference the generated catalog");
+  if (readRootTomlString(injected, "model_catalog_json") !== null) {
+    throw new Error("runtime Codex injection unexpectedly pins the generated catalog locally");
   }
   const version = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
   process.stdout.write(JSON.stringify({ type: "ready", pid: process.pid, port, version, catalogReady: true }) + "\n");

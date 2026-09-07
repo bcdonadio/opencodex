@@ -62,6 +62,15 @@ export interface ProviderFetchOptions {
   onCodexWsQuota?: CodexWsQuotaObserver;
   /** Synchronous admission at actual credential dispatch, after pacing/backoff. */
   beforeDispatch?: (headers: Headers) => void;
+  /** Called only after a primary request is actually dispatched on the wire. */
+  onTransport?: (transport: "http" | "websocket") => void;
+  /** Revalidate/rebuild a queued request at its physical send boundary, after pacing. */
+  dispatchOverride?: (
+    input: Parameters<typeof globalThis.fetch>[0],
+    init: RequestInit,
+    execute: typeof globalThis.fetch,
+    onHttpDispatch: () => void,
+  ) => Promise<Response>;
 }
 
 export type TransportObservation =
@@ -117,13 +126,25 @@ export function providerFetch(
   };
   const httpFetch = Object.assign(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
-      options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
-      const wireInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
-      notifyTransport(options.observeTransport, { kind: "send", transport: "http", body: init?.body,
-        target: options.observeTransport ? diagnosticTarget(input, init) : undefined });
-      const response = await base(input, wireInit);
-      notifyTransport(options.observeTransport, { kind: "response", transport: "http", response });
-      return response;
+      const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
+      options.beforeDispatch?.(new Headers(dispatchInit.headers ?? (input instanceof Request ? input.headers : undefined)));
+      // Recovery may rebuild the destination and body at the dispatch boundary.
+      // Observe the executor's arguments so diagnostics describe that actual send.
+      const execute = Object.assign(async (wireInput: Parameters<typeof globalThis.fetch>[0], wireInit?: RequestInit) => {
+        notifyTransport(options.observeTransport, { kind: "send", transport: "http", body: wireInit?.body,
+          target: options.observeTransport ? diagnosticTarget(wireInput, wireInit) : undefined });
+        const response = await base(wireInput, wireInit);
+        notifyTransport(options.observeTransport, { kind: "response", transport: "http", response });
+        return response;
+      }, { preconnect });
+      const onHttpDispatch = (): void => {
+        try { options.onTransport?.("http"); } catch { /* telemetry is observational */ }
+      };
+      if (options.dispatchOverride) {
+        return options.dispatchOverride(input, dispatchInit, execute, onHttpDispatch);
+      }
+      onHttpDispatch();
+      return execute(input, dispatchInit);
     },
     { preconnect },
   ) as typeof globalThis.fetch;
@@ -138,6 +159,7 @@ export function providerFetch(
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
       return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch,
+        options.onTransport,
         options.observeTransport ? event => notifyTransport(options.observeTransport,
           event.kind === "send" && event.transport === "websocket"
             ? { ...event, target: diagnosticTarget(input, init) } : event) : undefined);

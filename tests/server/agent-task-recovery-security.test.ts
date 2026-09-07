@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { resetAgentTaskRecoveryState } from "../../src/server/responses/agent-task-recovery";
 import {
+  discardEncryptedAgentTaskRecovery,
+  recoverEncryptedAgentTask,
+  recoverEncryptedAgentTaskWithResult,
+  resetAgentTaskRecoveryState,
+  restoreCachedEncryptedAgentTasks,
+} from "../../src/server/responses/agent-task-recovery";
+import {
+  agentMessage,
   codexHeaders,
   encryptedInput,
   fakeChatGptJwt,
@@ -22,6 +29,55 @@ describe("agent task recovery security", () => {
     globalThis.fetch = originalFetch;
     Date.now = realDateNow;
     resetAgentTaskRecoveryState();
+  });
+
+  test("diagnoses unsupported envelopes before admission without exposing their content", async () => {
+    const req = new Request("http://localhost/v1/responses"); // No credentials.
+    let fetches = 0;
+    globalThis.fetch = (async () => { fetches += 1; throw new Error("must-not-fetch"); }) as typeof fetch;
+    const header = { type: "input_text", text: ROUTING_ENVELOPE };
+    const encrypted = { type: "encrypted_content", encrypted_content: FERNET_TASK };
+    const inputs = [
+      agentMessage([header, encrypted, encrypted]),
+      agentMessage([header, { ...encrypted, encrypted_content: FERNET_TASK.slice(0, 50) },
+        { ...encrypted, encrypted_content: FERNET_TASK.slice(50) }]),
+      agentMessage([{ ...header, text: ROUTING_ENVELOPE.replace("NEW_TASK", "new_task") }, encrypted]),
+      encryptedInput({ ciphertext: "unsupported-ciphertext-sentinel" }),
+    ];
+    for (const input of inputs) {
+      const original = structuredClone(input);
+      expect(await recoverEncryptedAgentTaskWithResult(req, input, {}, routedConfig()))
+        .toEqual({ recovered: false, reason: "unsupported_envelope" });
+      expect(await recoverEncryptedAgentTask(req, input, {}, routedConfig())).toBe(false);
+      expect(input).toEqual(original);
+    }
+    expect(fetches).toBe(0);
+  });
+
+  test("typed admission denial cannot read or discard an authenticated cached assignment", async () => {
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const config = routedConfig();
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches += 1;
+      return new Response(recoverySse("private-assignment-sentinel"));
+    }) as typeof fetch;
+    expect(await recoverEncryptedAgentTaskWithResult(req, encryptedInput(), {}, config))
+      .toEqual({ recovered: true });
+
+    const deniedHeaders = codexHeaders();
+    deniedHeaders.set("chatgpt-account-id", "mismatched-account-sentinel");
+    const denied = new Request(req.url, { headers: deniedHeaders });
+    const input = encryptedInput();
+    const original = structuredClone(input);
+    expect(await recoverEncryptedAgentTaskWithResult(denied, input, {}, config))
+      .toEqual({ recovered: false, reason: "admission_denied" });
+    expect(await recoverEncryptedAgentTask(denied, input, {}, config)).toBe(false);
+    expect(restoreCachedEncryptedAgentTasks(denied, input, config)).toBe(0);
+    discardEncryptedAgentTaskRecovery(denied, input, config);
+    expect(input).toEqual(original);
+    expect(restoreCachedEncryptedAgentTasks(req, encryptedInput(), config)).toBe(1);
+    expect(fetches).toBe(1);
   });
 
   test("uses only the fixed ChatGPT endpoint and forwards only allowlisted credentials", async () => {
@@ -96,6 +152,44 @@ describe("agent task recovery security", () => {
     expect(providerBody).not.toContain(accountId);
   });
 
+  test("drops recognized CXC control-preamble-only text before recovery and provider delivery", async () => {
+    const assignment = "CXC preamble is transport-only.";
+    let providerBody = "";
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes("chatgpt.com")) {
+        return new Response(recoverySse(assignment), { status: 200 });
+      }
+      providerBody = typeof init?.body === "string" ? init.body : "";
+      return providerResponse();
+    }) as typeof fetch;
+    const input = encryptedInput();
+    (input[0] as { content: unknown[] }).content.unshift({
+      type: "input_text",
+      text: "[CXC-LEAF-GUARD] stay within the worker boundary.",
+    });
+    const response = await post(routedConfig(), "xai/grok-4.5", input, codexHeaders());
+    expect(response.status).toBe(200);
+    expect(providerBody).toContain(assignment);
+    expect(providerBody).not.toContain("CXC-LEAF-GUARD");
+  });
+
+  test.each([
+    { label: "unrecognized text", extra: { type: "input_text", text: "Do this unrelated thing." } },
+    { label: "media", extra: { type: "input_image", image_url: "data:image/png;base64,AA==" } },
+  ])("rejects extra $label content before recovery or provider fetch", async ({ extra }) => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("extra envelope content must fail closed");
+    }) as typeof fetch;
+    const input = encryptedInput();
+    (input[0] as { content: unknown[] }).content.push(extra);
+    const response = await post(routedConfig(), "xai/grok-4.5", input, codexHeaders());
+    expect(response.status).toBe(400);
+    expect(fetchCalls).toBe(0);
+    expect(await response.json()).toMatchObject({ error: { code: "unreadable_encrypted_agent_task" } });
+  });
+
   test("a cached recovery never bypasses caller authentication", async () => {
     const assignment = `${ROUTING_ENVELOPE}Do not expose this cached task.`;
     let recoveryFetches = 0;
@@ -123,6 +217,27 @@ describe("agent task recovery security", () => {
     });
     expect(recoveryFetches).toBe(1);
     expect(providerFetches).toBe(1);
+  });
+
+  test("MESSAGE recovery keeps the native caller authentication boundary", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("an unauthenticated MESSAGE must not reach recovery or provider dispatch");
+    }) as typeof fetch;
+
+    const response = await post(
+      routedConfig(),
+      "xai/grok-4.5",
+      encryptedInput({ messageType: "MESSAGE" }),
+      { originator: "codex_cli_rs", "x-openai-subagent": "collab_spawn" },
+    );
+
+    expect(response.status).toBe(400);
+    expect(fetchCalls).toBe(0);
+    expect(await response.json()).toMatchObject({
+      error: { code: "unreadable_encrypted_agent_task" },
+    });
   });
 
   test("a proxy admission secret is never forwarded to ChatGPT", async () => {
@@ -373,22 +488,39 @@ describe("agent task recovery security", () => {
     expect(fetchCalls).toBe(0);
   });
 
-  test("non-Codex originators keep the typed fail-fast error", async () => {
-    let recoveryFetches = 0;
-    globalThis.fetch = (async (input) => {
-      if (String(input).includes("chatgpt.com")) recoveryFetches += 1;
-      return new Response("event: error\ndata: {}\n\n", { status: 200 });
-    }) as typeof fetch;
+  test("recovers arbitrary and missing inbound originators with a fixed recovery originator", async () => {
+    for (const [label, inboundOriginator] of [
+      ["future", "codex_future_client"],
+      ["missing", undefined],
+    ] as const) {
+      resetAgentTaskRecoveryState();
+      let recoveryFetches = 0;
+      let recoveryOriginator = "";
+      globalThis.fetch = (async (input, init) => {
+        if (String(input).includes("chatgpt.com")) {
+          recoveryFetches += 1;
+          recoveryOriginator = new Headers(init?.headers).get("originator") ?? "";
+          return new Response(recoverySse(`Recover the ${label} originator task.`), { status: 200 });
+        }
+        return providerResponse();
+      }) as typeof fetch;
 
-    const response = await post(
-      routedConfig(),
-      "xai/grok-4.5",
-      encryptedInput(),
-      { ...codexHeaders(), originator: "other" },
-    );
+      const headers = codexHeaders(`acct-originator-${label}`);
+      if (inboundOriginator === undefined) headers.delete("originator");
+      else headers.set("originator", inboundOriginator);
 
-    expect(response.status).toBe(400);
-    expect(recoveryFetches).toBe(0);
+      const response = await post(
+        routedConfig(),
+        "xai/grok-4.5",
+        encryptedInput({ taskName: `/root/${label}` }),
+        headers,
+      );
+
+      expect(response.status).toBe(200);
+      expect(recoveryFetches).toBe(1);
+      expect(recoveryOriginator).toBe("codex_cli_rs");
+      if (inboundOriginator !== undefined) expect(recoveryOriginator).not.toBe(inboundOriginator);
+    }
   });
 
   test("accepts the current Codex Work desktop originator", async () => {
@@ -411,10 +543,10 @@ describe("agent task recovery security", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(recoveryOriginator).toBe("codex_work_desktop");
+    expect(recoveryOriginator).toBe("codex_cli_rs");
   });
 
-  test("accepts the Codexless originator", async () => {
+  test("accepts the Codexless inbound originator with the fixed recovery originator", async () => {
     let recoveryOriginator = "";
     globalThis.fetch = (async (input, init) => {
       if (String(input).includes("chatgpt.com")) {
@@ -434,6 +566,6 @@ describe("agent task recovery security", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(recoveryOriginator).toBe("codexless_agent");
+    expect(recoveryOriginator).toBe("codex_cli_rs");
   });
 });

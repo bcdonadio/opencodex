@@ -8,6 +8,7 @@ import {
   isCodexAccountGenerationLive,
 } from "./account-store";
 import { isAccountNeedsReauth, markAccountNeedsReauth } from "./account-runtime-state";
+import { isCodexAccountPaused } from "./account-pause";
 import { ConfigMutationLockError } from "../config";
 import { NativeProfileError } from "./native-profile-types";
 import { isCodexAccountUsable } from "./account-usability";
@@ -33,14 +34,17 @@ import {
   tryAcquireCodexQuotaProbeLease,
   tryAcquireCodexQuotaScopeProbeLease,
   pickAlternateCodexAccount,
+  getEffectiveActiveCodexAccountId,
   resolveCodexAccountForThreadDetailed,
 } from "./routing";
 import {
   entitledCodexAccountIdsForModel,
+  isCodexModelEntitlementSnapshotCurrent,
   isDirectCallerEntitledToCodexModel,
   resolveCodexModelEntitlements,
 } from "./model-entitlements";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS, NATIVE_RESERVE_MODEL } from "./catalog/native-models";
+import { hasLegacyMainCodexPoolAccount, isSelectableCodexPoolAccount } from "./account-id";
 import type { CodexCooldownSource, CodexQuotaScope } from "./routing";
 import { maskAccountId } from "../lib/privacy";
 import { formatErrorResponse } from "../bridge";
@@ -144,8 +148,6 @@ export type CodexAuthContext =
       /** Captured before async credential work; never reconstructed after the upstream response. */
       mainQuotaWriter?: MainQuotaWriter;
       reserveAuthorization?: MainReserveAuthorization;
-      accessToken: string;
-      chatgptAccountId: string;
       /** Bypass Pool selection and suppress quota/transient failover for an exact selector. */
       fixedAccount?: boolean;
       /** See `pool.affinityKey`. */
@@ -154,15 +156,36 @@ export type CodexAuthContext =
       probeLeaseId?: string;
       quotaScope?: CodexQuotaScope;
       probeQuotaScope?: CodexQuotaScope;
-    };
+    } & (
+      | {
+          /** File-backed main credential owned by OpenCodex for this turn. */
+          credentialSource?: "auth-file";
+          accessToken: string;
+          chatgptAccountId: string;
+        }
+      | {
+          /** Validated caller bearer owned by Codex for this request only. */
+          credentialSource: "caller";
+        }
+    );
+
+export function isCallerBackedMainPoolContext(
+  ctx: CodexAuthContext | undefined,
+): ctx is Extract<CodexAuthContext, { kind: "main-pool"; credentialSource: "caller" }> {
+  return ctx?.kind === "main-pool"
+    && ctx.accountId === MAIN_CODEX_ACCOUNT_ID
+    && ctx.credentialSource === "caller";
+}
 
 /** Probe lease carried by this context, when it holds one. */
 export function codexProbeLeaseId(ctx: CodexAuthContext | undefined): string | undefined {
+  if (isCallerBackedMainPoolContext(ctx)) return undefined;
   return ctx?.kind === "pool" || ctx?.kind === "main-pool" ? ctx.probeLeaseId : undefined;
 }
 
 /** Scope of a lease carried by this context, when it probes a model-specific quota. */
 export function codexProbeQuotaScope(ctx: CodexAuthContext | undefined): CodexQuotaScope | undefined {
+  if (isCallerBackedMainPoolContext(ctx)) return undefined;
   return ctx?.kind === "pool" || ctx?.kind === "main-pool" ? ctx.probeQuotaScope : undefined;
 }
 
@@ -171,6 +194,7 @@ export function codexProbeQuotaScope(ctx: CodexAuthContext | undefined): CodexQu
  * call with a context that holds no lease.
  */
 export function releaseCodexAuthContextProbeLease(ctx: CodexAuthContext | undefined): void {
+  if (isCallerBackedMainPoolContext(ctx)) return;
   const leaseId = codexProbeLeaseId(ctx);
   if (!ctx || ctx.kind === "main" || !leaseId) return;
   if (ctx.probeQuotaScope) releaseCodexQuotaScopeProbeLease(ctx.accountId!, ctx.probeQuotaScope, leaseId);
@@ -589,6 +613,10 @@ export async function resolveCodexAuthContext(
   options: ResolveCodexAuthContextOptions = {},
 ): Promise<CodexAuthContext> {
   const writerGeneration = captureConfigGeneration();
+  const admittedSelection = {
+    active: config.activeCodexAccountId,
+    pinned: config.activeCodexAccountPinned,
+  };
   const policy = options.codexAuthPolicy ?? config;
   const requestScopedMainCredential = options.requestScopedMainCredential === true
     && hasCallerCodexBearer(headers);
@@ -670,29 +698,68 @@ export async function resolveCodexAuthContext(
       directSelectionAdmission.release();
     }
   };
-  // Pool discovery excludes request-owned main credentials by design: they must never be folded
-  // into stored-account entitlement, affinity, or persistence state. An effective manual main pin
-  // is the one exception where that exclusion is selection evidence in the opposite direction.
-  // Validate the caller's own gated-model roster before using it, and fall through to a Pool model
-  // detour when it lacks the grant. This branch performs no physical-main credential read.
-  if (preserveRequestOwnedMainPin) {
-    const callerEntitled = !options.modelId
-      || !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)
-      || await (
-        options.isDirectCallerEntitledToCodexModel ?? isDirectCallerEntitledToCodexModel
-      )(headers, options.modelId);
-    if (callerEntitled && !(callerMatchesObservedMain(headers) && isMainAccountHardLocked(policy))) {
-      return { kind: "main", accountId: null };
+  let callerModelEntitlement: Promise<boolean> | undefined;
+  const callerIsEntitled = (): Promise<boolean> => {
+    if (!options.modelId || !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)) {
+      return Promise.resolve(true);
     }
-  }
+    callerModelEntitlement ??= (
+      options.isDirectCallerEntitledToCodexModel ?? isDirectCallerEntitledToCodexModel
+    )(headers, options.modelId);
+    return callerModelEntitlement;
+  };
+  const callerBackedMainIsSelected = (): boolean => {
+    const pinned = config.activeCodexAccountPinned;
+    return config.activeCodexAccountId === MAIN_CODEX_ACCOUNT_ID
+      && getEffectiveActiveCodexAccountId(config) === MAIN_CODEX_ACCOUNT_ID
+      && (pinned === undefined || pinned === MAIN_CODEX_ACCOUNT_ID);
+  };
+  const assertCallerBackedMainAvailable = (): void => {
+    if (hasLegacyMainCodexPoolAccount(config.codexAccounts)
+      || isCodexAccountPaused(config, MAIN_CODEX_ACCOUNT_ID)) {
+      throw new CodexPoolAuthenticationError("Selected Codex account is unavailable");
+    }
+  };
+  const resolveCallerBackedPoolMain = async (): Promise<CodexAuthContext | null> => {
+    if (!requestScopedMainCredential || fixedAccountId !== undefined) return null;
+    if (!preserveRequestOwnedMainPin) return null;
+    if (!callerBackedMainIsSelected()) return null;
+    // The native-profile drain protects auth.json ownership. This context never reads,
+    // refreshes, replaces, or materializes that file-backed credential, so fencing it would
+    // turn an unrelated profile swap into a caller-keyring routing failure.
+    assertCallerBackedMainAvailable();
+    if (!await callerIsEntitled()) return null;
+    if (!callerBackedMainIsSelected()) return null;
+    // The pin/headroom snapshot predates the entitlement await. A matching caller can become
+    // hard-locked while that work is in flight; release the caller-backed exception and let the
+    // ordinary Pool detour handle the request instead of bypassing the live policy.
+    if (callerMatchesObservedMain(headers) && isMainAccountHardLocked(policy)) return null;
+    assertCallerBackedMainAvailable();
+    return {
+      kind: "main-pool",
+      accountId: MAIN_CODEX_ACCOUNT_ID,
+      fixedAccount: true,
+      writerGeneration,
+      credentialSource: "caller",
+      ...(options.modelId ? { quotaScope: codexQuotaScopeForModel(options.modelId) } : {}),
+    };
+  };
   // An explicit namespace binding is stronger than the provider's default mode. It must use the
   // selected stored credential even while the canonical OpenAI provider is globally Direct.
-  // A request-owned bearer is deliberately not represented as `main-pool`: Pool account ids own
-  // durable health, quota, and affinity state, while this credential exists for one request only.
+  // A generic request-owned bearer stays `main`. An explicitly selected Pool-mode main uses the
+  // caller-backed `main-pool` discriminator below for attribution, without acquiring durable
+  // health, quota, affinity, probe, replay, or credential state.
   if ((reserve && hasCallerCodexBearer(headers) && !options.substituteMainCredentialForDirect
       && (requestScopedMainCredential || mode === "direct"))
     || (mode === "direct" && fixedAccountId === undefined)
     || (requestScopedMainCredential && fixedAccountId === MAIN_CODEX_ACCOUNT_ID)) {
+    return resolveCallerOwnedMainContext();
+  }
+  const callerBackedPoolMain = await resolveCallerBackedPoolMain();
+  if (callerBackedPoolMain) return callerBackedPoolMain;
+  if (requestScopedMainCredential && fixedAccountId === undefined
+    && config.activeCodexAccountId === undefined && config.activeCodexAccountPinned === undefined
+    && !(config.codexAccounts ?? []).some(account => isSelectableCodexPoolAccount(account))) {
     return resolveCallerOwnedMainContext();
   }
   // A caller bearer can still accompany a request that selects a configured Pool account. Do not
@@ -725,22 +792,38 @@ export async function resolveCodexAuthContext(
         nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
       })
       : undefined;
+    if (entitlementSnapshot && !isCodexModelEntitlementSnapshotCurrent(entitlementSnapshot)) {
+      throw new CodexPoolAuthenticationError("Codex account credentials changed during model entitlement discovery");
+    }
     const entitledAccountIds = entitlementSnapshot
       ? entitledCodexAccountIdsForModel(entitlementSnapshot, options.modelId)
       : undefined;
     const modelEligibleAccountIds = entitledAccountIds
       ? new Set([...entitledAccountIds].filter(candidate => !excludeAccountIds?.has(candidate)))
       : undefined;
+    const callerBackedPoolMainAfterEntitlements = await resolveCallerBackedPoolMain();
+    if (callerBackedPoolMainAfterEntitlements) return callerBackedPoolMainAfterEntitlements;
+    const selectedCallerBackedMain = requestScopedMainCredential
+      && fixedAccountId === undefined
+      && preserveRequestOwnedMainPin
+      && callerBackedMainIsSelected();
+    const selectionChangedWhileAwaiting = admittedSelection.active !== config.activeCodexAccountId
+      || admittedSelection.pinned !== config.activeCodexAccountPinned;
     const selectionOptions = {
       // Temporary switch drain keeps the candidate until the atomic claim rejects
       // it. Retained recovery makes main wholly ineligible so pool routing continues.
       nativeMainSelectionOnly,
-      isMainAccountTokenLive: requestScopedMainCredential
-        // Main stays excluded from this request's model roster below. This synthetic liveness is
-        // consulted only by shared-state preservation, so a caller-owned pin survives a model
-        // detour without reading or selecting the physical main credential.
-        ? () => preserveRequestOwnedMainPin
-        : options.isMainAccountTokenLive,
+      // A caller-backed main that failed only this model's entitlement remains healthy
+      // shared state. The request-scoped modelEligibleAccountIds below still excludes it
+      // from this one send, while shared-state projection preserves the operator pin.
+      isMainAccountTokenLive: selectedCallerBackedMain
+        ? () => true
+        : requestScopedMainCredential
+          ? () => preserveRequestOwnedMainPin
+          : options.isMainAccountTokenLive,
+      callerBackedMainSelection: selectedCallerBackedMain,
+      preserveCallerMainPin: preserveRequestOwnedMainPin,
+      suppressSharedStateMutations: selectionChangedWhileAwaiting,
       modelEligibleAccountIds,
     };
     // A pre-drain selector reserves the native identity while reconciliation and
@@ -962,6 +1045,7 @@ export async function resolveCodexAuthContext(
 }
 
 export function assertCodexAuthContextNotCooled(ctx: CodexAuthContext | undefined): void {
+  if (isCallerBackedMainPoolContext(ctx)) return;
   if (ctx?.kind !== "pool" && ctx?.kind !== "main-pool") return;
   // A context holding the probe lease was deliberately admitted through the cooldown.
   if (ctx.probeLeaseId) return;
@@ -977,6 +1061,7 @@ export function applyCodexAuthContextToProvider(
   mode: CodexAccountMode | undefined,
 ): OcxRuntimeProviderConfig {
   if (mode !== "pool" || (ctx.kind !== "pool" && ctx.kind !== "main-pool") || provider.authMode !== "forward") return provider;
+  if (isCallerBackedMainPoolContext(ctx)) return provider;
   return {
     ...provider,
     _codexAccountOverride: {
@@ -1013,12 +1098,15 @@ export function materializeCodexUpstreamAuth(
   ctx: CodexAuthContext,
   options: CodexAuthMaterializationOptions = {},
 ): Headers {
+  if (isCallerBackedMainPoolContext(ctx) && options.substituteMainCredential === true) {
+    throw new CodexMainSubstitutionUnavailableError();
+  }
   const selected = new Headers();
   for (const name of FORWARD_HEADERS) {
     const value = headers.get(name);
     if (value) selected.set(name, value);
   }
-  if (ctx.kind === "pool" || ctx.kind === "main-pool") {
+  if (ctx.kind === "pool" || (ctx.kind === "main-pool" && !isCallerBackedMainPoolContext(ctx))) {
     selected.set("authorization", `Bearer ${ctx.accessToken}`);
     selected.set("chatgpt-account-id", ctx.chatgptAccountId);
     if (ctx.kind === "main-pool") {
@@ -1028,7 +1116,8 @@ export function materializeCodexUpstreamAuth(
     assertMaterializedReserve(selected, ctx, options);
     return selected;
   }
-  if (ctx.kind === "main" && options.substituteMainCredential !== true
+  if ((ctx.kind === "main" || isCallerBackedMainPoolContext(ctx))
+    && options.substituteMainCredential !== true
     && !selected.has("chatgpt-account-id")) {
     const bearer = selected.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
     const accountId = bearer ? extractAccountId(undefined, bearer) : undefined;
@@ -1141,6 +1230,7 @@ export function headersForCodexAuthContext(
 
 export function isCodexAuthContextUsable(ctx: CodexAuthContext, config: OcxConfig): boolean {
   if (ctx.kind === "main") return true;
+  if (isCallerBackedMainPoolContext(ctx)) return true;
   if (ctx.kind === "main-pool") return isCodexAccountUsable(config, ctx.accountId);
   return isCodexAccountUsable(config, ctx.accountId) && isCodexAccountGenerationLive(ctx.accountId, ctx.generation);
 }

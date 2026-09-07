@@ -130,6 +130,7 @@ export function codexWsUpstreamFetch(
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   onQuota?: CodexWsQuotaObserver,
   beforeDispatch?: (headers: Headers) => void,
+  onTransport?: (transport: "http" | "websocket") => void,
   observeTransport?: ProviderFetchOptions["observeTransport"],
 ): Promise<Response> {
   const prepared = prepareCodexWsRequest(url, init);
@@ -181,5 +182,5 @@ export function codexWsUpstreamFetch(
   } catch {
     return sseFallback(url, init);
   }
-  return codexWsExchange({ session, url, init, prepared, sseFallback, onQuota, beforeDispatch, observeTransport });
+  return codexWsExchange({ session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport, observeTransport });
 }

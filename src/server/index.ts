@@ -1531,6 +1531,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
                   ? nativeFastEligible(model.id)
                   : catalogRowFastEligible(model)
               : undefined,
+            { modelPickerOrder: config.modelPickerOrder, featured: config.subagentModels },
           );
           return jsonResponse({ data }, 200, req, policy);
         }
@@ -1565,6 +1566,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             accountNativeSlugs,
             accountNativeSlugsBySelector,
             config.keepNativeChatGptOnV1 === true,
+            config.modelPickerOrder,
           );
           return jsonResponse({
             models: applyNativeVisibility(
@@ -1762,12 +1764,15 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          inboundTransport: "http",
         };
         observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
           try {
-            response = await handleResponsesCompact(req, config, logCtx, turnAdmissionLease, admission);
+            response = await handleResponsesCompact(req, config, logCtx, turnAdmissionLease, admission, {
+              onRequestBodyRead: () => disableResponsesRequestTimeout(req, requestServer),
+            });
           } catch {
             response = formatErrorResponse(500, "server_error", "Unexpected compact request failure");
           }
@@ -1796,6 +1801,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           model: "image_gen",
           provider: "unknown",
           ...admissionFields(admission),
+          inboundTransport: "http",
         };
         observeRequestTransport(logCtx, "http", req, requestId, start);
         const endpoint = url.pathname.endsWith("/edits") ? "edits" as const : "generations" as const;
@@ -1852,6 +1858,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           model: "web_search",
           provider: "unknown",
           ...admissionFields(admission),
+          inboundTransport: "http",
         };
         observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
@@ -1878,6 +1885,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          inboundTransport: "http",
         };
         observeRequestTransport(logCtx, "http", req, requestId, start);
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
@@ -1953,6 +1961,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "messages",
+          inboundTransport: "http",
         };
         observeRequestTransport(logCtx, "http", req, requestId, start);
         // Logging is finalized inside handleClaudeMessages (Responses-vocab tap on the
@@ -1984,6 +1993,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "chat",
+          inboundTransport: "http",
         };
         observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => withCors(
@@ -2015,6 +2025,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           model: "gpt-live",
           provider: "unknown",
           ...admissionFields(admission),
+          inboundTransport: "http",
         };
         observeRequestTransport(logCtx, "http", req, requestId, start);
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
@@ -2053,6 +2064,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           model: "gpt-live",
           provider: "unknown",
           ...admissionFields(admission),
+          inboundTransport: "websocket",
         };
         observeRequestTransport(logCtx, "http", req, requestId, start);
         const turnAdmissionLease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
@@ -2303,6 +2315,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             provider: "unknown",
             ...(wsAdmission ? admissionFields(wsAdmission) : {}),
             inboundProtocol: "responses",
+            inboundTransport: "websocket",
           };
           observeTurnCancellation = () => recordDownstreamCancelled(logCtx,
             ws.readyState === 1 ? "turn_replaced" : "client_disconnect");

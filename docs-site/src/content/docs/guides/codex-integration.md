@@ -3,9 +3,10 @@ title: Codex Integration
 description: How opencodex injects itself into Codex, syncs the model catalog, installs shims, and restores cleanly.
 ---
 
-opencodex makes Codex route through the proxy by editing two things Codex reads: its config
-(`$CODEX_HOME/config.toml`, default `~/.codex/config.toml`) and its model catalog. Every edit is
-idempotent and reversible.
+opencodex makes Codex route through the proxy by editing its config
+(`$CODEX_HOME/config.toml`, default `~/.codex/config.toml`). The proxy supplies the model catalog
+through the protocol at `GET /v1/models`; it does not pin Codex to the generated local catalog file.
+Every config edit is idempotent and reversible.
 
 The **Integrations** overview has a Codex switch for this native integration. Its switch shows
 the desired state from OpenCodex's configuration, while the badge reports whether Codex is
@@ -27,7 +28,6 @@ Codex's built-in `openai` provider id and points that provider at opencodex:
 
 ```toml
 # root keys, before the first table
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 # Auto-injected by opencodex
 openai_base_url = "http://127.0.0.1:10100/v1"
 # Auto-injected by opencodex
@@ -149,7 +149,6 @@ uses a dedicated provider instead:
 ```toml
 # root keys
 model_provider = "opencodex"
-model_catalog_json = "/absolute/path/to/opencodex-catalog.json"
 
 # appended at the end of the file
 # Auto-injected by opencodex
@@ -168,10 +167,12 @@ injection was removed; on non-loopback it contains the dedicated provider form. 
 mode leaves this profile untouched.
 
 :::caution
-Root keys such as `openai_base_url`, `model_provider`, and `model_catalog_json` **must** sit before the
-first `[table]` header. The injector guarantees that placement, removes its own stale/duplicate
-copies, and never overwrites a user-owned root `openai_base_url`; if one exists, sync updates the
-catalog but reports that routing was not injected.
+Root keys such as `openai_base_url` and `model_provider` **must** sit before the first `[table]`
+header. The injector guarantees that placement, removes its own stale/duplicate copies, and never
+overwrites a user-owned root `openai_base_url`; if one exists, sync updates the catalog but reports
+that routing was not injected. A user-owned custom `model_catalog_json` override is preserved, but
+OpenCodex removes stale overrides that point at `opencodex-catalog.json` so Codex consumes the live
+protocol catalog.
 :::
 
 ## Shared model catalog
@@ -270,8 +271,9 @@ under the `opencodex` provider while active and restores the backed-up metadata 
 
 ## Model catalog sync
 
-Codex shows models from an on-disk catalog (`$CODEX_HOME/opencodex-catalog.json` by default). On
-start and on `ocx sync`, opencodex:
+OpenCodex materializes its merged catalog at `$CODEX_HOME/opencodex-catalog.json` and serves the
+same catalog through `GET /v1/models`. Codex consumes that protocol response rather than a local
+file override. On start and on `ocx sync`, opencodex:
 
 1. **Backs up** the pristine catalog once to `~/.opencodex/catalog-backup.json` (so featuring is
    reversible).

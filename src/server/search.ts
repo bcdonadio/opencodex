@@ -37,7 +37,7 @@ import {
 import { routeModel } from "../router";
 import { readJsonRequestBody } from "./request-decompress";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
-import type { RequestLogContext } from "./request-log";
+import { observeRequestTransport, type RequestLogContext } from "./request-log";
 import { codexLogAccountId, decodeRequestErrorResponse } from "./responses";
 import type { AdmissionLease } from "../lib/admission";
 import { codexAccountSelectionForTurn } from "./lifecycle";
@@ -117,6 +117,7 @@ export async function handleSearch(
   try {
     upstream = await resolveFirstUsableOpenAiSidecar(candidates, req.headers, config, {
       exactAccount,
+      modelId: exactAccount?.modelId ?? (typeof model === "string" ? model : undefined),
       admission,
       beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
     });
@@ -160,6 +161,7 @@ export async function handleSearch(
   try {
     transportObserver(logCtx)({ kind: "send", transport: "http", body: JSON.stringify(relayBody),
       target: diagnosticTarget(url, { method: "POST" }) });
+    observeRequestTransport(logCtx, "http");
     upstreamResponse = await fetch(url, {
       method: "POST",
       headers,

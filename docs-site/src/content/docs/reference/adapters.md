@@ -23,11 +23,30 @@ adapter own retries/timeouts, while `runTurn` supports transports that cannot be
 HTTP fetch followed by one response stream. [`bridge.ts`](/reference/architecture/#the-bridge)
 then turns the events into Responses SSE.
 
+## External task input on translated Responses routes
+
+Codex task coordination can deliver input as `function_call_output` with nonblank
+`id`, `name` and `namespace` fields and no `call_id` property. OpenCodex maps this
+complete envelope to a user message before adapter translation. Its output must be
+nonblank text or a fully supported array of text and `input_image` URL parts. Text
+and image order are preserved; image detail `original` maps to `high`.
+
+Empty content, malformed or opaque parts, file-id-only images and partial envelopes
+remain invalid. Ordinary function/custom tool results still require a nonempty
+`call_id`. The envelope metadata identifies a compatibility shape and grants no
+additional permissions. Native passthrough and compaction retain their raw-body rules.
+
 ## `openai-chat`
 
 **Targets:** OpenAI **Chat Completions** (`POST {baseUrl}/chat/completions`; a trailing `/chat/completions` or `/` on `baseUrl` is stripped first) and every compatible
 provider — xAI, Kimi, DeepSeek, GLM, Groq, OpenRouter, Ollama (local), and more.
 **Auth:** `key` (Bearer).
+
+For xAI, the resolved upstream adapter can be `openai-chat` or `openai-responses`,
+depending on model defaults and explicit `modelAdapters` overrides. Both support
+public xAI API-key authentication and Grok CLI OAuth. The usage log's
+[`attempts[].credentialSource`](/reference/management-api/) follows that resolved
+transport; it does not infer subscription attribution from the inbound protocol.
 
 - Converts internal messages to OpenAI roles; maps tools to `{type:"function", function:{…}}` and
   `tool_choice` (`auto`/`none`/`required` or a named function).
@@ -248,6 +267,13 @@ header and does not guarantee a provider cache hit.
 
 - Builds Kiro `conversationState`, maps Codex tools and tool results, and sends image blocks supported
   by the Kiro wire.
+- Coalesces adjacent outputs from the same original tool call into one Kiro result. Text remains
+  ordered, images retain the existing per-message limits, and any error flag remains set. User,
+  developer, assistant or another tool's output ends the group. Distinct original IDs that map
+  to the same normalized Kiro ID are rejected.
+- Combined outputs keep real text and failure information without inserting an empty-output hint
+  for a later blank chunk. A single result keeps its existing normalization; an entirely text-empty
+  group receives one fallback, with neutral wording when images or an error flag are present.
 - Treats a client `parallel_tool_calls: true` value as permission rather than a wire requirement.
   Kiro remains serialized: the routed catalog advertises no parallel-tool capability and the
   adapter sends no parallel-control field upstream, but ordinary Codex tool turns are not rejected
@@ -402,3 +428,18 @@ Shared helpers used by the vision-aware adapters:
   Anthropic/Google image blocks.
 - `contentPartsToText(content)` — flatten content parts to text for text-only tool messages
   (an undescribed image becomes a short `[image]` marker, never a token-exploding base64 blob).
+
+## Grok Build terminal snapshots
+
+Requests marked with `x-opencodex-grok: 1` opt into a narrow Responses terminal
+repair. If `response.completed.response.output` is missing or empty, opencodex
+can reconstruct it from real, uniquely indexed, contiguous `output_item.done`
+items whose raw fields satisfy the supported shapes. Deltas alone do not create
+output. Malformed, contradictory, duplicated, gapped or oversized evidence keeps
+the empty terminal unchanged; failed and incomplete responses never become success.
+
+The marker is a client-selected compatibility option, not authenticated identity
+or a permission grant. Unmarked clients retain their existing behavior. This
+repair runs before the separate provider `responsesSnapshotRepair` option and
+does not enable that broader lifecycle repair. Existing tool-search, custom-tool,
+function-completion and undeclared-tool handling keep their established order.

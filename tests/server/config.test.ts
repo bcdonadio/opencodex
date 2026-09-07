@@ -150,6 +150,22 @@ describe("Astra-first subagent upgrade", () => {
     }
   });
 
+  test("picker preset provenance round-trips independently of the roster", () => {
+    const config = { ...getDefaultConfig(), subagentModels: ["saved/model"],
+      modelPickerOrder: ["provider/two", "provider/one"], modelPickerOrderMode: "most-used" as const };
+    saveConfig(config);
+    const loaded = loadConfig();
+    expect(loaded.modelPickerOrder).toEqual(config.modelPickerOrder);
+    expect(loaded.modelPickerOrderMode).toBe("most-used");
+    expect(loaded.subagentModels).toEqual(["saved/model"]);
+    delete loaded.modelPickerOrder;
+    delete loaded.modelPickerOrderMode;
+    saveConfig(loaded);
+    expect(loadConfig().modelPickerOrder).toBeUndefined();
+    expect(loadConfig().modelPickerOrderMode).toBeUndefined();
+    expect(loadConfig().subagentModels).toEqual(["saved/model"]);
+  });
+
   test("startup upgrades the newest disk roster and preserves unrelated disk edits", () => {
     const legacy = { ...getDefaultConfig(), subagentModelsVersion: undefined, subagentModels: ["old"], claudeCode: {}, modelPickerOrder: ["old/model"] };
     saveConfig(legacy);
@@ -1022,6 +1038,8 @@ describe("opencodex config defaults", () => {
     const recovery = {
       enabled: true,
       model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: "default",
       timeoutMs: 45_000,
       cacheEntries: 200,
     };
@@ -1036,6 +1054,8 @@ describe("opencodex config defaults", () => {
       true,
       { enabled: "true" },
       { enabled: true, model: " " },
+      { enabled: true, reasoningEffort: "invalid" },
+      { enabled: true, serviceTier: "invalid" },
       { enabled: true, timeoutMs: 999 },
       { enabled: true, timeoutMs: 120_001 },
       { enabled: true, cacheEntries: 0 },

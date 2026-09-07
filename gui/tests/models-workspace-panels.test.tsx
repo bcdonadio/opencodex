@@ -24,12 +24,24 @@ const originalFetch = globalThis.fetch;
 const API_BASE = "http://localhost";
 
 /** Every catalog/combos/routing endpoint the workspace can reach, with counted hits. */
-function installFetch(): { hits: Map<string, number> } {
+function installFetch(): { hits: Map<string, number>; writes: Array<{ path: string; body: unknown }> } {
   const hits = new Map<string, number>();
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  const writes: Array<{ path: string; body: unknown }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const key = url.replace(API_BASE, "").split("?")[0]!;
     hits.set(key, (hits.get(key) ?? 0) + 1);
+    if (init?.method === "PUT" && (key.endsWith("/alias") || key.endsWith("/model-aliases"))) {
+      writes.push({ path: key, body: JSON.parse(String(init.body)) });
+      return Response.json({ ok: true });
+    }
+    if (url.includes("/api/aliases")) {
+      return Response.json({
+        providers: { openai: "Existing provider" },
+        models: { openai: { "gpt-5": { alias: "Existing model", source: "user" } } },
+        defaults: { global: false, providers: {} },
+      });
+    }
     if (url.includes("/api/models")) {
       return Response.json([
         { provider: "openai", id: "gpt-5", namespaced: "openai/gpt-5", native: true },
@@ -48,7 +60,7 @@ function installFetch(): { hits: Map<string, number> } {
     if (url.includes("/api/lab/status")) return Response.json({ projectionAvailable: false });
     return new Response(null, { status: 404 });
   }) as typeof fetch;
-  return { hits };
+  return { hits, writes };
 }
 
 beforeEach(() => {
@@ -106,6 +118,153 @@ test("the strip renders all four tabs with the catalog selected on the bare hash
     expect(selected[0]!.id).toBe("models-tab-catalog");
     // Roving tabindex: exactly one tab is in the tab order.
     expect(tabs(container).filter(t => t.tabIndex === 0)).toHaveLength(1);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("provider and model alias buttons edit through the shared dialog", async () => {
+  const { writes } = installFetch();
+  testWindow.sessionStorage.setItem(`ocx.models.catalog.v1:${API_BASE}`, JSON.stringify({
+    models: [{ provider: "openai", id: "gpt-5", namespaced: "openai/gpt-5", native: true }],
+    providers: [{ name: "openai", disabled: false }],
+    selectedModels: {},
+    disabled: [],
+    contextCaps: {},
+    contextCapValue: 350_000,
+  }));
+  const { container, root } = await mountModels();
+  const setInput = (input: HTMLInputElement, value: string) => {
+    const setter = Object.getOwnPropertyDescriptor(testWindow.HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
+  };
+  const submit = (dialog: HTMLDialogElement) => {
+    dialog.querySelector<HTMLFormElement>("form")!
+      .dispatchEvent(new testWindow.Event("submit", { bubbles: true, cancelable: true }));
+  };
+
+  try {
+    await act(async () => {
+      await new Promise(resolve => testWindow.setTimeout(resolve, 30));
+      await Promise.resolve();
+    });
+    const providerButton = container.querySelector<HTMLButtonElement>('button[aria-label="Edit provider alias"]');
+    expect(providerButton).toBeTruthy();
+    expect(providerButton?.getAttribute("aria-haspopup")).toBe("dialog");
+    await act(async () => {
+      providerButton!.click();
+      await Promise.resolve();
+    });
+
+    let dialog = testWindow.document.querySelector<HTMLDialogElement>("dialog");
+    expect(dialog?.querySelector("h3")?.textContent).toBe("Edit provider alias");
+    let input = dialog?.querySelector<HTMLInputElement>("input");
+    expect(input?.value).toBe("Existing provider");
+    await act(async () => {
+      setInput(input!, "  short  ");
+      submit(dialog!);
+      await Promise.resolve();
+    });
+    expect(writes.shift()).toEqual({
+      path: "/api/providers/openai/alias",
+      body: { alias: "short" },
+    });
+
+    const providerToggle = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find(button => button.getAttribute("aria-expanded") !== null && button.textContent?.includes("openai"));
+    if (providerToggle?.getAttribute("aria-expanded") === "false") {
+      await act(async () => { providerToggle.click(); });
+    }
+    const modelButton = container.querySelector<HTMLButtonElement>('button[aria-label="Edit model alias"]');
+    expect(modelButton?.getAttribute("aria-haspopup")).toBe("dialog");
+    await act(async () => {
+      modelButton!.click();
+      await Promise.resolve();
+    });
+
+    dialog = testWindow.document.querySelector<HTMLDialogElement>("dialog");
+    expect(dialog?.querySelector("h3")?.textContent).toBe("Edit model alias");
+    input = dialog?.querySelector<HTMLInputElement>("input");
+    expect(input?.value).toBe("Existing model");
+    await act(async () => {
+      setInput(input!, "   ");
+      submit(dialog!);
+      await Promise.resolve();
+    });
+    expect(writes.shift()).toEqual({
+      path: "/api/providers/openai/model-aliases",
+      body: { remove: ["gpt-5"] },
+    });
+    expect(writes).toEqual([]);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("alias clearing, alias-table editing, and cancellation keep their distinct effects", async () => {
+  const { writes } = installFetch();
+  testWindow.sessionStorage.setItem(`ocx.models.catalog.v1:${API_BASE}`, JSON.stringify({
+    models: [{ provider: "openai", id: "gpt-5", namespaced: "openai/gpt-5", native: true }],
+    providers: [{ name: "openai", disabled: false }],
+    selectedModels: {},
+    disabled: [],
+    contextCaps: {},
+    contextCapValue: 350_000,
+  }));
+  const { container, root } = await mountModels();
+  const setInput = (input: HTMLInputElement, value: string) => {
+    const setter = Object.getOwnPropertyDescriptor(testWindow.HTMLInputElement.prototype, "value")?.set;
+    setter?.call(input, value);
+    input.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
+  };
+  const submit = (dialog: HTMLDialogElement) => {
+    dialog.querySelector<HTMLFormElement>("form")!
+      .dispatchEvent(new testWindow.Event("submit", { bubbles: true, cancelable: true }));
+  };
+
+  try {
+    await act(async () => { await new Promise(resolve => testWindow.setTimeout(resolve, 30)); });
+    const providerButton = container.querySelector<HTMLButtonElement>('button[aria-label="Edit provider alias"]')!;
+    await act(async () => { providerButton.click(); await Promise.resolve(); });
+    let dialog = testWindow.document.querySelector<HTMLDialogElement>("dialog")!;
+    let input = dialog.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      setInput(input, "   ");
+      submit(dialog);
+      await Promise.resolve();
+    });
+    expect(writes.shift()).toEqual({
+      path: "/api/providers/openai/alias",
+      body: { alias: null },
+    });
+
+    const aliasesButton = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find(button => button.textContent?.trim() === "Aliases")!;
+    await act(async () => { aliasesButton.click(); });
+    const table = container.querySelector<HTMLElement>('[aria-label="Alias table"]');
+    expect(table).toBeTruthy();
+    const tableEdit = table!.querySelector<HTMLButtonElement>('button[aria-label="Edit model alias"]')!;
+    expect(tableEdit.getAttribute("aria-haspopup")).toBe("dialog");
+    await act(async () => { tableEdit.click(); await Promise.resolve(); });
+    dialog = testWindow.document.querySelector<HTMLDialogElement>("dialog")!;
+    input = dialog.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      setInput(input, "table-name");
+      submit(dialog);
+      await Promise.resolve();
+    });
+    expect(writes.shift()).toEqual({
+      path: "/api/providers/openai/model-aliases",
+      body: { set: { "gpt-5": "table-name" } },
+    });
+
+    await act(async () => { tableEdit.click(); await Promise.resolve(); });
+    dialog = testWindow.document.querySelector<HTMLDialogElement>("dialog")!;
+    const cancel = [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+      .find(button => button.textContent?.trim() === "Cancel")!;
+    await act(async () => { cancel.click(); await Promise.resolve(); });
+    expect(writes).toEqual([]);
   } finally {
     await act(async () => root.unmount());
   }

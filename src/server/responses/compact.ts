@@ -48,6 +48,7 @@ import {
   unwrapUpstreamRetryEvidenceError,
   CodexMainProfileDrainingError,
   headersForCodexAuthContext,
+  isCallerBackedMainPoolContext,
   materializeCodexUpstreamAuthAsync,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
@@ -92,6 +93,8 @@ import {
 import {
   ForwardAdmissionCredentialError,
   hasForwardableCodexBearer,
+  isDataPlaneAdmissionSecret,
+  isProxyAdmissionSecret,
   validateForwardAdmissionCredential,
 } from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
@@ -114,7 +117,8 @@ import type { WsData } from "../ws-bridge";
 import { codexAccountSelectionForTurn, registerTurn, trackStreamLifetime, unregisterTurn } from "../lifecycle";
 import type { AdmissionLease } from "../../lib/admission";
 import { redactSecretString } from "../../lib/redact";
-import { readBoundedResponseBody } from "../../lib/bounded-body";
+import { readBoundedResponseBytes } from "../../lib/bounded-body";
+import { resolveStallTimeoutSec } from "../../stall-timeout";
 import { isRateLimitOrQuotaFailureMessage } from "../../lib/errors";
 import { supportedLadderFor } from "../effort-policy";
 import {
@@ -123,6 +127,7 @@ import {
   finishRequestAttempt,
   inspectResponseLogJson,
   noteAttemptSend,
+  observeRequestTransport,
   readConfiguredCodexServiceTier,
   requestLogSpeedLabel,
   sealRequestAttemptIdentity,
@@ -214,6 +219,8 @@ function compactHandoffRoute(req: Request, previousModel: string, now = Date.now
 
 export interface HandleResponsesCompactOptions {
   nativeMainRefreshDependencies?: NativeMainRefreshDependencies;
+  /** Release the listener's idle guard only after the complete request body is accepted. */
+  onRequestBodyRead?: () => void;
 }
 
 export function compactResponseTooLargeError(): Response {
@@ -241,7 +248,7 @@ async function refreshNativeMainCompactContext(args: {
   | { ok: false; response: Response }
 > {
   const { req, config, authCtx, provider, codexAccountMode, substituteMainCredential, options } = args;
-  if (authCtx.kind !== "main-pool") {
+  if (authCtx.kind !== "main-pool" || isCallerBackedMainPoolContext(authCtx)) {
     return { ok: false, response: formatErrorResponse(401, "authentication_error", "No native main credential to refresh") };
   }
   try {
@@ -466,43 +473,45 @@ function compactResponseHeaders(upstream: Response): Headers {
   return headers;
 }
 
-export async function bufferCompactResponse(upstream: Response, signal: AbortSignal): Promise<Response> {
-  const reader = upstream.body?.getReader();
+export async function bufferCompactResponse(
+  upstream: Response,
+  signal: AbortSignal,
+  stallTimeoutSec?: number,
+): Promise<Response> {
   const headers = compactResponseHeaders(upstream);
-  if (!reader) return new Response(null, { status: upstream.status, statusText: upstream.statusText, headers });
-  const declaredLength = Number(upstream.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > COMPACT_RESPONSE_MAX_BYTES) {
-    await reader.cancel("compact_response_too_large").catch(() => undefined);
-    return compactResponseTooLargeError();
-  }
-  const chunks: Uint8Array[] = [];
-  let total = 0;
   try {
-    while (true) {
-      if (signal.aborted) {
-        await reader.cancel(signal.reason).catch(() => undefined);
-        return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
-      }
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > COMPACT_RESPONSE_MAX_BYTES) {
-        await reader.cancel("compact_response_too_large").catch(() => undefined);
-        return compactResponseTooLargeError();
-      }
-      chunks.push(value);
+    if (signal.aborted) {
+      // No reader is attached yet. Cancellation must not wait for a broken source's cleanup.
+      void upstream.body?.cancel(signal.reason).catch(() => undefined);
+      return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
     }
-  } catch {
+    if (!upstream.body) return new Response(null, { status: upstream.status, statusText: upstream.statusText, headers });
+    const declaredLength = Number(upstream.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > COMPACT_RESPONSE_MAX_BYTES) {
+      void upstream.body.cancel("compact_response_too_large").catch(() => undefined);
+      return compactResponseTooLargeError();
+    }
+    // Header admission has finished; only non-empty body chunks re-arm this deadline.
+    // The raw reader preserves bytes and cancels/releases without awaiting source cleanup.
+    const result = await readBoundedResponseBytes(upstream, {
+      signal,
+      maxBytes: COMPACT_RESPONSE_MAX_BYTES,
+      inactivityTimeoutMs: resolveStallTimeoutSec(stallTimeoutSec) * 1_000,
+    });
     if (signal.aborted) return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
+    if (result.oversized) return compactResponseTooLargeError();
+    return new Response(result.bytes, { status: upstream.status, statusText: upstream.statusText, headers });
+  } catch (error) {
+    if (signal.aborted) return formatErrorResponse(499, "client_cancelled", "Client cancelled compact request");
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      return Response.json({ error: {
+        message: "Compact response body stalled",
+        type: "upstream_stall_timeout",
+        code: "upstream_stall_timeout",
+      } }, { status: 504 });
+    }
     return formatErrorResponse(502, "upstream_error", "Failed to read compact response");
   }
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
 
@@ -515,6 +524,11 @@ export async function handleResponsesCompact(
   admission?: DataPlaneAdmission,
   options: HandleResponsesCompactOptions = {},
 ): Promise<Response> {
+  const inboundBearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim() ?? "";
+  const authorizationBearerIsProxySecret = !!inboundBearer && isProxyAdmissionSecret(inboundBearer, config);
+  const authorizationBearerIsDataPlaneSecret = !!inboundBearer && isDataPlaneAdmissionSecret(inboundBearer, config);
+  const requestScopedMainCredentialAtIngress = admission?.source !== "bearer"
+    && hasForwardableCodexBearer(req.headers, config);
   let body: unknown;
   try {
     body = await readJsonRequestBody(req);
@@ -529,6 +543,7 @@ export async function handleResponsesCompact(
   if (typeof raw.model !== "string" || raw.model.length === 0) {
     return formatErrorResponse(400, "invalid_request_error", "compaction request requires a model");
   }
+  options.onRequestBodyRead?.();
   // Correct the IDENTITY before routing, or the synthetic id does not route at all. Held in
   // a local rather than written back to `raw.model`: assigning to the property widens it out
   // of the `string` narrowing the guard above just established.
@@ -606,18 +621,26 @@ export async function handleResponsesCompact(
     else (raw as Record<string, unknown>).service_tier = serviceTier;
   }
 
+  if (authorizationBearerIsProxySecret && !authorizationBearerIsDataPlaneSecret) {
+    return formatErrorResponse(401, "authentication_error", "OpenCodex API credentials cannot be forwarded upstream");
+  }
+
   // #1686: a bearer-presented admission secret is one of ours, so the stored main credential
   // is substituted below instead of the caller bearer being forwarded.
-  // #2132: and only when the route is a native Codex one, which is the only route that can
-  // consume that credential. See the longer note in core.ts resolveResponsesCodexAuth.
+  // #2132: only a canonical ChatGPT forward transport can consume that credential. Match
+  // core.ts's transport predicate so a custom-named canonical row cannot forward our own
+  // admission secret merely because provider-name lookup yields no Codex account mode.
   const customReserveForward = selectedModelId === NATIVE_RESERVE_MODEL
     && isCodexReserveRequestEligible(config, admission)
     && isCanonicalOpenAiForwardProvider(route.provider);
-  const substituteMainCredential = admission?.source === "bearer"
-    && (route.codexAccountMode !== undefined || customReserveForward);
+  const substituteMainCredential = (admission?.source === "bearer"
+    || (isCanonicalOpenAiForwardProvider(route.provider) && authorizationBearerIsProxySecret))
+    && (route.codexAccountMode !== undefined || isCanonicalOpenAiForwardProvider(route.provider));
   const requestScopedMainCredential = route.codexAccountMode !== undefined
+    && route.codexAccountId === undefined
+    && isCanonicalOpenAiForwardProvider(route.provider)
     && !substituteMainCredential
-    && hasForwardableCodexBearer(req.headers, config);
+    && requestScopedMainCredentialAtIngress;
   if (route.codexAccountMode === "direct" && !substituteMainCredential) {
     try { validateForwardAdmissionCredential(req.headers, config); }
     catch (err) {
@@ -693,6 +716,23 @@ export async function handleResponsesCompact(
         if (override) {
           headers.set("authorization", `Bearer ${override.accessToken}`);
           headers.set("chatgpt-account-id", override.chatgptAccountId);
+        }
+      } else if (substituteMainCredential) {
+        authCtx = await resolveCodexAuthContext(req.headers, config, "direct", {
+          substituteMainCredentialForDirect: true,
+          modelId: selectedModelId,
+          beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
+          signal: req.signal,
+          nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
+        });
+        const selected = await materializeCodexUpstreamAuthAsync(req.headers, authCtx, {
+          substituteMainCredential: true,
+          signal: req.signal,
+          nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
+        });
+        for (const name of FORWARD_HEADERS) {
+          const value = selected.get(name);
+          if (value) headers.set(name, value);
         }
       }
     } catch (err) {
@@ -814,6 +854,7 @@ export async function handleResponsesCompact(
           modelId: route.modelId,
           beforeDispatch: isCanonicalOpenAiForwardProvider(sendProvider)
             ? createCodexReserveDispatchGuard(sendAuthCtx, config, selectedModelId, admission) : undefined,
+          onTransport: transport => observeRequestTransport(logCtx, transport),
         }),
         // Every credential-bearing forward send gets manual redirects, not only
         // pool sends: direct mode carries the caller's credential too (#914).
@@ -1045,7 +1086,7 @@ export async function handleResponsesCompact(
       upstream.headers.get("x-codex-secondary-reset-at"),
       upstream.headers.get("x-codex-tertiary-reset-at"),
     ].filter(Boolean);
-    const buffered = await bufferCompactResponse(upstream, req.signal);
+    const buffered = await bufferCompactResponse(upstream, req.signal, config.stallTimeoutSec);
     const bufferedErrorText = buffered.ok
       ? ""
       : await buffered.clone().text().catch(() => "");

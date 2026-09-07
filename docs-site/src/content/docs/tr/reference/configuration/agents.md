@@ -122,7 +122,9 @@ görevlerinde zincir, kurallı yerel ChatGPT hedefleriyle ve
 `allowEncryptedV2AgentTasks: true` kullanılarak açıkça güvenilen doğrudan anahtar
 kimlik doğrulamalı Responses rotalarıyla sınırlıdır. Hiçbiri şifrelenmiş yükü
 işleyemezse istek, okunamayan şifreli metni başka bir yere yönlendirmek yerine
-başarısız olur. Kombolar yalnızca kurallı yerel hedefleri kullanmaya devam eder.
+başarısız olur. Kombo önce kullanılabilir kurallı yerel hedefi dener; seçilebilir
+yerel hedef kalmazsa ve `agentTaskRecovery` etkinse, şifrelenmiş `NEW_TASK` yönlendirilen
+kombo gönderiminden önce bir kez kurtarılır.
 
 ```json
 {
@@ -142,19 +144,30 @@ başarısız olur. Kombolar yalnızca kurallı yerel hedefleri kullanmaya devam 
 
 ## Şifrelenmiş v2 görev kurtarma
 
-`agentTaskRecovery`, yönlendirilen bir v2 çocuğu oluşturan yerel bir ChatGPT
-ebeveyni için deneysel bir uyumluluk yoludur. Varsayılan olarak devre dışıdır.
-Açıkça etkinleştirildiğinde ve nihai yönlendirilen çocuk görevi aksi takdirde
-okunamayan bir Fernet yükü içerdiğinde, opencodex iletme modu kimlik
+`agentTaskRecovery`, yerel bir ChatGPT ebeveyninden yönlendirilen bir çocuğa
+gönderilen şifreli v2 işbirliği iletileri için deneysel bir uyumluluk yoludur.
+Varsayılan olarak devre dışıdır. Açıkça etkinleştirildiğinde ve yönlendirilen
+çocuğun son girdisi aksi takdirde okunamayan bir Fernet `NEW_TASK` veya `MESSAGE`
+yükü içerdiğinde, opencodex iletme modu kimlik
 doğrulamasıyla sabit `https://chatgpt.com/backend-api/codex/responses` uç
 noktasına ham bir Responses doğrudan geçiş isteği kullanır. ChatGPT düz metin
-görevini zorunlu bir fonksiyon çağrısı aracılığıyla döndürür; opencodex daha
-sonra yönlendirilen sağlayıcı dağıtımından önce yalnızca bu görev öğesini
+yükünü zorunlu bir fonksiyon çağrısı aracılığıyla döndürür; opencodex daha
+sonra yönlendirilen sağlayıcı dağıtımından önce yalnızca bu işbirliği öğesini
 standart bir kullanıcı mesajına dönüştürür.
+Yönlendirilen kurtarma mesajı, taşıma yönlendirme meta verilerini kaldırır ve yalnızca yükü içeren tek
+bir kullanıcı metin değeri sunar.
+Sonraki bir araç sonucu devamında ve son rota yerel olmayan bir sağlayıcıyı seçtikten sonra önceki
+şifreli işbirliği öğeleri eşleşen önbellek girdilerinden geri yüklenir; kesin önbellek eksikleri aynı
+kimliği doğrulanmış sabit uç noktayı kullanır. Geçmişin tamamı ayrı hazırlanır ve herhangi bir öğe
+başarısız olursa hiçbiri iletilmez; yerel ChatGPT rotası özgün şifreli işbirliği şemasını korur.
+Geçmiş kurtarma en fazla dört eşzamanlı çalışan kullanır, süreç genelindeki kurtarma sınırının
+arkasında sıraya girer ve 128 zarfı, toplam 8 MiB şifreli metni veya iki dakikalık tüm-geçmiş
+süresini aşarsa iletimden önce kapalı biçimde başarısız olur. Kurtarılan geçmiş düz metni de girdi
+değiştirilmeden veya iletilmeden önce toplam 8 MiB ile sınırlandırılır.
 
 Bu yerel şifre çözme değildir ve Codex hat protokolünü düzeltmez. Belgelenmemiş
 ChatGPT arka uç davranışına bağlıdır ve bir arka uç değişikliğinden sonra
-çalışmayı durdurabilir. Kurtarılan görev model çıktısıdır, kriptografik olarak
+çalışmayı durdurabilir. Kurtarılan yük model çıktısıdır, kriptografik olarak
 doğrulanmış bir düz metin değildir, bu nedenle bayt bayt doğruluk garanti
 edilmez. Kapsamlı bir önbellek ıskalaması kimliği doğrulanmış bir ChatGPT isteği
 ekleyebilir, hesap kotasını tüketebilir ve yönlendirilen istekten önce gecikme
@@ -177,13 +190,14 @@ Kabul ve saklama kasıtlı olarak dardır:
   sağlayıcı isteğine asla yerleştirilmez; bellek içi önbellek kapsamı yalnızca
   arayan kimlik bilgisinin ve hesabının süreç açısından rastgele anahtarlanmış
   bir özetini kullanır;
-- kurtarma isteği yalnızca `authorization`, eşleşen `chatgpt-account-id`,
-  `originator` ve isteğe bağlı `openai-beta` ve `user-agent` meta verilerini
-  iletir; opencodex `content-type` ve `accept`'i kendisi ayarlar ve başka hiçbir
-  arayan başlığı bu sınırı geçmez;
+- kurtarma isteği yalnızca `authorization`, eşleşen `chatgpt-account-id` ve
+  isteğe bağlı `openai-beta` ve `user-agent` meta verilerini iletir; gelen
+  `originator` yok sayılır ve iletilmez, yalnızca kurtarma isteği yerel olarak
+  `originator: codex_cli_rs` üretir. opencodex `content-type` ve `accept`'i kendisi
+  ayarlar ve başka hiçbir arayan başlığı bu sınırı geçmez;
 - kurtarılan düz metin asla günlüğe kaydedilmez veya kalıcı hale getirilmez;
   süreç içi yerel önbellek kimlik bilgisi, üst iş parçacığı ve şifreli metin
-  kapsamındadır, 15 dakika sonra sona erer ve hem yapılandırılmış girdi sayısı
+  kapsamındadır, son kullanımından 15 dakika sonra sona erer ve hem yapılandırılmış girdi sayısı
   (varsayılan olarak 200, maksimum 512) hem de toplam 8 MiB ile
   sınırlandırılmıştır;
 - hatalı biçimlendirilmiş herhangi bir zarf, başarısız kurtarma, zaman aşımı
@@ -214,8 +228,10 @@ değerlendirilmelidir.
 {
   "agentTaskRecovery": {
     "enabled": true,
-    "model": "gpt-5.6-sol",
-    "timeoutMs": 45000,
+    "model": "gpt-5.6-terra",
+    "reasoningEffort": "low",
+    "serviceTier": "priority",
+    "timeoutMs": 120000,
     "cacheEntries": 200
   }
 }
@@ -226,10 +242,13 @@ sınırı ve özel arka uç bağımlılığı kabul edilebilir olduğunda etkinl
 Olmadıklarında yerel bir ChatGPT çocuğunu veya v1 heterojen yetkilendirmesini
 tercih edin.
 
-Bu kurtarma yolu doğrudan yönlendirilen çocuklara uygulanır. Aynı anda en fazla
-32 kurtarma isteği etkin olabilir; ek ıskalamalar kapalı olarak başarısız olur.
-Kombo yönlendirmesi şifrelenmiş görevler için mevcut yalnızca yerel filtresini
-korur ve kurtarmayı çağırmaz.
+Bu kurtarma yolu doğrudan yönlendirilen çocuklara ve bir kombodaki şifrelenmiş
+`NEW_TASK` oluşturma isteklerine uygulanır. Aynı anda en fazla 32 kurtarma isteği
+etkin olabilir; ek ıskalamalar kapalı olarak başarısız olur. Kullanılabilir kanonik
+yerel hedefi olan bir kombo şifreli metni yine doğrudan gönderir; kurtarma yalnızca
+seçilebilir yerel hedef kalmadığında çalışır. Kurtarma hatası, tükenen hedefler veya
+kullanılamayan hedefler, şifreli metin yönlendirilen sağlayıcıya gönderilmeden yine
+kapalı biçimde başarısız olur.
 
 ## Çaba sınırları
 
@@ -248,4 +267,3 @@ ile `xhigh` arasını sunar.
 
 v1, varsayılan ve v2 davranışının yeni başlayanlara yönelik açıklaması için [Alt
 ajan yüzeyleri](/tr/guides/sub-agent-surface/) sayfasına bakın.
-

@@ -62,15 +62,21 @@ describe("Reserve eligibility trusts receiving-listener admission", () => {
             const result = await fixture.request("local", transport, model, headers(credential));
             const observed = delta(fixture.counters, before);
             const search = transport === "search";
-            // A bare Direct route's existing guard rejects our proxy secret before Reserve.
-            // Exact-account routes use stored Pool credentials and do reach compatibility.
-            const earlyBearerRefusal = credential === "bearer" && (search || model === "gpt-reserve");
-            expect(result.status).toBe(earlyBearerRefusal ? 401 : search ? 400 : 429);
-            expect(observed.wham).toBe(search || earlyBearerRefusal ? 0 : 1);
+            // Search's pre-existing bearer-forwarding guard rejects our proxy secret before
+            // compatibility. Canonical conversation routes safely substitute a data-plane bearer
+            // with the stored main credential, then perform the bounded Reserve permission read.
+            const searchAdmissionBearer = credential === "bearer" && search;
+            expect(result.status).toBe(searchAdmissionBearer ? 401 : search ? 400 : 429);
+            expect(observed.wham).toBe(searchAdmissionBearer || search ? 0 : 1);
             expect(observed.inference).toBe(0);
             if (search) expect(observed.credential).toBe(0);
+            if (credential === "bearer" && !search) {
+              expect(observed.credential).toBeGreaterThan(0);
+              expect(observed.wham).toBe(1);
+              expect(result.text).toContain("Reserve");
+            }
             if (transport === "ws") expect(result.opened).toBe(true);
-            if (!search && !earlyBearerRefusal) expect(result.text).toContain("Reserve");
+            if (!search) expect(result.text).toContain("Reserve");
             fixture.assertConfigUnchanged();
           }
         } finally { await fixture.close(); }

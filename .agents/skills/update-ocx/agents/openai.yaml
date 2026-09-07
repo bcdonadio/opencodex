@@ -1,0 +1,4 @@
+interface:
+  display_name: "Update OCX"
+  short_description: "Update OCX without dropping Codex"
+  default_prompt: "Use $update-ocx to merge upstream, rebuild and install the managed OCX tarball, and refresh the live service without dropping this Codex session."

@@ -64,7 +64,7 @@ ocx combo show main
 
 ## Codex Desktop 原生 allowlist 兼容模式
 
-部分 Codex Desktop 版本会在 app-server 已经加载 `model_catalog_json` 后，再用远程
+部分 Codex Desktop 版本会在 app-server 已经加载 proxy 提供的模型目录后，再用远程
 `available_models` allowlist 过滤选择器。这会让普通的 `Nova1/...` 路由模型在 CLI 中可用，
 却不出现在 Desktop。可以显式让一个 combo 接管对应的裸原生 slug：
 

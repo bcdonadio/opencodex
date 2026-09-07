@@ -63,7 +63,7 @@ test("review: reused socket stale created frame cannot populate the next transac
   Socket.onSend = socket => queueMicrotask(() => socket.emit({ type: "response.created",
     response: { id: "response-1", model: "stale-model", usage: { input_tokens: 9, output_tokens: 4 } } }));
   const ctx: RequestLogContext = { provider: "test", model: "test" };
-  const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", undefined, undefined, transportObserver(ctx));
+  const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", undefined, undefined, undefined, transportObserver(ctx));
   await expect(response.text()).rejects.toThrow("identity mismatch");
   expect(ctx.diagnostics?.correlationMismatch).toBe(true);
   expect(ctx.diagnostics?.upstreamResponseId).toBeUndefined();
@@ -76,7 +76,7 @@ test("diagnostics retain upstream connection sequence and individual sends acros
   const contexts: RequestLogContext[] = [];
   for (const model of ["fixture-model", "fixture-model", "another-model"]) {
     const ctx: RequestLogContext = { model, provider: "test", activeAttempt: beginRequestAttempt(1, "test", model, "openai-responses") };
-    await (await codexWsUpstreamFetch(URL, bodyWith({ model }), fallback, "1.4.0", undefined, undefined, transportObserver(ctx))).text();
+    await (await codexWsUpstreamFetch(URL, bodyWith({ model }), fallback, "1.4.0", undefined, undefined, undefined, transportObserver(ctx))).text();
     contexts.push(ctx);
   }
   expect(contexts[0]!.diagnostics?.upstreamConnectionId).toBe(contexts[1]!.diagnostics?.upstreamConnectionId);
@@ -121,7 +121,7 @@ test("connection replacements count only within the observed transaction and nev
 
 test("throwing native connection diagnostics cannot change dispatch or reuse", async () => {
   for (let i = 0; i < 2; i++) {
-    const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", undefined, undefined,
+    const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", undefined, undefined, undefined,
       () => { throw new Error("diagnostic failure"); });
     expect(await response.text()).toContain("response.completed");
   }

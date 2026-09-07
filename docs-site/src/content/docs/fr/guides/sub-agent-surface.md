@@ -140,16 +140,24 @@ Les options de récupération consistent à sélectionner un enfant ChatGPT nati
 authentification par clé capable de consommer la charge utile opaque, à ajouter une cible ChatGPT native au combo, à utiliser v1 pour la
 délégation de fournisseurs hétérogènes, ou à renvoyer la tâche comme contenu `agent_message` v2 en texte brut lorsque vous contrôlez l’appelant.
 
-L’option expérimentale `agentTaskRecovery`, désactivée par défaut, peut récupérer cette forme précise de
-tâche native envoyée vers une route externe. Elle utilise un transfert Responses brut vers le point de
+L’option expérimentale `agentTaskRecovery`, désactivée par défaut, peut récupérer les charges
+`NEW_TASK` et `MESSAGE` chiffrées de cette forme native envoyée vers une route externe. Elle utilise un transfert Responses brut vers le point de
 terminaison ChatGPT `/responses` fixe et la forme d’identification entrante du fournisseur canonique
 `openai` configuré avec `authMode: "forward"`.
 
 Cette récupération est disponible uniquement lorsque le proxy écoute sur l’interface de bouclage. Elle ne
 substitue jamais une autre clé API, l’identifiant d’un autre fournisseur ou un autre compte Codex. Seuls les
-en-têtes `authorization`, `chatgpt-account-id` correspondant, `originator`, ainsi que les métadonnées
-facultatives `openai-beta` et `user-agent`, sont transmis. `content-type` et `accept` sont générés localement ;
-aucun autre en-tête de l’appelant ne franchit cette frontière.
+en-têtes `authorization`, `chatgpt-account-id` correspondant, ainsi que les métadonnées facultatives
+`openai-beta` et `user-agent`, sont transmis. L’`originator` entrant est ignoré plutôt que transmis ;
+cette requête de récupération uniquement génère localement `originator: codex_cli_rs`. `content-type`
+et `accept` sont générés localement ; aucun autre en-tête de l’appelant ne franchit cette frontière.
+Le message de récupération routé supprime les métadonnées de routage du transport et présente une
+seule valeur textuelle utilisateur contenant la charge utile.
+Lors d’une continuation ultérieure avec résultat d’outil et seulement après la sélection finale
+d’une route non native, opencodex restaure les messages de collaboration antérieurs depuis le cache
+et utilise le même point de terminaison authentifié pour toute absence exacte. L’historique complet
+est préparé à part et rien n’est transmis si un élément échoue ; une route ChatGPT native conserve
+les éléments de collaboration chiffrés d’origine inchangés.
 
 Cette opération consomme du quota, ajoute de la latence, conserve brièvement le texte récupéré dans un cache
 mémoire borné et dépend d’un comportement non documenté du service ChatGPT. Comme un modèle renvoie le texte

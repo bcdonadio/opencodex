@@ -45,7 +45,7 @@ import { sidecarEnter } from "../lib/sidecar-tracker";
 import type { OcxConfig } from "../types";
 import { resolveFirstUsableOpenAiSidecar, selectOpenAiImagesProvider } from "../providers/openai-sidecar";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
-import type { RequestLogContext } from "./request-log";
+import { observeRequestTransport, type RequestLogContext } from "./request-log";
 import { codexLogAccountId } from "./responses";
 import type { AdmissionLease } from "../lib/admission";
 import { codexAccountSelectionForTurn } from "./lifecycle";
@@ -542,6 +542,7 @@ export async function resolveLiveRelay(
   if (candidates.forwardCandidates.length > 0) {
     try {
       forward = await resolveFirstUsableOpenAiSidecar(candidates.forwardCandidates, req.headers, config, {
+        modelId: new URL(req.url).searchParams.get("model") ?? undefined,
         beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
       });
       if (forward) {
@@ -660,6 +661,7 @@ export async function handleLive(
   try {
     transportObserver(logCtx)({ kind: "send", transport: "http", body: outboundBody,
       target: diagnosticTarget(url, { method: "POST" }) });
+    observeRequestTransport(logCtx, "http");
     const upstreamResponse = await fetch(url, {
       method: "POST",
       headers,

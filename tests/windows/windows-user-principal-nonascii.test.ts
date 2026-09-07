@@ -58,7 +58,6 @@ const okBytes = (nameBytes: Uint8Array) => ({
   timedOut: false,
   stdout: stdoutBytes(nameBytes),
 });
-
 afterEach(() => {
   setWindowsPrincipalRunnerForTests(null);
   setAsyncWindowsPrincipalRunnerForTests(null);
@@ -141,4 +140,3 @@ describe("Windows principal decoding of non-ASCII account names", () => {
     expect(cachedCurrentWindowsIdentity()).toBeNull();
   });
 });
-

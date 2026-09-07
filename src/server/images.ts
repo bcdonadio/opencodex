@@ -33,7 +33,7 @@ import { resolveFirstUsableOpenAiSidecar, selectImagesProvider } from "../provid
 import { getProviderRegistryEntry } from "../providers/registry";
 import { readJsonRequestBody } from "./request-decompress";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
-import type { RequestLogContext } from "./request-log";
+import { observeRequestTransport, type RequestLogContext } from "./request-log";
 import { codexLogAccountId, decodeRequestErrorResponse } from "./responses";
 import { getValidAccessToken, getOAuthCredentialProjectId } from "../oauth/index";
 import { safeAntigravityHttpErrorMessage } from "../adapters/google-errors";
@@ -288,6 +288,7 @@ async function tryCcaImageGeneration(
   let upstream: Response;
   try {
     try {
+      observeRequestTransport(logCtx, "http");
       upstream = await fetch(`${baseUrl}/v1internal:generateContent`, {
         method: "POST",
         headers: {
@@ -660,6 +661,7 @@ export async function handleImages(
   if (canUseOpenAiForward) {
     try {
       forward = await resolveFirstUsableOpenAiSidecar(candidates.forwardCandidates, req.headers, config, {
+        modelId: typeof model === "string" ? model : undefined,
         beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
       });
       if (forward) logCtx.provider = formatCodexProviderForLog(forward.providerName, codexLogAccountId(forward.authContext), config);
@@ -725,6 +727,7 @@ export async function handleImages(
     // source-proven idempotency contract.
     transportObserver(logCtx)({ kind: "send", transport: "http", body: JSON.stringify(body),
       target: diagnosticTarget(url, { method: "POST" }) });
+    observeRequestTransport(logCtx, "http");
     upstreamResponse = await fetch(url, {
       method: "POST",
       headers,

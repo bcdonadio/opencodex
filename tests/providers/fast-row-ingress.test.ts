@@ -37,7 +37,6 @@ function configWith(providers: Record<string, OcxProviderConfig>, extra: Partial
 const eligible = () => configWith({
   fixture: provider({ models: ["m"], supportsServiceTier: true }),
 });
-
 describe("a fast selector becomes a caller intent, not a decision", () => {
   test("it resolves to the base model on the shared parser every ingress uses", () => {
     const config = eligible();

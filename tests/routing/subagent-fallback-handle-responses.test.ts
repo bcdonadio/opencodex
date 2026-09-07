@@ -773,6 +773,38 @@ describe("subagent fallback final-route normalization", () => {
 });
 
 describe("native fallback account preview", () => {
+  test("an unentitled caller-backed pinned main uses configured fallback without losing the pin", async () => {
+    const now = 1_800_000_000_000;
+    Date.now = () => now;
+    const cfg = poolNativePlusRoutedConfig({
+      activeCodexAccountId: "__main__",
+      activeCodexAccountPinned: "__main__",
+      subagentModelFallback: ["xai/grok-4.5"],
+      codexAccounts: [
+        { id: "main", email: "main@example.test", isMain: true },
+      ],
+    });
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
+    mockUpstream(capture, { "caller-account": [] });
+
+    const response = await postSpawn(
+      cfg,
+      { model: "gpt-daybreak-blue-latest", input: readableAgentInput(), stream: false },
+      {},
+      logCtx,
+      { "chatgpt-account-id": "caller-account" },
+    );
+
+    expect(response.status).toBe(200);
+    expect((logCtx as unknown as Record<string, unknown>).subagentModelFallbackTo).toBe("xai/grok-4.5");
+    expect(capture.urls).toHaveLength(1);
+    expect(capture.urls[0]).toContain("api.x.ai");
+    expect(capture.bodies[0]).toContain('"model":"grok-4.5"');
+    expect(cfg.activeCodexAccountId).toBe("__main__");
+    expect(cfg.activeCodexAccountPinned).toBe("__main__");
+  });
+
   test("fallback preview and final auth use their own entitlement snapshots", async () => {
     const now = 1_800_000_000_000;
     Date.now = () => now;
@@ -1521,7 +1553,10 @@ describe("native fallback account preview", () => {
     })).filter(({ body }) => body.length > 0);
     expect(bodyRequests).toHaveLength(2);
     expect(bodyRequests[0]?.body).toContain("capture_assignment");
-    expect(bodyRequests[1]?.body).toContain("Use the recovered candidate-scope assignment.");
+    // Canonical native forwarding preserves Codex's reserved encrypted collaboration schema
+    // byte-for-byte after the recovery probe; the native backend owns decrypting this payload.
+    expect(bodyRequests[1]?.body).toContain(`"encrypted_content":"${FERNET_TASK}"`);
+    expect(bodyRequests[1]?.body).not.toContain("Use the recovered candidate-scope assignment.");
     expect(bodyRequests[1]?.body).toContain('"model":"gpt-5.3-codex-spark"');
     expect(selectionStarts).toBe(3);
     expect(selectionReleases).toBe(3);

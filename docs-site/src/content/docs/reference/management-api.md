@@ -166,6 +166,14 @@ See [Combos](/guides/combos/) for target strategies, cooldowns, aliases, and rou
 
 ### Logs, usage, and storage
 
+`GET /api/logs` accepts an optional opaque `cursor` from its previous response. The envelope preserves
+`logs`, `total`, `generatedAt` and `timeZone`, and adds `cursor` and `reset`. Without a cursor it returns
+the full filtered window. A valid unchanged prefix returns only appended rows; `reset: true` replaces
+the client window after edits, eviction, query changes or restart. Invalid cursors return HTTP 400 with
+`error.code: "invalid_cursor"`. Authentication is unchanged. The dashboard falls back to full snapshots
+for older servers. This reduces response bytes for stable windows; server projection remains bounded
+by the current window size.
+
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
 | `GET /api/logs` | Query filtered in-memory request logs | — |
@@ -184,6 +192,14 @@ See [Combos](/guides/combos/) for target strategies, cooldowns, aliases, and rou
 | `GET, PUT /api/storage/cleanup-policy` | Read or update scheduled cleanup policy and job state | 400 invalid policy |
 | `POST /api/storage/cleanup-policy/run` | Start a manual cleanup-policy run | 409 `already_running`; 500 `cleanup_failed` |
 | `GET /api/storage/cleanup-policy/test-stream` | Test-only policy stream hook | 404 `not_found` when unavailable |
+
+New xAI attempts in `usage.jsonl` include a request-time `credentialSource`: `grok-oauth`
+for the resolved Grok CLI OAuth transport, or `xai-api-key` for the public xAI API key
+transport. This fixed label contains no credential or account identifier. It belongs to
+each item in `attempts`, so a combo's aggregate token total must not be attributed to its
+final provider. Custom destinations and historic rows omit the field; consumers must not
+infer subscription usage from the current configuration, model name, or inbound API key.
+The log reports usage, not subscription invoice amounts.
 
 `GET /api/usage` reads `~/.opencodex/usage.jsonl` from the beginning through the current ledger
 snapshot on a cold start. It processes fixed 1 MiB chunks and retains compact aggregate state rather
@@ -222,6 +238,10 @@ misleading.
 Storage cleanup endpoints can move or permanently remove archived session data. Always preview
 first and submit the returned digest. Prefer quarantine when recovery may be needed.
 :::
+
+Cleanup recovery manifests are published atomically, preserving the previous complete record
+if a replacement fails before publication. This does not reverse a permanent purge: restore
+can still fail when a recorded session has no surviving rollout file.
 
 ### Models and catalog
 
@@ -327,7 +347,7 @@ whether to star the repository.
 
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
-| `GET /api/system/memory` | Return scalar process, heap, stream, response-state, watchdog, and active-turn metrics. Response-state diagnostics include spill-write status, consecutive failures, fixed privacy-safe failure class, and last failure/success timestamps; raw errors and paths are never returned. | — |
+| `GET /api/system/memory` | Return scalar process, heap, stream, response-state, watchdog, and active-turn metrics. Response-state diagnostics include spill-write status, consecutive failures, fixed privacy-safe failure class, and last failure/success timestamps. `spillLastWriteFailureOrigin` is `retry_returned_timeout`, `timeout_memo_refusal`, or null; cumulative `spillAclRetryReturnedTimeouts` and `spillAclTimeoutMemoRefusals` count terminal failed publications. See [Windows spill diagnostics](/troubleshooting/windows-memory/) for process-local semantics. Raw errors and paths are never returned. | — |
 | `POST /api/system/restart` | Begin a drain-aware process restart without removing client injection | Returns 202; repeated calls report the existing drain |
 | `POST /api/stop` | Stop the service, restore native Codex, remove managed Grok injection, and drain the proxy | 409 service ownership conflict; 409 `respawnable_service` when a Windows Task Scheduler wrapper could respawn the proxy and the caller is not `ocx stop` (nothing is changed); 409 when the installed manager refuses to stop; 409 `service_state_unknown` when the Task Scheduler state cannot be read (nothing is changed; repair the query and retry) |
 | `GET /api/system/codex-app-server` | Report whether running Codex app-servers predate the current model catalog | — |

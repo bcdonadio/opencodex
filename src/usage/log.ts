@@ -17,9 +17,26 @@ import {
   sanitizeUpstreamDisplayError,
   sanitizeDiagnosticIdentifier,
   type DiagnosticSendV1,
-  type DiagnosticTransportV1,
   type TransactionDiagnosticsV1,
 } from "../diagnostics/transaction";
+import { claudeCompatibilityReason, normalizeClaudeFeatureCodes, type ClaudeFeatureCode } from "../claude/compatibility";
+
+export interface PersistedClaudeCompatibilityLog {
+  decision: "shadow";
+  featureCodes: ClaudeFeatureCode[];
+  reason?: string;
+}
+
+/** Disk and in-memory callers share a closed-code projection; free-form reasons are discarded. */
+export function normalizeClaudeCompatibilityUsageLog(value: unknown): PersistedClaudeCompatibilityLog | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const row = value as Record<string, unknown>;
+  if (row.decision !== "shadow") return undefined;
+  const featureCodes = normalizeClaudeFeatureCodes(row.featureCodes);
+  const reason = claudeCompatibilityReason(featureCodes, true);
+  if (!reason) return undefined;
+  return { decision: "shadow", featureCodes, reason };
+}
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
 /**
@@ -31,6 +48,10 @@ export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated
  */
 export type UsageAccountLogLabel = "main" | `p${string}` | `o${string}`;
 export type CodexUsageAccountLogLabel = UsageAccountLogLabel;
+/** Actual wire used for a primary upstream dispatch. `mixed` means this one
+ * logical request sent over more than one wire (for example a WS send followed
+ * by a bounded HTTP recovery). */
+export type UsageTransport = "http" | "websocket" | "mixed";
 
 /**
  * Accepts EITHER label family. This is the predicate the persistence writers use, so widening
@@ -66,14 +87,18 @@ export type AttemptRecoveryKind =
   | "opaque-blob-rejection"
   | "empty-completion";
 
+/** Request-time upstream credential class, never a credential or account identifier. */
+export type UsageCredentialSource = "grok-oauth" | "xai-api-key";
+
 export interface PersistedUsageAttempt {
   ordinal: number;
   attemptId?: string;
   attemptStartedAt?: number;
   attemptEndedAt?: number;
-  upstreamTransport?: DiagnosticTransportV1;
   sends?: DiagnosticSendV1[];
   provider: string;
+  /** Absent on historic attempts and routes whose subscription attribution is unknown. */
+  credentialSource?: UsageCredentialSource;
   model: string;
   adapter: string;
   status: number;
@@ -98,6 +123,7 @@ export interface PersistedUsageAttempt {
   locallyAnswered?: boolean;
   /** Stable non-PII identity for the Codex pool account that served this attempt. */
   accountLogLabel?: CodexUsageAccountLogLabel;
+  upstreamTransport?: UsageTransport;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -128,8 +154,11 @@ export interface PersistedUsageEntry {
   inboundProtocol?: "responses" | "chat" | "messages";
   /** Bounded v1 lifecycle/correlation facts; absent on rows written before diagnostics. */
   diagnostics?: TransactionDiagnosticsV1;
+  /** Actual client-to-proxy transport. */
+  inboundTransport?: "http" | "websocket";
   /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
   accountLogLabel?: CodexUsageAccountLogLabel;
+  upstreamTransport?: UsageTransport;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   resolvedModel?: string;
@@ -177,6 +206,8 @@ export interface PersistedUsageEntry {
    * contains prompts, credentials, or hidden reasoning.
    */
   routeDecision?: RouteDecisionTraceV1;
+  /** Closed Claude protocol codes only; absent on older rows. */
+  claudeCompatibility?: PersistedClaudeCompatibilityLog;
 }
 
 const KNOWN_USAGE_SURFACES = new Set<NonNullable<PersistedUsageEntry["surface"]>>([
@@ -203,6 +234,16 @@ const KNOWN_ADMISSION_KINDS = new Set<NonNullable<PersistedUsageEntry["admission
 const KNOWN_INBOUND_PROTOCOLS = new Set<NonNullable<PersistedUsageEntry["inboundProtocol"]>>([
   "responses", "chat", "messages",
 ]);
+const KNOWN_TRANSPORTS = new Set<UsageTransport>(["http", "websocket", "mixed"]);
+const KNOWN_INBOUND_TRANSPORTS = new Set<NonNullable<PersistedUsageEntry["inboundTransport"]>>(["http", "websocket"]);
+
+export function isKnownUsageTransport(value: unknown): value is UsageTransport {
+  return typeof value === "string" && KNOWN_TRANSPORTS.has(value as UsageTransport);
+}
+
+export function isKnownInboundTransport(value: unknown): value is NonNullable<PersistedUsageEntry["inboundTransport"]> {
+  return typeof value === "string" && KNOWN_INBOUND_TRANSPORTS.has(value as NonNullable<PersistedUsageEntry["inboundTransport"]>);
+}
 
 /** Same closed-set discipline as `isKnownUsageSurface`: an old or corrupted row
  *  carrying an unexpected value drops the field instead of poisoning the enum. */
@@ -430,12 +471,11 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     ...(isNonNegativeFiniteNumber(attempt.attemptEndedAt)
       ? { attemptEndedAt: attempt.attemptEndedAt }
       : {}),
-    ...(attempt.upstreamTransport === "http"
-      || attempt.upstreamTransport === "websocket"
-      || attempt.upstreamTransport === "mixed"
-      ? { upstreamTransport: attempt.upstreamTransport }
-      : {}),
     provider: attempt.provider,
+    ...(attempt.provider === "xai"
+      && (attempt.credentialSource === "grok-oauth" || attempt.credentialSource === "xai-api-key")
+      ? { credentialSource: attempt.credentialSource }
+      : {}),
     model: attempt.model,
     adapter: attempt.adapter,
     status: attempt.status,
@@ -452,6 +492,9 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     usageStatus: attempt.usageStatus as UsageStatus,
     ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
+      : {}),
+    ...(isKnownUsageTransport(attempt.upstreamTransport)
+      ? { upstreamTransport: attempt.upstreamTransport }
       : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
       ? { inputTokenEstimate: attempt.inputTokenEstimate }
@@ -519,6 +562,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
   const callerServiceTier = sanitizeLogMetadataString(entry.callerServiceTier);
   const responseServiceTier = sanitizeLogMetadataString(entry.responseServiceTier);
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
+  const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
   const routeDecision = entry.routeDecision
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
@@ -548,8 +592,12 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
     ...(diagnostics ? { diagnostics } : {}),
+    ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
+      : {}),
+    ...(isKnownUsageTransport(entry.upstreamTransport)
+      ? { upstreamTransport: entry.upstreamTransport }
       : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()
       ? { conversationId: entry.conversationId.trim().slice(0, 128) }
@@ -625,6 +673,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       ? { terminalSource: entry.terminalSource }
       : {}),
     ...(routeDecision ? { routeDecision } : {}),
+    ...(claudeCompatibility ? { claudeCompatibility } : {}),
   };
 }
 

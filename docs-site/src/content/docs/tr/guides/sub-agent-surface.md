@@ -163,17 +163,27 @@ eklemek, heterojen sağlayıcı yetkilendirmesi için v1 kullanmak veya arayanı
 görevi düz metin v2 `agent_message` içeriği olarak yeniden göndermektir.
 
 Deneysel, varsayılan olarak devre dışı bırakılmış bir `agentTaskRecovery`
-seçeneği, `authMode: "forward"` ile kurallı `openai` sağlayıcısı tarafından
+seçeneği, bu yerelden yönlendirilmiş biçimdeki şifreli `NEW_TASK` ve `MESSAGE`
+yüklerini, `authMode: "forward"` ile kurallı `openai` sağlayıcısı tarafından
 kullanılan gelen kimlik bilgisi şeklini kullanarak sabit ChatGPT `/responses` uç
 noktasına ham Responses doğrudan geçişi aracılığıyla bu belirli yerelden
 yönlendirilen şekli kurtarabilir. Kurtarma yalnızca proxy geri döngüye bağlıyken
 kullanılabilir. Asla API anahtarı kimlik doğrulamasının, başka bir sağlayıcı
 kimlik bilgisinin veya başka bir Codex hesabının yerine geçmez. Yalnızca
-`authorization`, eşleşen `chatgpt-account-id`, `originator` ve isteğe bağlı
-`openai-beta`/`user-agent` meta verileri iletilir; `content-type` ve `accept`
-yerel olarak oluşturulur ve başka hiçbir arayan başlığı sınırı geçmez. Kotayı
+`authorization`, eşleşen `chatgpt-account-id` ve isteğe bağlı
+`openai-beta`/`user-agent` meta verileri iletilir. Gelen `originator` yok sayılır
+ve iletilmez; yalnızca kurtarma isteği yerel olarak `originator: codex_cli_rs`
+üretir. `content-type` ve `accept` yerel olarak oluşturulur ve başka hiçbir
+arayan başlığı sınırı geçmez. Kotayı
 tüketir, gecikme ekler, kurtarılan düz metni sınırlı bir bellek içi önbellekte
-kısa süre tutar ve belgelenmemiş ChatGPT arka uç davranışına bağlıdır. Bir model
+kısa süre tutar ve belgelenmemiş ChatGPT arka uç davranışına bağlıdır. Yönlendirilen kurtarma mesajı,
+taşıma yönlendirme meta verilerini kaldırır ve yalnızca yükü içeren tek bir kullanıcı metin değeri sunar.
+Sonraki bir araç sonucu devamında ve son rota yerel olmayan bir sağlayıcıyı seçtikten sonra
+opencodex, önceki işbirliği iletilerini eşleşen önbellek girdilerinden geri yükler ve kesin önbellek
+eksikleri için aynı kimliği doğrulanmış sabit uç noktayı kullanır. Geçmişin tamamı ayrı hazırlanır
+ve herhangi bir öğe başarısız olursa hiçbiri iletilmez; yerel ChatGPT rotaları özgün şifreli
+işbirliği öğelerini değiştirmeden korur.
+Bir model
 kurtarılan metni döndürdüğü için bayt bayt doğruluk garanti edilmez. Genel/API
 anahtarlı proxy arayanlarını reddeder ve herhangi bir arızada
 `unreadable_encrypted_agent_task`'i korur. Tam güven sınırı ve yapılandırma için

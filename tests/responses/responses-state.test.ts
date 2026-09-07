@@ -27,6 +27,7 @@ import { createSseInspector } from "../../src/server/relay";
 import {
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
+  copyPreviousResponseReplayProvenance,
   evictOldestResponseContinuationForBudget,
   expandPreviousResponseInput,
   flushResponseState,
@@ -1079,6 +1080,9 @@ describe("Responses previous_response_id state", () => {
       spillWriteFailures: 0,
       spillWriteStatus: "healthy",
       spillWriteConsecutiveFailures: 0,
+      spillLastWriteFailureOrigin: null,
+      spillAclRetryReturnedTimeouts: 0,
+      spillAclTimeoutMemoRefusals: 0,
     });
   });
 
@@ -1112,6 +1116,9 @@ describe("Responses previous_response_id state", () => {
       spillWriteConsecutiveFailures: 1,
       spillLastWriteFailureCode: "EACLRETRYEXHAUSTED",
       spillLastWriteSuccessAt: null,
+      spillLastWriteFailureOrigin: "retry_returned_timeout",
+      spillAclRetryReturnedTimeouts: 1,
+      spillAclTimeoutMemoRefusals: 0,
     });
     expect(metrics.spillLastWriteFailureAt).toBeGreaterThanOrEqual(0);
 
@@ -1127,9 +1134,63 @@ describe("Responses previous_response_id state", () => {
       spillWriteStatus: "healthy",
       spillWriteConsecutiveFailures: 0,
       spillLastWriteFailureCode: "EACLRETRYEXHAUSTED",
+      spillLastWriteFailureOrigin: "retry_returned_timeout",
+      spillAclRetryReturnedTimeouts: 1,
+      spillAclTimeoutMemoRefusals: 0,
     });
     expect(typeof recovered.spillLastWriteSuccessAt === "number"
       && recovered.spillLastWriteSuccessAt >= (recovered.spillLastWriteFailureAt ?? 0)).toBe(true);
+  });
+
+  test("Windows stable-directory memo refusals stay distinct after the runner becomes healthy", async () => {
+    forceWindowsAclLane();
+    const previousVerify = process.env.OPENCODEX_ACL_VERIFY_EXISTING;
+    delete process.env.OPENCODEX_ACL_VERIFY_EXISTING;
+    let clock = 0;
+    let grantCalls = 0;
+    setNowForTests(() => clock);
+    setResponseSpillNowForTests(() => clock);
+    setResponseSpillAsyncAclAttemptBudgetForTests(100);
+    setResponseStateByteCapForTests(1_024);
+    const spillDir = responseSpillDirectory();
+    let healthy = false;
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (args[0] !== spillDir) return ICACLS_OK;
+      if (args.includes("/grant:r")) grantCalls += 1;
+      if (healthy) return ICACLS_OK;
+      clock += 100;
+      return { success: false, exitCode: null, timedOut: true, stdout: "private-acl-output" };
+    });
+    try {
+      rememberLarge("resp_stable_timeout", "x".repeat(8_000));
+      await flushPendingResponseSpillsForTests();
+      expect(responseStateMetrics()).toMatchObject({
+        spillWrites: 0, spillWriteFailures: 1,
+        spillLastWriteFailureCode: "EACLRETRYEXHAUSTED",
+        spillLastWriteFailureOrigin: "retry_returned_timeout",
+        spillAclRetryReturnedTimeouts: 1, spillAclTimeoutMemoRefusals: 0,
+      });
+      expect(grantCalls).toBe(2);
+      healthy = true; // Same stable directory and process; no memo reset between jobs.
+      for (let refusal = 1; refusal <= 2; refusal += 1) {
+        rememberLarge(`resp_stable_refusal_${refusal}`, "y".repeat(8_000));
+        await flushPendingResponseSpillsForTests();
+        expect(responseStateMetrics()).toMatchObject({
+          spillWrites: 0, spillWriteFailures: 1 + refusal,
+          spillWriteStatus: "degraded", spillWriteConsecutiveFailures: 1 + refusal,
+          spillLastWriteFailureCode: "EACLRETRYEXHAUSTED",
+          spillLastWriteFailureOrigin: "timeout_memo_refusal",
+          spillAclRetryReturnedTimeouts: 1, spillAclTimeoutMemoRefusals: refusal,
+          spillLastWriteSuccessAt: null, spillStubCount: 0,
+        });
+        expect(grantCalls).toBe(2);
+        expect(spillFileNames(home)).toHaveLength(0);
+        expect(spillTempNames(home)).toHaveLength(0);
+      }
+    } finally {
+      if (previousVerify === undefined) delete process.env.OPENCODEX_ACL_VERIFY_EXISTING;
+      else process.env.OPENCODEX_ACL_VERIFY_EXISTING = previousVerify;
+    }
   });
 
   test("Windows async spill attempts share one bounded ACL budget across every harden", async () => {
@@ -1427,16 +1488,27 @@ describe("Responses previous_response_id state", () => {
       return { success: true, exitCode: 0, timedOut: false, stdout: "" };
     });
     setResponseStateByteCapForTests(1_024);
-    rememberLarge("resp_shutdown_fallback", "f".repeat(2 * 1024 * 1024 + 4_096));
-    await started;
-
+    let restoreClock: (() => void) | undefined;
     try {
+      rememberLarge("resp_shutdown_fallback", "f".repeat(2 * 1024 * 1024 + 4_096));
+      await started;
+      // ACL/spill clocks alone do not control the shutdown reserve: state.ts
+      // uses Date.now(). Keep its 80 ms budget independent of real disk latency.
+      // The real 40 ms drain timer still fires while publication stays gated.
+      const shutdownNow = Date.now();
+      const nowSpy = spyOn(Date, "now").mockReturnValue(shutdownNow);
+      restoreClock = () => { nowSpy.mockRestore(); };
       await flushResponseState();
       expect(synchronousCalls).toBeGreaterThan(0);
       expect(pendingResponseSpillMetricsForTests()).toEqual({ count: 0, bytes: 0 });
       expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 1 });
     } finally {
       release();
+      try {
+        await awaitResponseSpillPublicationTailForTests();
+      } finally {
+        restoreClock?.();
+      }
     }
   });
 
@@ -2580,6 +2652,7 @@ describe("Responses previous_response_id state", () => {
     const {
       spillWriteStatus,
       spillLastWriteFailureCode,
+      spillLastWriteFailureOrigin,
       spillLastWriteFailureAt,
       spillLastWriteSuccessAt,
       ...numericMetrics
@@ -2588,6 +2661,7 @@ describe("Responses previous_response_id state", () => {
       .every(value => typeof value === "number" && Number.isFinite(value))).toBe(true);
     expect(spillWriteStatus).toBe("healthy");
     expect(spillLastWriteFailureCode).toBeNull();
+    expect(spillLastWriteFailureOrigin).toBeNull();
     expect(spillLastWriteFailureAt).toBeNull();
     expect(typeof spillLastWriteSuccessAt === "number" && Number.isFinite(spillLastWriteSuccessAt)).toBe(true);
     const serialized = JSON.stringify(metrics);
@@ -3348,10 +3422,60 @@ describe("Responses previous_response_id state", () => {
         spillWriteStatus: "initial",
         spillWriteConsecutiveFailures: 0,
         spillLastWriteFailureCode: null,
+        spillLastWriteFailureOrigin: null,
+        spillAclRetryReturnedTimeouts: 0,
+        spillAclTimeoutMemoRefusals: 0,
         spillLastWriteFailureAt: null,
         spillLastWriteSuccessAt: null,
         spillReadFailures: 0,
         replayScopeMismatchDrops: 0,
+      });
+    });
+
+    test("spill failure origin decoding stays bounded, closed and paired with the effective code", () => {
+      setResponseStateByteCapForTests(1_024);
+      const memoError = Object.assign(new Error("private-path-and-payload"), {
+        code: "ETIMEDOUT", aclFailureOrigin: "timeout_memo_refusal",
+      });
+      const cycle: { code: string; cause?: unknown; aclFailureOrigin: string } = {
+        code: "ETIMEDOUT", aclFailureOrigin: "private-origin",
+      };
+      cycle.cause = cycle;
+      const cases = [
+        { error: new Error("wrapper", { cause: memoError }), code: "ETIMEDOUT", origin: "timeout_memo_refusal" },
+        { error: Object.assign(new Error("denied", { cause: memoError }), { code: "EACCES" }), code: "EACCES", origin: null },
+        { error: { code: "EACLRETRYEXHAUSTED" }, code: "EACLRETRYEXHAUSTED", origin: null },
+        { error: { code: "ETIMEDOUT", aclFailureOrigin: "private-origin" }, code: "ETIMEDOUT", origin: null },
+        { error: { code: "ETIMEDOUT", aclFailureOrigin: ["timeout_memo_refusal"] }, code: "ETIMEDOUT", origin: null },
+        { error: cycle, code: "ETIMEDOUT", origin: null },
+        // Including the writer's wrapper, the marker is beyond the four-object scan.
+        { error: { code: "ETIMEDOUT", cause: { cause: { cause: memoError } } }, code: "ETIMEDOUT", origin: null },
+      ];
+      cases.forEach(({ error, code, origin }, index) => {
+        setSpillIoForTest({ write: () => { throw error; } });
+        rememberLarge(`resp_private_origin_${index}`, "private-content".repeat(1_000));
+        const metrics = responseStateMetrics();
+        expect(metrics).toMatchObject({
+          spillWriteFailures: index + 1,
+          spillLastWriteFailureCode: code,
+          spillLastWriteFailureOrigin: origin,
+          spillAclRetryReturnedTimeouts: 0, spillAclTimeoutMemoRefusals: 1,
+        });
+        const serialized = JSON.stringify(metrics);
+        for (const privateValue of ["private-path-and-payload", "private-origin", "private-content", "resp_private_origin", home]) {
+          expect(serialized).not.toContain(privateValue);
+        }
+      });
+      setSpillIoForTest(null);
+      rememberLarge("resp_after_origin_failures", "healthy".repeat(1_500));
+      expect(responseStateMetrics()).toMatchObject({
+        spillWriteStatus: "healthy", spillWriteConsecutiveFailures: 0,
+        spillLastWriteFailureCode: "ETIMEDOUT", spillLastWriteFailureOrigin: null,
+        spillAclRetryReturnedTimeouts: 0, spillAclTimeoutMemoRefusals: 1,
+      });
+      clearResponseStateMemoryForTests();
+      expect(responseStateMetrics()).toMatchObject({
+        spillLastWriteFailureOrigin: null, spillAclRetryReturnedTimeouts: 0, spillAclTimeoutMemoRefusals: 0,
       });
     });
 
@@ -3460,6 +3584,9 @@ describe("Responses previous_response_id state", () => {
         spillWriteStatus: "initial",
         spillWriteConsecutiveFailures: 0,
         spillLastWriteFailureCode: null,
+        spillLastWriteFailureOrigin: null,
+        spillAclRetryReturnedTimeouts: 0,
+        spillAclTimeoutMemoRefusals: 0,
         spillLastWriteFailureAt: null,
         spillLastWriteSuccessAt: null,
         spillReadFailures: 0,
@@ -3847,6 +3974,201 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
       const raw = readFileSync(join(home, "responses-state.json"), "utf-8");
       expect(raw).not.toContain("resp_marked");
       expect(raw).toContain("resp_sibling");
+    });
+
+    test("explicit ephemeral retention replays in memory without reaching disk", async () => {
+      const recovered = {
+        model: "m",
+        input: [{ type: "message", role: "user", content: "EPHEMERAL-PLAINTEXT-SENTINEL" }],
+        store: false,
+      };
+      markBodyNonPersistable(recovered);
+      const firstResponse = completedResponse("resp_ephemeral", "tool call");
+      firstResponse.output[0]!.id = "msg_ephemeral";
+      rememberResponseState(
+        recovered,
+        firstResponse,
+        undefined,
+        { force: true, ephemeral: true, ephemeralScope: "scope-a" },
+      );
+
+      const expanded = expandPreviousResponseInput({
+        previous_response_id: "resp_ephemeral",
+        input: [{ type: "function_call_output", call_id: "call_1", output: "done" }],
+      }, undefined, "scope-a") as { input: unknown[] };
+      expect(expanded.input[0]).toMatchObject({
+        type: "message", role: "user", content: "EPHEMERAL-PLAINTEXT-SENTINEL",
+      });
+      expect(previousResponseReplayPrefixLength(expanded)).toBe(2);
+      recovered.input[0]!.content = "MUTATED-AFTER-RECORD";
+      firstResponse.output[0]!.content[0]!.text = "MUTATED-AFTER-RECORD";
+      expect(JSON.stringify(expanded)).not.toContain("MUTATED-AFTER-RECORD");
+
+      rememberResponseState(
+        expanded,
+        completedResponse("resp_ephemeral_child", "finished"),
+        undefined,
+        { force: true, ephemeral: true, ephemeralScope: "scope-a" },
+      );
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_child" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toHaveLength(4);
+
+      const carried = expandPreviousResponseInput({
+        previous_response_id: "resp_ephemeral",
+        input: expanded.input.slice(0, 2),
+      }, undefined, "scope-a") as { input: unknown[] };
+      expect(carried.input).toHaveLength(2);
+      rememberResponseState(
+        carried,
+        completedResponse("resp_ephemeral_carried", "carried"),
+        undefined,
+        { ephemeral: true, ephemeralScope: "scope-a" },
+      );
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_carried" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeDefined();
+
+      const cloned = structuredClone(expanded);
+      copyPreviousResponseReplayProvenance(expanded, cloned);
+      rememberResponseState(
+        cloned,
+        completedResponse("resp_ephemeral_clone", "clone"),
+        undefined,
+        { ephemeral: true, ephemeralScope: "scope-a" },
+      );
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_clone" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeDefined();
+
+      rememberResponseState(
+        { input: ["ordinary snapshot trigger"] },
+        completedResponse("resp_snapshot_trigger", "persist me"),
+      );
+      await flushResponseState();
+      const raw = existsSync(join(home, "responses-state.json"))
+        ? readFileSync(join(home, "responses-state.json"), "utf-8")
+        : "";
+      expect(raw).not.toContain("EPHEMERAL-PLAINTEXT-SENTINEL");
+      expect(raw).not.toContain("resp_ephemeral");
+      expect(raw).toContain("resp_snapshot_trigger");
+    });
+
+    test("ephemeral chain expiry is absolute and cannot be refreshed by descendants", () => {
+      const realNow = Date.now;
+      let clock = realNow();
+      Date.now = () => clock;
+      try {
+        const recovered = { input: ["secret"] };
+        markBodyNonPersistable(recovered);
+        rememberResponseState(
+          recovered,
+          completedResponse("resp_ephemeral_root", "root"),
+          undefined,
+          { ephemeral: true, ephemeralScope: "scope-a" },
+        );
+        clock += 14 * 60 * 1_000;
+        const expanded = expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_root" }, undefined, "scope-a") as {
+          input?: unknown[];
+        };
+        expect(expanded.input).toBeDefined();
+        rememberResponseState(
+          expanded,
+          completedResponse("resp_ephemeral_descendant", "child"),
+          undefined,
+          { ephemeral: true, ephemeralScope: "scope-a" },
+        );
+        clock += 61 * 1_000;
+        expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_root" }, undefined, "scope-a") as {
+          input?: unknown[];
+        }).input).toBeUndefined();
+        expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_descendant" }, undefined, "scope-a") as {
+          input?: unknown[];
+        }).input).toBeUndefined();
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
+    test("ephemeral retention enforces task ownership and count capacity", () => {
+      for (let index = 0; index < 129; index += 1) {
+        const request = { input: [`secret-${index}`] };
+        markBodyNonPersistable(request);
+        rememberResponseState(
+          request,
+          completedResponse(`resp_ephemeral_count_${index}`, `result-${index}`),
+          undefined,
+          { ephemeral: true, ephemeralScope: "scope-a", clientThreadId: "task-a" },
+        );
+      }
+      expect((expandPreviousResponseInput(
+        { previous_response_id: "resp_ephemeral_count_0" },
+        "task-a",
+        "scope-a",
+      ) as { input?: unknown[] }).input).toBeUndefined();
+      expect((expandPreviousResponseInput(
+        { previous_response_id: "resp_ephemeral_count_128" },
+        "task-b",
+        "scope-a",
+      ) as { input?: unknown[] }).input).toBeUndefined();
+      expect((expandPreviousResponseInput(
+        { previous_response_id: "resp_ephemeral_count_128" },
+        "task-a",
+        "scope-a",
+      ) as { input?: unknown[] }).input).toBeDefined();
+    });
+
+    test("ephemeral response IDs are isolated by credential scope", () => {
+      for (const [scope, secret] of [["scope-a", "secret-a"], ["scope-b", "secret-b"]] as const) {
+        const request = { input: [secret] };
+        markBodyNonPersistable(request);
+        rememberResponseState(
+          request,
+          completedResponse("resp_shared_ephemeral", scope),
+          undefined,
+          { ephemeral: true, ephemeralScope: scope, clientThreadId: "task-shared" },
+        );
+      }
+      const replay = (scope?: string) => {
+        const request = { previous_response_id: "resp_shared_ephemeral" };
+        const result = expandPreviousResponseInput(request, "task-shared", scope) as { input?: unknown[] };
+        return { request, result, failure: previousResponseReplayFailure(result) };
+      };
+      expect(JSON.stringify(replay("scope-a").result)).toContain("secret-a");
+      expect(JSON.stringify(replay("scope-a").result)).not.toContain("secret-b");
+      expect(JSON.stringify(replay("scope-b").result)).toContain("secret-b");
+      expect(JSON.stringify(replay("scope-b").result)).not.toContain("secret-a");
+      expect(replay("scope-c").failure).toEqual({
+        code: "previous_response_not_found", reason: "ephemeral_scope_mismatch",
+      });
+      expect(replay().failure).toEqual({
+        code: "previous_response_not_found", reason: "ephemeral_scope_mismatch",
+      });
+    });
+
+    test("ephemeral byte capacity evicts oldest entries and rejects one oversized entry", () => {
+      const rememberEphemeral = (id: string, content: string) => {
+        const request = { input: [content] };
+        markBodyNonPersistable(request);
+        rememberResponseState(request, completedResponse(id, "ok"), undefined, { ephemeral: true, ephemeralScope: "scope-a" });
+      };
+      rememberEphemeral("resp_ephemeral_small", "small");
+      rememberEphemeral("resp_ephemeral_bytes_1", "a".repeat(5 * 1024 * 1024));
+      rememberEphemeral("resp_ephemeral_bytes_2", "b".repeat(5 * 1024 * 1024));
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_bytes_1" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeUndefined();
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_bytes_2" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeDefined();
+
+      rememberEphemeral("resp_ephemeral_oversized", "z".repeat(9 * 1024 * 1024));
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_oversized" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeUndefined();
+      expect((expandPreviousResponseInput({ previous_response_id: "resp_ephemeral_bytes_2" }, undefined, "scope-a") as {
+        input?: unknown[];
+      }).input).toBeDefined();
     });
   });
 });

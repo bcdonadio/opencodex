@@ -537,6 +537,7 @@ export default function ProviderAuthPanel({
                       </button>
                     )}
                     <button type="button" className="btn btn-ghost btn-sm"
+                      aria-haspopup="dialog"
                       onClick={() => void authHandlers.onEditAlias(item.name, "oauth", account.id, account.alias)}>
                       {t("prov.editAlias")}
                     </button>
@@ -606,6 +607,7 @@ export default function ProviderAuthPanel({
                       {entry.active && <span className="badge badge-primary">{t("prov.accountActive")}</span>}
                     </button>
                     <button type="button" className="btn btn-ghost btn-sm"
+                      aria-haspopup="dialog"
                       onClick={() => void authHandlers.onEditAlias(item.name, "api-key", entry.id, entry.label)}>
                       {t("prov.editAlias")}
                     </button>

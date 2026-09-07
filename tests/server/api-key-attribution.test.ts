@@ -120,6 +120,7 @@ describe("attribution reaches usage.jsonl", () => {
       expect(row.apiKeyId).toBe("key-two");
       expect(row.admissionKind).toBe("configured");
       expect(row.inboundProtocol).toBe("chat");
+      expect(row.inboundTransport).toBe("http");
     } finally {
       await server.stop(true);
     }
@@ -286,6 +287,7 @@ describe("attribution reaches usage.jsonl", () => {
       const added = rows.at(-1)!;
       expect(added.apiKeyId).toBe("key-two");
       expect(added.inboundProtocol).toBe("responses");
+      expect(added.inboundTransport).toBe("websocket");
     } finally {
       await server.stop(true);
     }

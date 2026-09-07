@@ -58,7 +58,7 @@ Pour un tour enfant créé, l’ordre de repli est le suivant :
 
 Les chaînes de repli propres à un rôle doivent résider dans la configuration d’opencodex. L’ajout de `model_fallback` dans `$CODEX_HOME/agents/*.toml` amène Codex 0.146+ à rejeter le fichier de rôle entier à cause de ce champ inconnu, puis à ignorer le rôle (#1190). Une ancienne ligne `model_fallback` dans le fichier TOML reste lue par souci de rétrocompatibilité, mais `ocx doctor` la signale.
 
-opencodex ignore les candidats désactivés, non routables, en mauvais état, en période de temporisation ou ayant atteint le seuil de quota. L’instantané de disponibilité est mis en cache pendant `subagentModelFallbackPollMs`. Les tâches enfants chiffrées limitent la chaîne aux cibles ChatGPT natives canoniques et aux routes Responses directes avec authentification par clé explicitement approuvées via `allowEncryptedV2AgentTasks: true` ; si aucune ne peut consommer la charge chiffrée, la requête échoue au lieu d’envoyer un texte chiffré illisible à une autre destination. Les combos restent limités aux cibles natives canoniques.
+opencodex ignore les candidats désactivés, non routables, en mauvais état, en période de temporisation ou ayant atteint le seuil de quota. L’instantané de disponibilité est mis en cache pendant `subagentModelFallbackPollMs`. Les tâches enfants chiffrées limitent la chaîne aux cibles ChatGPT natives canoniques et aux routes Responses directes avec authentification par clé explicitement approuvées via `allowEncryptedV2AgentTasks: true` ; si aucune ne peut consommer la charge chiffrée et que la récupération facultative ne permet pas un envoi routé, la requête échoue sans transmettre de texte chiffré illisible. Un combo essaie d’abord une cible native canonique disponible ; si aucune n’est sélectionnable ou si les tentatives natives sont épuisées, et que `agentTaskRecovery` est activé, un `NEW_TASK` chiffré est récupéré une fois avant l’envoi routé du combo.
 
 ```json
 {
@@ -78,7 +78,7 @@ opencodex ignore les candidats désactivés, non routables, en mauvais état, en
 
 ## Récupération des tâches v2 chiffrées
 
-`agentTaskRecovery` est un mécanisme expérimental de compatibilité destiné au cas où un parent ChatGPT natif crée un enfant v2 routé. Il est désactivé par défaut. Lorsqu’il est explicitement activé et que la tâche finale destinée à l’enfant routé contient une charge Fernet autrement illisible, opencodex envoie une requête Responses brute en mode relais vers le point de terminaison fixe `https://chatgpt.com/backend-api/codex/responses`, avec une authentification en mode transmission. ChatGPT renvoie l’instruction en clair au moyen d’un appel de fonction imposé ; avant d’envoyer la requête au fournisseur routé, opencodex convertit uniquement cet élément de tâche en message utilisateur standard.
+`agentTaskRecovery` est un mécanisme expérimental de compatibilité pour les messages de collaboration v2 chiffrés envoyés par un parent ChatGPT natif à un enfant routé. Il est désactivé par défaut. Lorsqu’il est explicitement activé et que l’entrée finale de l’enfant routé contient une charge Fernet `NEW_TASK` ou `MESSAGE` autrement illisible, opencodex envoie une requête Responses brute en mode relais vers le point de terminaison fixe `https://chatgpt.com/backend-api/codex/responses`, avec une authentification en mode transmission. ChatGPT renvoie le contenu en clair au moyen d’un appel de fonction imposé ; avant d’envoyer la requête au fournisseur routé, opencodex convertit uniquement cet élément de collaboration en message utilisateur standard. Le message de récupération routé supprime les métadonnées de routage du transport et ne présente qu’une seule valeur textuelle utilisateur contenant la charge utile. Lors d’une continuation ultérieure avec résultat d’outil et après la sélection finale d’une route non native, les éléments antérieurs sont restaurés depuis le cache et toute absence exacte utilise le même point de terminaison authentifié. L’historique complet est préparé à part et rien n’est transmis si un élément échoue ; une route ChatGPT native conserve le schéma chiffré d’origine. La récupération historique utilise au plus quatre workers simultanés, attend derrière la limite globale du processus et échoue de façon fermée avant envoi au-delà de 128 enveloppes, 8 Mio de texte chiffré cumulé ou deux minutes pour l’historique complet. Le texte historique récupéré est lui aussi limité à 8 Mio avant toute mutation ou transmission.
 
 Il ne s’agit pas d’un déchiffrement local et ce mécanisme ne corrige pas le protocole Codex. Il dépend d’un comportement non documenté du service ChatGPT et peut cesser de fonctionner après une modification de ce service. L’instruction récupérée est une sortie de modèle, et non un texte en clair vérifié cryptographiquement : sa fidélité octet par octet n’est donc pas garantie. En cas d’absence dans le cache propre à cette portée, une requête ChatGPT authentifiée supplémentaire peut être envoyée, consommer le quota du compte et ajouter de la latence avant la requête routée. Les requêtes concurrentes visant la même tâche et la même portée partagent une seule requête de récupération. Un avertissement est affiché au démarrage chaque fois que la fonctionnalité est activée.
 
@@ -88,8 +88,8 @@ Les règles d’admission et de conservation sont volontairement strictes :
 - seul un appelant Codex natif qui présente une paire jeton Bearer/compte ChatGPT concordante est admissible. Cette forme d’identifiant est celle du fournisseur canonique `openai` avec `authMode: "forward"`. La récupération utilise exclusivement la paire de la requête entrante et ne lui substitue jamais une authentification par clé d’API, l’identifiant d’un autre fournisseur ou un autre compte Codex ;
 - les appelants qui utilisent `x-opencodex-api-key`, `x-api-key`, des identifiants d’API génériques ou un secret d’admission du proxy continuent de recevoir l’erreur `unreadable_encrypted_agent_task` existante ;
 - les identifiants ChatGPT bruts sont envoyés uniquement au point de terminaison ChatGPT codé en dur. Ils ne sont jamais placés dans le corps de la requête, les journaux, les clés de cache ou la requête destinée au fournisseur. La portée du cache en mémoire n’utilise qu’un condensat, calculé avec une clé aléatoire propre au processus, de l’identifiant et du compte de l’appelant ;
-- la requête de récupération ne transmet que `authorization`, le `chatgpt-account-id` concordant, `originator` et, facultativement, les métadonnées `openai-beta` et `user-agent`. opencodex définit lui-même `content-type` et `accept` ; aucun autre en-tête de l’appelant ne franchit cette limite ;
-- le texte en clair récupéré n’est jamais journalisé ni conservé. Le cache propre au processus est cloisonné par identifiant, fil parent et texte chiffré ; il expire après 15 minutes et est limité à la fois par le nombre d’entrées configuré (200 par défaut, 512 au maximum) et par une taille totale de 8 MiB ;
+- la requête de récupération ne transmet que `authorization`, le `chatgpt-account-id` concordant et, facultativement, les métadonnées `openai-beta` et `user-agent`. L’`originator` entrant est ignoré plutôt que transmis ; cette requête de récupération uniquement génère localement `originator: codex_cli_rs`. opencodex définit lui-même `content-type` et `accept` ; aucun autre en-tête de l’appelant ne franchit cette limite ;
+- le texte en clair récupéré n’est jamais journalisé ni conservé. Le cache propre au processus est cloisonné par identifiant, fil parent et texte chiffré ; il expire 15 minutes après sa dernière utilisation et est limité à la fois par le nombre d’entrées configuré (200 par défaut, 512 au maximum) et par une taille totale de 8 MiB ;
 - toute enveloppe mal formée, tout échec de récupération, dépassement de délai ou échec de validation conserve l’erreur fermée existante. Une annulation par le client renvoie 499. Aucun des deux chemins n’envoie le texte chiffré au fournisseur routé.
 
 ### Modèle de menace
@@ -102,8 +102,10 @@ Ce mécanisme ne protège pas contre un autre processus exécuté sous le même 
 {
   "agentTaskRecovery": {
     "enabled": true,
-    "model": "gpt-5.6-sol",
-    "timeoutMs": 45000,
+    "model": "gpt-5.6-terra",
+    "reasoningEffort": "low",
+    "serviceTier": "priority",
+    "timeoutMs": 120000,
     "cacheEntries": 200
   }
 }
@@ -111,7 +113,7 @@ Ce mécanisme ne protège pas contre un autre processus exécuté sous le même 
 
 N’activez cette option que si la requête authentifiée supplémentaire, la consommation de quota, la présence de texte en clair dans le processus et la dépendance à un service privé sont acceptables. Dans le cas contraire, privilégiez un enfant ChatGPT natif ou une délégation hétérogène v1.
 
-Ce mécanisme de récupération s’applique aux enfants routés directement. Au maximum 32 requêtes de récupération peuvent être actives simultanément ; toute absence supplémentaire dans le cache échoue de manière sûre. Pour les tâches chiffrées, le routage par combinaison conserve son filtre existant limité aux cibles natives et n’utilise pas la récupération.
+Ce mécanisme de récupération s’applique aux enfants routés directement et aux `NEW_TASK` chiffrés d’un combo. Au maximum 32 requêtes de récupération peuvent être actives simultanément ; toute absence supplémentaire dans le cache échoue de manière sûre. Un combo disposant d’une cible native canonique disponible continue d’envoyer directement le texte chiffré ; la récupération peut s’exécuter si aucune cible native n’est sélectionnable ou si les tentatives natives sont épuisées. Si la récupération est désactivée ou échoue, ou si aucune cible routée n’est disponible, le texte chiffré illisible n’est pas transmis à un fournisseur routé.
 
 ## Plafonds d’effort
 

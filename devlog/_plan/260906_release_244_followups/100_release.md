@@ -3,6 +3,7 @@
 Depends on all preceding delivery criteria. Class C4. No local test/build/typecheck run.
 
 ## Exact actions and file map
+
 - MODIFY package.json via scripts/bump-dev-version.ts for pre-move: for target 2.44.0 dev must outrank target before publish (normally 2.45.0). Freeze feature RC before pre-move and pin it.
 - Use existing scripts/release.ts authority and .github/workflows/release.yml, ci.yml, service-lifecycle.yml. No changes planned unless an evidenced defect blocks this train; add a dedicated phase for such repairs.
 - Create bounded promotion branches from verified feature RC independently for preview/main; version-only preparation matches intended preview/stable targets. Never mix unrelated current-main state or overwrite the bound worktree. Reviewable promotion PRs include target exception and verified UI screenshot/link from current delta.
@@ -14,8 +15,10 @@ Depends on all preceding delivery criteria. Class C4. No local test/build/typech
 - MODIFY this unit's numbered evidence/closeout; archive to devlog/_fin only after outcome is public. Complete goal only after E8 criteria and every D closure succeeds.
 
 ## Failure activation / proof
+
 A failed exact-SHA run triggers log-based RCA and repair; newer dev invalidates ancestor assumptions and is fetched before merge. A missing service run is dispatched, not skipped. Registry already-published check prevents duplicate publication. Final source head, artifact head and tag head must match documented promotion topology. Rollback means redeploy prior known package/version; immutable npm version is not deleted or overwritten.
 
 ## Resources and security
+
 GitHub Actions/OIDC and existing registry read access, no static npm secret introduced. Existing main/preview protection retained; per-user admin merge authorization applies to this train. Commands bounded at 30 minutes, polls <=60s, continue across CI windows with persistent evidence. Source runtime and artifact validation use remote CI only.
 

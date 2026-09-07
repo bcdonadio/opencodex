@@ -25,6 +25,7 @@ import { toolSearchDescription, toolSearchParameters } from "./tool-search-compa
 import { isObj, inputContentParts, outputTextOf, outputToToolResultContent, toolOutputContainsEncryptedContent } from "./parser-content";
 import { mapToolChoice, buildTools, customToolNamespaces } from "./parser-tools";
 import { parseTextFormat } from "./parser-text-format";
+import { externalTaskInputContent } from "./task-input";
 
 /**
  * Wrap a remembered proxy-side signature as provider metadata for a replayed tool call.
@@ -50,7 +51,6 @@ function ensureAssistantPlaceholder(messages: OcxMessage[], modelId: string, now
   messages.push(placeholder);
   return placeholder;
 }
-
 
 function findToolById(messages: OcxMessage[], callId: string): { name: string; namespace?: string } {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -146,6 +146,7 @@ export function parseRequest(
       const item = data.input[inputIndex];
       const effectiveType = (item as { type?: string }).type ?? ("role" in item ? "message" : undefined);
       const itemRole = (item as { role?: string }).role;
+      const externalTaskInput = effectiveType === "function_call_output" ? externalTaskInputContent(item) : undefined;
       // Raw protocol items do not map one-to-one onto context messages. Capture the boundary while
       // both representations are available so later metadata can stay before conversation in both.
       if (
@@ -154,6 +155,7 @@ export function parseRequest(
         && continuationConversationMessageIndex === undefined
         && (
           effectiveType === "agent_message"
+          || externalTaskInput !== undefined
           || (effectiveType === "message" && (itemRole === "user" || itemRole === "assistant"))
         )
       ) {
@@ -429,6 +431,11 @@ export function parseRequest(
       }
 
       if (effectiveType === "function_call_output") {
+        if (externalTaskInput !== undefined) {
+          pendingReasoning.length = 0;
+          messages.push({ role: "user", content: externalTaskInput, timestamp: now });
+          continue;
+        }
         const output = item as { call_id: string; output?: string | unknown[] };
         attachPendingReasoningToCallOwner(messages, output.call_id, pendingReasoning);
         pendingReasoning.length = 0;

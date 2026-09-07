@@ -1,12 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { OcxConfig } from "../../src/types";
 import type { Desktop3pModelEntry } from "../../src/claude/desktop-3p";
 import { repoPath, fixturePath } from "../helpers/repo-root";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 const DATA_KEY = "test-key";
 const cliPath = repoPath("src/cli/index.ts");
@@ -43,6 +44,30 @@ function fixture(side: string, allowedOrigins: string[]) {
     OCX_TEST_DENIED_REQUESTS: paths.denied,
   };
   mkdirSync(env.XDG_RUNTIME_DIR!, { recursive: true });
+  if (process.platform === "win32") {
+    // A fresh profile otherwise rebuilds PowerShell's command-analysis cache
+    // in every CLI child. Seed an owned copy; background updates must never
+    // write the runner's or developer's original cache.
+    const cache = join(root, "module-analysis-cache");
+    env.PSModuleAnalysisCachePath = cache;
+    const source = Object.entries(process.env).find(([key]) =>
+      key.toLowerCase() === "psmoduleanalysiscachepath")?.[1];
+    if (source && isAbsolute(source)) {
+      try {
+        const before = lstatSync(source);
+        if (before.isFile() && !before.isSymbolicLink()) {
+          copyFileSync(source, cache);
+          if (lstatSync(cache).size !== before.size) rmSync(cache, { force: true });
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ESTALE") {
+          throw new Error("Desktop fixture could not read or copy the PowerShell module cache");
+        }
+        rmSync(cache, { force: true });
+      }
+    }
+  }
   return { ...paths, env };
 }
 type Fixture = ReturnType<typeof fixture>;
@@ -209,7 +234,9 @@ for (const storedProfile of [true, false]) {
     else expect(chosenEntry!.name).toMatch(/^claude-opus-4-8-[a-z][a-z0-9]{2}$/);
 
     const apply = spawnOwned(client, ["claude", "desktop", "apply", "--static"]);
-    const appliedCode = await within(apply.child.exited, 30_000, "Remote Desktop apply deadline");
+    // The Windows known-folder lookup alone may validly use its 30s budget
+    // (22.8s in hosted tracing); leave room for the rest of this real CLI apply.
+    const appliedCode = await within(apply.child.exited, SPAWN_BUDGET_MS, "Remote Desktop apply deadline");
     const appliedOutput = await within(Promise.all([apply.stdout, apply.stderr]), 5_000, "Apply output drain deadline");
     if (appliedCode !== 0) throw new Error("Remote Desktop apply failed: " + appliedOutput[1]);
     expect(appliedOutput.join("\n")).not.toContain(DATA_KEY);

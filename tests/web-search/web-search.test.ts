@@ -431,6 +431,7 @@ test("issue #2885 — Zhipu-shaped web-search routing preserves the provider HTT
         codexAccountMode: "direct",
       },
     },
+    webSearchSidecar: { backend: "openai", model: "gpt-test" },
   };
   globalThis.fetch = (async () => {
     throw new Error("the routed web-search leg must use the provider fetch");
@@ -2651,4 +2652,3 @@ describe("connection-reset recovery parity on the web-search legs", () => {
     expect(typeof attempts[1]!.body).toBe("string");
   });
 });
-

@@ -165,6 +165,22 @@ User aliases are display metadata only. Codex pool aliases live on `CodexAccount
 identity, active selection, and routing never consult these fields. The matching CLI is
 `ocx account alias <provider> <id> <display-name|->` (`rename` is accepted as a synonym).
 
+OAuth manual and automatic selection share `commitOAuthAccountSelection` in the auth store.
+The caller resolves a usable credential, commits its matching selection, then dispatches it;
+request-local token replacement must not leave a different dashboard account selected.
+Opaque selection revisions protect manual reselection and A→B→A changes from older requests.
+Credential-only refresh preserves the revision. Generic proactive routing is opt-in and retains
+a healthy selected account; reactive 429 recovery remains available even when the pool is off.
+API-key manual selection and failover similarly share `commitProviderApiKeySelection`, carrying
+stable entry identity and selection revision instead of comparing a resolved secret with an env reference.
+
+The authenticated `GET /api/accounts/events` stream invalidates account/key selection after
+successful persistence. Events contain provider/kind/revision only. The dashboard immediately
+reconciles the cheap local roster and preserves its quota rows; no upstream quota probe is caused
+by an event. One screen-owned stream has disconnect cleanup and bounded server subscribers;
+reconnection and the existing shared scheduler provide recovery. Codex retains its own established
+selection controller. These events cannot change credentials or select an account.
+
 Selection order is the opposite case and must not be folded into the alias route. `codexAccountPriorities`
 is routing metadata that Pool selection consults, it lives in config rather than on `CodexAccount` so the
 `__main__` Desktop login can carry one, and the alias route's rejection of `__main__` would be wrong for
@@ -460,3 +476,27 @@ use the `[ocx:<adapter>:<event>]` prefix, go to the proxy terminal, and are buff
 ## Remote credentials and bounded sessions
 
 Data keys authorize only the data matrix and authenticated catalog. Admin credentials authorize ordinary management and key rotation but cannot mint, exchange, or refresh a `gui-session`. Pairing grants are digest-only, origin-bound, one-use, capped at 128 live grants, burned after five grant failures, and source-limited after ten failures in ten minutes with at most 1,024 source buckets. `POST /api/session/logout` invalidates only the current origin/CSRF-authorized browser session.
+
+
+### Model picker ordering settings
+
+`GET /api/subagent-models` retains `chosen`, `available`, and `catalogState`, and adds routed-only
+`pickerAvailable`, saved `pickerOrder`, and nullable `pickerOrderMode`. `available` still includes
+saved disabled/missing roster choices; it is not the eligible-picker set. Bare aliases are excluded
+from the routed preset surface because a bare id activates complete Codex-picker ordering.
+
+PUT accepts `models` and/or `pickerOrder`; `pickerOrderMode` requires `pickerOrder` and accepts
+`alphabetical`, `provider`, `most-used`, or null. Roster arrays keep their existing exact string
+values and five-slot cap. Picker arrays reject blank, duplicate or ineligible ids. Null/empty
+order clears order and mode; a nonempty order without a mode clears only the mode. Validation
+finishes before a synchronous live mutation/save. An unsupported future deletion-provenance format
+returns 409 for picker writes instead of losing clear intent. Deletion intent is staged separately and
+materialized as existing config rebase provenance, so failed persistence restores the touched
+fields without contaminating the live object's pending-deletion state. Absent fields are not
+copied back from a snapshot taken before discovery, preserving concurrent roster changes.
+
+Only roster writes sync Claude agent definitions/auto-apply Desktop profiles. Picker writes
+converge the Codex catalog once and return its disposition. The Models UI owns a separate bounded
+picker data resource so failure cannot erase the ordinary model inventory; Apply publishes through
+the resource's generation fence, and Most used reads usage only on explicit Apply. Stored mode
+survives availability drift, while complete/native custom orders await explicit replacement.

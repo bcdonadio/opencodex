@@ -26,9 +26,9 @@ archaeology, debugging, or source research.
 ## Product boundary
 
 opencodex is a local proxy for Codex. It does not patch Codex binaries. It changes local Codex
-state by writing root routing keys and a model catalog — a provider table only in the
+state by writing root routing keys — and a provider table only in the
 API-auth-header form described in [`02_config-and-codex-home.md`](02_config-and-codex-home.md) —
-then serves the Responses data plane:
+then serves the model catalog and Responses data plane over the protocol:
 
 ```text
 Codex CLI / TUI / App / SDK
@@ -76,7 +76,7 @@ opencodex state root does not undo those writes. Putting native Codex back is th
 
 | Path | Owner | Notes |
 | --- | --- | --- |
-| `~/.opencodex/config.json` | opencodex | Main config written by `ocx init` and the dashboard. Atomic temp-then-rename. |
+| `~/.opencodex/config.json` | opencodex | Init creates via private temp plus no-replace hard link; dashboard and explicit updates use atomic replacement. |
 | `~/.opencodex/auth.json` | opencodex | OAuth tokens; not committed. Multiauth shape: `provider -> { activeAccountId, accounts[] }` (legacy single-credential values normalize on load; a one-time `auth.json.pre-multiauth` backup guards downgrades). ChatGPT scratch OAuth stays separate from the Codex account store. For multi-slot providers, credentials without `accountId`/email replace the active slot on a normal login; an explicit add-account login preserves the prior slot and appends a distinct one. Single-slot providers such as ChatGPT remain replacement-only. |
 | `~/.opencodex/codex-accounts.json` | opencodex | Hardened main-plus-added credential store used by `openai` in Pool mode. |
 | `~/.opencodex/catalog-backup.json` | opencodex | One-time pristine Codex catalog backup for restore; per-catalog copies are hashed variants (see [`03_catalog-and-subagents.md`](03_catalog-and-subagents.md)). |
@@ -98,7 +98,8 @@ opencodex state root does not undo those writes. Putting native Codex back is th
 
 - `websockets` defaults to `false`; only `true` advertises `supports_websockets`.
 - `CODEX_HOME` wins over `~/.codex` when present and valid.
-- Root TOML keys such as `model_provider` and `model_catalog_json` must stay before any table.
+- Root TOML keys such as `model_provider` must stay before any table; user-owned custom
+  `model_catalog_json` overrides are preserved at the root, but OpenCodex does not add one.
 - Routed model slugs use `provider/model`.
 - OpenAI has one `openai` Codex-login provider with Pool(default)/Direct modes and a separate `openai-apikey`; see [`08_openai-provider-tiers.md`](08_openai-provider-tiers.md).
 - Codex `spawn_agent` visibility depends on the first five featured catalog entries.

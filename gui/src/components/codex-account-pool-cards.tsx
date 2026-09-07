@@ -156,7 +156,7 @@ export function CodexAccountPoolCards({
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => idCopy.copy(a.id, a.id)}>
                   {idCopy.outcomeFor(a.id) === "copied" ? t("startup.copied") : t("codexAuth.copyId")}
                 </button>
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void onEditAlias(a)}>
+                <button type="button" className="btn btn-ghost btn-sm" aria-haspopup="dialog" onClick={() => void onEditAlias(a)}>
                   {t("prov.editAlias")}
                 </button>
                 <button

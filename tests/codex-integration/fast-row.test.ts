@@ -89,7 +89,6 @@ describe("fast-row grammar", () => {
       .toEqual({ baseId: "a--high" });
   });
 });
-
 describe("fast-row eligibility", () => {
   test("only an eligible policy publishes", () => {
     // `unclassified` is the subtle one: capability is undefined, and decideTier makes

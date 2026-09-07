@@ -8,11 +8,12 @@ import {
   isClientClosedMessage,
   isCyberPolicyCode,
   isCyberPolicyMessage,
+  isRateLimitOrQuotaFailureMessage,
   upstreamErrorMessageFromPayload,
 } from "../lib/errors";
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
 import { readCodexCatalogPath } from "../codex/catalog";
-import type { AttemptTierOutcome, OcxUsage } from "../types";
+import type { AttemptTierOutcome, OcxProviderConfig, OcxUsage } from "../types";
 import { captureSafely, diagnosticFinalizedClock, finalizeDiagnostics, finishAttemptDiagnostics, recordContextEstimate, recordContextTransformation, recordProtocolEvent, recordPersistenceOutcome } from "./transaction-capture";
 import { noteRecoveryDispatch } from "./transaction-recovery-capture";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
@@ -23,10 +24,13 @@ import {
   appendUsageEntry,
   isKnownAdmissionKind,
   isKnownInboundProtocol,
+  isKnownInboundTransport,
+  isKnownUsageTransport,
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
   isValidReasoningWireValue,
   normalizeUsageAttempts,
+  normalizeClaudeCompatibilityUsageLog,
   readRecentUsageEntries,
   usageForFinalLog,
   usageStatusForFinalLog,
@@ -34,7 +38,9 @@ import {
   type AttemptRecoveryKind,
   type PersistedUsageAttempt,
   type PersistedUsageEntry,
+  type PersistedClaudeCompatibilityLog,
   type UsageStatus,
+  type UsageTransport,
 } from "../usage/log";
 import {
   appendUsageDebug,
@@ -77,7 +83,8 @@ export interface RequestLogContext {
   inboundProtocol?: "responses" | "chat" | "messages";
   diagnostics?: TransactionDiagnosticsV1;
   inboundTransport?: "http" | "websocket";
-  upstreamTransport?: "http" | "websocket" | "mixed";
+  /** Actual primary upstream wire observed at dispatch time. */
+  upstreamTransport?: UsageTransport;
   /**
    * Set when an adapter answered the turn locally and no upstream request was made
    * (`ProviderAdapter.localTerminal`). A fixed identifier naming the code path, never
@@ -151,11 +158,11 @@ export interface RequestLogContext {
   terminalSource?: "upstream" | "synthetic";
   /** Bounded route-decision trace (RI-01); never contains secrets. */
   routeDecision?: RouteDecisionTraceV1;
+  /** Opt-in shadow evidence, normalized again at the logging boundary. */
+  claudeCompatibility?: PersistedClaudeCompatibilityLog;
 }
 
 export interface RequestLogEntry {
-  inboundTransport?: "http" | "websocket";
-  upstreamTransport?: "http" | "websocket" | "mixed";
   requestId: string;
   timestamp: number;
   model: string;
@@ -180,6 +187,8 @@ export interface RequestLogEntry {
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
   diagnostics?: TransactionDiagnosticsV1;
+  inboundTransport?: "http" | "websocket";
+  upstreamTransport?: UsageTransport;
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
@@ -219,6 +228,8 @@ export interface RequestLogEntry {
   terminalSource?: "upstream" | "synthetic";
   /** Bounded route-decision trace (RI-01); never contains secrets. */
   routeDecision?: RouteDecisionTraceV1;
+  /** Closed Claude protocol codes; no request or header values. */
+  claudeCompatibility?: PersistedClaudeCompatibilityLog;
 }
 
 const requestLog: RequestLogEntry[] = [];
@@ -282,7 +293,7 @@ function asCloseReason(value: string | undefined): RequestLogEntry["closeReason"
   }
 }
 
-/** Legacy transport projections derive from the normalized envelope, one durable authority. */
+/** Prefer recorded diagnostic transports; standalone actual-wire observations remain valid fallbacks. */
 function diagnosticTransports(diagnostics: TransactionDiagnosticsV1 | undefined): Pick<RequestLogEntry, "inboundTransport" | "upstreamTransport"> {
   const result: Pick<RequestLogEntry, "inboundTransport" | "upstreamTransport"> = {};
   if (diagnostics?.inboundTransport === "http" || diagnostics?.inboundTransport === "websocket") result.inboundTransport = diagnostics.inboundTransport;
@@ -295,6 +306,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
   const terminalStatus = asTerminalStatus(entry.terminalStatus);
   const closeReason = asCloseReason(entry.closeReason);
   const routeDecision = normalizeRouteDecisionTraceForLog(entry.routeDecision);
+  const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
   return {
     requestId: entry.requestId,
     timestamp: entry.timestamp,
@@ -306,12 +318,16 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
     ...(entry.diagnostics ? { diagnostics: entry.diagnostics } : {}),
-    ...diagnosticTransports(entry.diagnostics),
     ...(entry.localTerminalReason ? { localTerminalReason: entry.localTerminalReason } : {}),
+    ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
+    ...(isKnownUsageTransport(entry.upstreamTransport)
+      ? { upstreamTransport: entry.upstreamTransport }
+      : {}),
+    ...diagnosticTransports(entry.diagnostics),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
     ...(entry.requestedAlias ? { requestedAlias: entry.requestedAlias } : {}),
     ...(entry.shadowCallRewrittenFrom
@@ -346,6 +362,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.transportPhase ? { transportPhase: entry.transportPhase } : {}),
     ...(entry.terminalSource ? { terminalSource: entry.terminalSource } : {}),
     ...(routeDecision ? { routeDecision } : {}),
+    ...(claudeCompatibility ? { claudeCompatibility } : {}),
   };
 }
 
@@ -405,6 +422,7 @@ export function addRequestLog(entry: RequestLogEntry) {
   const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
   let diagnostics: TransactionDiagnosticsV1 | undefined;
   let persistenceStarted: number | undefined;
+  const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
   try {
     persistenceStarted = diagnosticFinalizedClock(entry.diagnostics);
     diagnostics = normalizeTransactionDiagnostics(entry.diagnostics);
@@ -414,6 +432,8 @@ export function addRequestLog(entry: RequestLogEntry) {
     diagnostics = undefined;
   }
   const retained: RequestLogEntry = { ...entry };
+  if (claudeCompatibility) retained.claudeCompatibility = claudeCompatibility;
+  else delete retained.claudeCompatibility;
   if (entry.attempts !== undefined) {
     try {
       // The finalized ring row owns a snapshot, not handles still writable by
@@ -431,8 +451,8 @@ export function addRequestLog(entry: RequestLogEntry) {
   else delete retained.localTerminalReason;
   if (diagnostics) retained.diagnostics = diagnostics;
   else delete retained.diagnostics;
-  delete retained.inboundTransport;
-  delete retained.upstreamTransport;
+  if (!isKnownInboundTransport(retained.inboundTransport)) delete retained.inboundTransport;
+  if (!isKnownUsageTransport(retained.upstreamTransport)) delete retained.upstreamTransport;
   Object.assign(retained, diagnosticTransports(diagnostics));
   entry = retained;
   captureSafely(() => {
@@ -463,8 +483,12 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
       ...(entry.diagnostics ? { diagnostics: entry.diagnostics } : {}),
       ...(entry.localTerminalReason ? { localTerminalReason: entry.localTerminalReason } : {}),
+      ...(isKnownInboundTransport(entry.inboundTransport) ? { inboundTransport: entry.inboundTransport } : {}),
       ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
+        : {}),
+      ...(isKnownUsageTransport(entry.upstreamTransport)
+        ? { upstreamTransport: entry.upstreamTransport }
         : {}),
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
       ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
@@ -499,6 +523,7 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.transportPhase ? { transportPhase: entry.transportPhase } : {}),
       ...(entry.terminalSource ? { terminalSource: entry.terminalSource } : {}),
       ...(entry.routeDecision ? { routeDecision: entry.routeDecision } : {}),
+      ...(entry.claudeCompatibility ? { claudeCompatibility: entry.claudeCompatibility } : {}),
     });
     recordPersistenceOutcome(entry.diagnostics, true, persistenceStarted);
   } catch {
@@ -958,7 +983,7 @@ function captureTerminalHttpStatus(
     last_error?: { type?: unknown; code?: unknown; message?: unknown };
     response?: {
       error?: { type?: unknown; code?: unknown; message?: unknown };
-      incomplete_details?: { code?: unknown; message?: unknown };
+      incomplete_details?: { code?: unknown; message?: unknown; reason?: unknown };
     };
   },
 ): void {
@@ -967,7 +992,9 @@ function captureTerminalHttpStatus(
   if (type !== "response.failed" && type !== "response.incomplete" && type !== "error") return;
   const responseError = json.response?.error;
   const responseDetails = json.response?.incomplete_details;
-  const candidates = [json.error, json.last_error, responseError, responseDetails, json];
+  const candidates: Array<{ type?: unknown; code?: unknown; message?: unknown } | undefined> = [
+    json.error, json.last_error, responseError, responseDetails, json,
+  ];
   const policy = candidates.some(candidate => (
     candidate?.code === null || typeof candidate?.code === "string"
   ) && isCyberPolicyCode(candidate.code as string | null | undefined))
@@ -979,6 +1006,29 @@ function captureTerminalHttpStatus(
   if (policy) {
     logCtx.terminalErrorCode = CYBER_POLICY_ERROR_CODE;
     logCtx.terminalHttpStatus = 400;
+    return;
+  }
+  // A quota terminal can carry only a structured reason, without an error message.
+  // Keep this separate from normal output limits and from the policy precedence above.
+  const quotaTag = (value: unknown): boolean => value === "usage_limit_reached"
+    || value === "rate_limit_exceeded" || value === "insufficient_quota";
+  const structuredRefusal = candidates.some(candidate => [400, 401, 403, 499].includes(
+    httpStatusFromTerminalError({
+      type: typeof candidate?.type === "string" ? candidate.type : undefined,
+      code: typeof candidate?.code === "string" ? candidate.code : undefined,
+    }),
+  ));
+  const ordinaryIncompleteReason = typeof responseDetails?.reason === "string"
+    && ["max_output_tokens", "content_filter", "steered", "upstream_stall_timeout", "adapter_eof"].includes(responseDetails.reason);
+  if (type === "response.incomplete" && !structuredRefusal && (quotaTag(responseDetails?.reason) || candidates.some(candidate =>
+    quotaTag(candidate?.code)
+    || quotaTag(candidate?.type) || candidate?.type === "rate_limit_error"
+    || (!ordinaryIncompleteReason && typeof candidate?.message === "string" && isRateLimitOrQuotaFailureMessage(candidate.message))
+  ))) {
+    // The shared quota classifier also accepts a numeric HTTP status as its message.
+    // Preserve explicit payment-required evidence rather than relabeling it as 429.
+    logCtx.terminalHttpStatus = candidates.some(candidate => typeof candidate?.message === "string"
+      && Number(candidate.message.trim()) === 402) ? 402 : 429;
     return;
   }
   if (type !== "response.failed" || !responseError || typeof responseError !== "object") return;
@@ -1009,6 +1059,9 @@ export function httpStatusForRequestLogTerminal(
   status: ResponsesTerminalStatus,
   logCtx?: RequestLogContext,
 ): number {
+  if (status === "incomplete" && (logCtx?.terminalHttpStatus === 429 || logCtx?.terminalHttpStatus === 402)) {
+    return logCtx.terminalHttpStatus;
+  }
   /**
    * [Decision Log]
    * - 목적과 의도: Keep request logs aligned with the successful HTTP/SSE contract.
@@ -1087,12 +1140,17 @@ export function addFinalRequestLog(
   const loggedUsage = aggregate?.usage ?? existing.usage;
   const usageStatus = aggregate?.status ?? existing.status;
   const totalTokens = aggregate?.totalTokens ?? existing.totalTokens;
+  const upstreamTransport = mergeObservedTransports([
+    logCtx.upstreamTransport,
+    ...(attempts?.map(attempt => attempt.upstreamTransport) ?? []),
+  ]);
   // Sanitize at the logging layer, not only at the one call site that populates this today.
   // The value originates in an upstream-supplied model id, so an unsanitized newline would
   // let a single field forge a record boundary in any line-oriented log viewer. Doing it here
   // means a future caller cannot reintroduce the hole by forgetting to sanitize first, and
   // the in-memory /api/logs row matches what usage.jsonl already stores.
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(logCtx.shadowCallRewrittenFrom);
+  const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(logCtx.claudeCompatibility);
   addLog({
     requestId,
     timestamp: start,
@@ -1103,13 +1161,15 @@ export function addFinalRequestLog(
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
     ...(logCtx.diagnostics ? { diagnostics: logCtx.diagnostics } : {}),
-    ...diagnosticTransports(logCtx.diagnostics),
+    ...(isKnownInboundTransport(logCtx.inboundTransport) ? { inboundTransport: logCtx.inboundTransport } : {}),
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),
     ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel)
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
+    ...(isKnownUsageTransport(upstreamTransport) ? { upstreamTransport } : {}),
+    ...diagnosticTransports(logCtx.diagnostics),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
     ...(logCtx.requestedModel ? { requestedModel: logCtx.requestedModel } : {}),
     ...(logCtx.requestedAlias ? { requestedAlias: logCtx.requestedAlias } : {}),
@@ -1144,6 +1204,7 @@ export function addFinalRequestLog(
     ...(logCtx.transportPhase ? { transportPhase: logCtx.transportPhase } : {}),
     ...(logCtx.terminalSource ? { terminalSource: logCtx.terminalSource } : {}),
     ...(logCtx.routeDecision ? { routeDecision: logCtx.routeDecision } : {}),
+    ...(claudeCompatibility ? { claudeCompatibility } : {}),
   });
   if (isUsageDebugEnabled()) {
     appendUsageDebug({
@@ -1316,6 +1377,29 @@ export function beginRequestAttempt(
   };
 }
 
+/** Fold actual dispatch observations without inventing a value for no-send rows. */
+export function mergeObservedTransports(values: readonly (UsageTransport | undefined)[]): UsageTransport | undefined {
+  let merged: UsageTransport | undefined;
+  for (const value of values) {
+    if (!isKnownUsageTransport(value)) continue;
+    if (merged === undefined) merged = value;
+    else if (merged !== value) merged = "mixed";
+  }
+  return merged;
+}
+
+/** Record a physical upstream dispatch on both the parent row and active attempt. */
+export function observeRequestTransport(logCtx: RequestLogContext, transport: Exclude<UsageTransport, "mixed">): void {
+  if (transport !== "http" && transport !== "websocket") return;
+  logCtx.upstreamTransport = mergeObservedTransports([logCtx.upstreamTransport, transport]);
+  if (logCtx.activeAttempt) {
+    logCtx.activeAttempt.upstreamTransport = mergeObservedTransports([
+      logCtx.activeAttempt.upstreamTransport,
+      transport,
+    ]);
+  }
+}
+
 export function sealRequestAttemptIdentity(
   attempt: PersistedUsageAttempt | undefined,
   provider: string,
@@ -1323,9 +1407,38 @@ export function sealRequestAttemptIdentity(
   accountLogLabel?: string,
 ): void {
   if (!attempt) return;
+  if (attempt.provider !== provider || attempt.adapter !== adapter) delete attempt.credentialSource;
   attempt.provider = provider;
   attempt.adapter = adapter;
   if (isCodexUsageAccountLogLabel(accountLogLabel)) attempt.accountLogLabel = accountLogLabel;
+  else delete attempt.accountLogLabel;
+}
+
+/** Capture only the resolved upstream route; inbound auth and today's config cannot label old usage. */
+export function recordAttemptCredentialSource(
+  attempt: PersistedUsageAttempt | undefined,
+  providerName: string,
+  provider: Pick<OcxProviderConfig, "authMode" | "baseUrl" | "adapter">,
+  adapterName: string = provider.adapter,
+): void {
+  if (!attempt) return;
+  // Rebinding an attempt to an unrecognized route must not retain its previous attribution.
+  delete attempt.credentialSource;
+  if (providerName !== "xai"
+    || !["openai-chat", "openai-responses"].includes(adapterName)) return;
+  try {
+    const url = new URL(provider.baseUrl ?? "");
+    if (url.protocol !== "https:" || url.port || url.username || url.password
+      || url.search || url.hash || !["/v1", "/v1/"].includes(url.pathname)) return;
+    if (provider.authMode === "oauth" && url.hostname === "cli-chat-proxy.grok.com") {
+      attempt.credentialSource = "grok-oauth";
+    } else if ((provider.authMode === "key" || provider.authMode === undefined)
+      && url.hostname === "api.x.ai") {
+      attempt.credentialSource = "xai-api-key";
+    }
+  } catch {
+    // Invalid/custom destinations have no known subscription provenance.
+  }
 }
 
 export function noteAttemptSend(

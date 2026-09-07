@@ -7,6 +7,7 @@ import {
   resolveEnvValue,
 } from "../../config";
 import { parseRequest } from "../../responses/parser";
+import { externalTaskInputContent } from "../../responses/task-input";
 import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractCompactUserMessages } from "../../responses/compaction";
 import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
 import { expandPreviousResponseInput, previousResponseProviderState, rememberResponseState } from "../../responses/state";
@@ -472,6 +473,7 @@ export async function multiAgentGuidanceText(
     if (!preferred && roster === "" && fallbackGuidance === "") return null;
     let text = "When the active spawn_agent tool supports optional \"model\" or \"reasoning_effort\" overrides, "
       + "use only models listed for this collaboration surface. "
+      + "However, an **explicit** user request can override any of those parameters. "
       + "When setting either override, set fork_turns to \"none\" "
       + "(or a positive turn count such as \"3\"; full-history forks reject overrides) "
       + "and make the task message self-contained.";
@@ -558,7 +560,7 @@ function leadingDeveloperPrefixLength(items: readonly unknown[]): number {
 
 function isConversationalItem(item: unknown): boolean {
   if (!isRecord(item)) return false;
-  if (item.type === "agent_message") return true;
+  if (item.type === "agent_message" || externalTaskInputContent(item) !== undefined) return true;
   const type = item.type ?? (typeof item.role === "string" ? "message" : undefined);
   return type === "message" && (item.role === "user" || item.role === "assistant");
 }

@@ -87,6 +87,57 @@ describe("native routed code-mode result visibility", () => {
     expect(JSON.stringify(body)).toBe(before);
   });
 
+  test.each([
+    ["https://api.x.ai/v1", "key"],
+    ["https://cli-chat-proxy.grok.com/v1", "oauth"],
+  ] as const)("xAI continuation preserves instructions and tool output without conflicting fields: %s", (baseUrl, authMode) => {
+    const output = { type: "custom_tool_call_output", call_id: "call_probe", output: "tool-result-marker" };
+    const body = { ...raw(), previous_response_id: "prior-xai-response", store: false, input: [output] };
+    const before = JSON.stringify(body);
+    const wire = JSON.parse(createResponsesPassthroughAdapter({ ...routed, baseUrl, authMode })
+      .buildRequest(parseRequest(body)).body);
+    expect(wire.previous_response_id).toBe("prior-xai-response");
+    expect(wire).not.toHaveProperty("instructions");
+    expect(wire.input[0]).toEqual({
+      role: "system", content: `Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}`,
+    });
+    expect(wire.input[1]).toMatchObject({
+      type: "custom_tool_call_output", call_id: "call_probe", output: "tool-result-marker",
+    });
+    expect(wire.store).toBe(false);
+    expect(JSON.stringify(body)).toBe(before);
+  });
+
+  test("xAI expanded replay keeps top-level instructions and removes the redundant response id", () => {
+    const body = { ...raw(), previous_response_id: "prior-xai-response" };
+    const parsed = parseRequest(body);
+    parsed._previousResponseInputExpanded = true;
+    const wire = JSON.parse(createResponsesPassthroughAdapter(routed).buildRequest(parsed).body);
+    expect(wire).not.toHaveProperty("previous_response_id");
+    expect(wire.instructions).toContain("Keep this instruction.");
+    expect(wire.input).toHaveLength(2);
+  });
+
+  test.each(["https://api.openai.com/v1", "https://api.x.ai.example/v1", "https://api.x.ai:8443/v1"])(
+    "does not apply xAI continuation rules to another destination: %s", (baseUrl) => {
+      const body = { model: "grok-4.6", instructions: "Keep this instruction.", previous_response_id: "prior", input: "next" };
+      const wire = JSON.parse(createResponsesPassthroughAdapter({ ...routed, baseUrl }).buildRequest(parseRequest(body)).body);
+      expect(wire.instructions).toBe(body.instructions);
+      expect(wire.previous_response_id).toBe("prior");
+      expect(wire.input).toBe("next");
+    },
+  );
+
+  test.each(["", "New instructions"])("xAI string-input continuation preserves instruction text: %s", (instructions) => {
+    const body = { model: "grok-4.6", instructions, previous_response_id: "prior", input: "next" };
+    const wire = JSON.parse(createResponsesPassthroughAdapter(routed).buildRequest(parseRequest(body)).body);
+    expect(wire).not.toHaveProperty("instructions");
+    expect(wire.previous_response_id).toBe("prior");
+    expect(wire.input).toEqual(instructions === "" ? "next" : [
+      { role: "system", content: instructions }, { role: "user", content: "next" },
+    ]);
+  });
+
   test("the advertised first-call example emits a helper result exactly once", async () => {
     const example = CODE_MODE_RESULT_ECHO_SENTENCE.match(/`(text\(JSON\.stringify\(await tools\.exec_command[^`]+)`/)?.[1];
     if (!example) throw new Error("Missing executable result-emission example");
@@ -2523,6 +2574,24 @@ describe("OpenAI Responses passthrough sanitization", () => {
         text: "[tool output for unknown call]\n<codex_delegation>Inspect the adapter.</codex_delegation>",
       }],
     }]);
+  });
+
+  test("external task parsing preserves the existing raw passthrough repair", () => {
+    const adapter = createResponsesPassthroughAdapter({
+      adapter: "openai-responses", baseUrl: "https://api.x.ai/v1", authMode: "key" as const, apiKey: "xai-test",
+    });
+    const raw = {
+      model: "grok-4.6",
+      input: [{ type: "function_call_output", id: "external-fixture", name: "handoff_input", namespace: "task_inbox", output: "external input" }],
+    };
+    const original = structuredClone(raw);
+    const parsed = parseRequest(raw);
+    expect(parsed.context.messages).toMatchObject([{ role: "user", content: "external input" }]);
+    expect(raw).toEqual(original);
+    const body = JSON.parse(adapter.buildRequest(parsed, meta).body) as { input: unknown[] };
+    expect(body.input).toEqual([{ type: "message", role: "user", content: [
+      { type: "input_text", text: "[tool output for unknown call]\nexternal input" },
+    ] }]);
   });
 
   test("api-key mode keeps stateful tool outputs with call_id intact", () => {

@@ -25,6 +25,9 @@ import {
 
 const MAX_STORED_RESPONSES = 1_000;
 const RESPONSE_TTL_MS = 60 * 60 * 1_000;
+const EPHEMERAL_RESPONSE_TTL_MS = 15 * 60 * 1_000;
+const MAX_EPHEMERAL_RESPONSES = 128;
+const MAX_EPHEMERAL_RESPONSE_BYTES = 8 * 1024 * 1024;
 const SNAPSHOT_DEBOUNCE_MS = 2_000;
 /** Snapshot size below which the debounce stays at its base value. */
 const SNAPSHOT_DEBOUNCE_SCALE_FROM_BYTES = 1 * 1024 * 1024;
@@ -121,10 +124,15 @@ type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
 
 export type PreviousResponseReplayFailure = {
   code: "previous_response_not_found";
-  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large";
+  reason: "spill_missing" | "spill_corrupt" | "spill_failed" | "spill_too_large" | "ephemeral_scope_mismatch";
 };
 
 const states = new Map<string, StoredResponseState>();
+type EphemeralResponseState = ResidentResponseState & { responseId: string; expiresAt: number };
+const ephemeralStates = new Map<string, EphemeralResponseState>();
+let ephemeralBodyExpiry = new WeakMap<object, number>();
+let ephemeralResponseBytes = 0;
+let ephemeralExpiryTimer: ReturnType<typeof setTimeout> | null = null;
 const replayScopeMismatches = new WeakSet<object>();
 let storedResponseBytes = 0;
 let residentResponseBytes = 0;
@@ -169,7 +177,10 @@ async function snapshotOnDiskMatches(path: string, payload: string, payloadBytes
     return false;
   }
 }
-const spillCounters = { writes: 0, writeFailures: 0, readFailures: 0 };
+const spillCounters = {
+  writes: 0, writeFailures: 0, readFailures: 0,
+  aclRetryReturnedTimeouts: 0, aclTimeoutMemoRefusals: 0,
+};
 
 export type ResponseSpillWriteFailureCode =
   | "EACLRETRYEXHAUSTED"
@@ -184,9 +195,14 @@ export type ResponseSpillWriteFailureCode =
 
 export type ResponseSpillWriteStatus = "initial" | "healthy" | "degraded";
 
+export type ResponseSpillWriteFailureOrigin =
+  | "retry_returned_timeout"
+  | "timeout_memo_refusal";
+
 interface ResponseSpillWriteHealth {
   consecutiveFailures: number;
   lastFailureCode: ResponseSpillWriteFailureCode | null;
+  lastFailureOrigin: ResponseSpillWriteFailureOrigin | null;
   lastFailureAt: number | null;
   lastSuccessAt: number | null;
 }
@@ -194,6 +210,7 @@ interface ResponseSpillWriteHealth {
 const spillWriteHealth: ResponseSpillWriteHealth = {
   consecutiveFailures: 0,
   lastFailureCode: null,
+  lastFailureOrigin: null,
   lastFailureAt: null,
   lastSuccessAt: null,
 };
@@ -226,6 +243,20 @@ function classifySpillWriteFailure(error: unknown): ResponseSpillWriteFailureCod
   return "EUNKNOWN";
 }
 
+/** The spill writer preserves ACL errors in cause; only a fixed memo marker is diagnostic. */
+function spillAclMemoRefusalOrigin(error: unknown): "timeout_memo_refusal" | null {
+  let cursor = error;
+  for (let depth = 0; depth < 4 && cursor && typeof cursor === "object"; depth += 1) {
+    const record = cursor as { code?: unknown; aclFailureOrigin?: unknown; cause?: unknown };
+    if ((record.code === "ETIMEDOUT" || record.code === "EACLRETRYEXHAUSTED")
+      && record.aclFailureOrigin === "timeout_memo_refusal") {
+      return "timeout_memo_refusal";
+    }
+    cursor = record.cause;
+  }
+  return null;
+}
+
 function noteSpillWriteSuccess(): void {
   spillCounters.writes += 1;
   spillWriteHealth.consecutiveFailures = 0;
@@ -235,11 +266,20 @@ function noteSpillWriteSuccess(): void {
 function noteSpillWriteFailure(
   error: unknown,
   override?: ResponseSpillWriteFailureCode,
+  retryOrigin: ResponseSpillWriteFailureOrigin | null = null,
 ): void {
+  const code = override ?? classifySpillWriteFailure(error);
+  const origin = code === "ETIMEDOUT" || code === "EACLRETRYEXHAUSTED"
+    ? spillAclMemoRefusalOrigin(error) ?? retryOrigin
+    : null;
   spillCounters.writeFailures += 1;
   spillWriteHealth.consecutiveFailures += 1;
-  spillWriteHealth.lastFailureCode = override ?? classifySpillWriteFailure(error);
+  spillWriteHealth.lastFailureCode = code;
+  spillWriteHealth.lastFailureOrigin = origin;
   spillWriteHealth.lastFailureAt = now();
+  // Count terminal publications, not ACL calls or a transient first attempt.
+  if (origin === "retry_returned_timeout") spillCounters.aclRetryReturnedTimeouts += 1;
+  else if (origin === "timeout_memo_refusal") spillCounters.aclTimeoutMemoRefusals += 1;
 }
 /**
  * Admission-boundary observability (test-visible). directSpills: oversized
@@ -418,6 +458,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
   const candidate = job.candidate;
   let ref: ResponseSpillRef | null = null;
   let exhaustedAclRetry = false;
+  let aclRetryFailureOrigin: ResponseSpillWriteFailureOrigin | null = null;
   try {
     const state = spillPayloadForResident(candidate);
     try {
@@ -437,6 +478,9 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
         });
       } catch (retryError) {
         exhaustedAclRetry = isAclTimeout(retryError);
+        // A returned timeout can also mean an exhausted budget before the next OS command.
+        aclRetryFailureOrigin = spillAclMemoRefusalOrigin(retryError)
+          ?? (exhaustedAclRetry ? "retry_returned_timeout" : null);
         throw retryError;
       }
     }
@@ -460,7 +504,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
   } catch (error) {
     if (ref) deleteResponseSpill(ref);
     if (states.get(job.id) === candidate && !job.cancelled) {
-      noteSpillWriteFailure(error, exhaustedAclRetry ? "EACLRETRYEXHAUSTED" : undefined);
+      noteSpillWriteFailure(error, exhaustedAclRetry ? "EACLRETRYEXHAUSTED" : undefined, aclRetryFailureOrigin);
       replaceWithSpillFailure(job.id, candidate);
       deferSupersededSpill(job.supersededSpill);
     }
@@ -2069,16 +2113,40 @@ function withoutPreviousResponseId(request: Record<string, unknown>): Record<str
   return freshRequest;
 }
 
-export function expandPreviousResponseInput(body: unknown, clientThreadId?: string): unknown {
+function ephemeralResponseKey(scope: string, responseId: string): string {
+  return JSON.stringify([scope, responseId]);
+}
+
+export function expandPreviousResponseInput(
+  body: unknown,
+  clientThreadId?: string,
+  ephemeralScope?: string,
+): unknown {
   if (!body || typeof body !== "object" || Array.isArray(body)) return body;
   const request = body as Record<string, unknown>;
   const previousId = typeof request.previous_response_id === "string" ? request.previous_response_id : undefined;
   if (!previousId) return body;
   ensureLoaded();
   pruneResponses();
-  const previous = states.get(previousId);
+  pruneEphemeralResponses();
+  const normalizedEphemeralScope = typeof ephemeralScope === "string" && ephemeralScope.trim().length > 0
+    ? ephemeralScope
+    : undefined;
+  const ephemeral = normalizedEphemeralScope
+    ? ephemeralStates.get(ephemeralResponseKey(normalizedEphemeralScope, previousId))
+    : undefined;
+  if (!ephemeral && [...ephemeralStates.values()].some(state => state.responseId === previousId)) {
+    replayFailures.set(request, {
+      code: "previous_response_not_found",
+      reason: "ephemeral_scope_mismatch",
+    });
+    return body;
+  }
+  const previous = ephemeral ?? states.get(previousId);
   if (!previous) return body;
-  const materialized = materializeEntry(previousId, previous);
+  const materialized = ephemeral
+    ? { ok: true as const, state: { ...ephemeral, items: structuredClone(ephemeral.items) } }
+    : materializeEntry(previousId, previous);
   if (!materialized.ok) {
     replayFailures.set(request, materialized.failure);
     return body;
@@ -2123,6 +2191,10 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
       // not re-acknowledge historical compaction markers (parser.ts) and stays visible to
       // guidance de-duplication (collaboration.ts).
       replayedInputPrefixLengths.set(unchanged, carried);
+      if (ephemeral) {
+        markBodyNonPersistable(unchanged);
+        ephemeralBodyExpiry.set(unchanged, ephemeral.expiresAt);
+      }
       return unchanged;
     }
   }
@@ -2130,6 +2202,10 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
     ...request,
     input: [...materialized.state.items, ...inputItems(request.input)],
   };
+  if (ephemeral) {
+    markBodyNonPersistable(expanded);
+    ephemeralBodyExpiry.set(expanded, ephemeral.expiresAt);
+  }
   replayedInputPrefixLengths.set(expanded, materialized.state.items.length);
   return expanded;
 }
@@ -2154,6 +2230,11 @@ export function copyPreviousResponseReplayProvenance(source: unknown, target: un
   const input = (target as { input?: unknown }).input;
   if (!Array.isArray(input) || prefixLength > input.length) return;
   replayedInputPrefixLengths.set(target, prefixLength);
+  const expiry = ephemeralBodyExpiry.get(source as object);
+  if (expiry !== undefined) {
+    markBodyNonPersistable(target);
+    ephemeralBodyExpiry.set(target as object, expiry);
+  }
 }
 
 /** True when a stale or foreign previous_response_id was removed from this exact request body. */
@@ -2188,6 +2269,9 @@ export interface ResponseStateMetrics {
   spillWriteStatus: ResponseSpillWriteStatus;
   spillWriteConsecutiveFailures: number;
   spillLastWriteFailureCode: ResponseSpillWriteFailureCode | null;
+  spillLastWriteFailureOrigin: ResponseSpillWriteFailureOrigin | null;
+  spillAclRetryReturnedTimeouts: number;
+  spillAclTimeoutMemoRefusals: number;
   spillLastWriteFailureAt: number | null;
   spillLastWriteSuccessAt: number | null;
   spillReadFailures: number;
@@ -2240,6 +2324,9 @@ export function responseStateMetrics(): ResponseStateMetrics {
         : "initial",
     spillWriteConsecutiveFailures: spillWriteHealth.consecutiveFailures,
     spillLastWriteFailureCode: spillWriteHealth.lastFailureCode,
+    spillLastWriteFailureOrigin: spillWriteHealth.lastFailureOrigin,
+    spillAclRetryReturnedTimeouts: spillCounters.aclRetryReturnedTimeouts,
+    spillAclTimeoutMemoRefusals: spillCounters.aclTimeoutMemoRefusals,
     spillLastWriteFailureAt: spillWriteHealth.lastFailureAt,
     spillLastWriteSuccessAt: spillWriteHealth.lastSuccessAt,
     spillReadFailures: spillCounters.readFailures,
@@ -2272,15 +2359,85 @@ export function markBodyNonPersistable(body: unknown): void {
   if (body && typeof body === "object") nonPersistableBodies.add(body as object);
 }
 
+function pruneEphemeralResponses(at = now()): void {
+  for (const [id, state] of ephemeralStates) {
+    if (state.expiresAt > at) continue;
+    ephemeralStates.delete(id);
+    ephemeralResponseBytes -= state.sizeBytes;
+  }
+  while (ephemeralStates.size > MAX_EPHEMERAL_RESPONSES
+    || ephemeralResponseBytes > MAX_EPHEMERAL_RESPONSE_BYTES) {
+    const oldest = ephemeralStates.keys().next().value as string | undefined;
+    if (!oldest) break;
+    ephemeralResponseBytes -= ephemeralStates.get(oldest)!.sizeBytes;
+    ephemeralStates.delete(oldest);
+  }
+  if (ephemeralExpiryTimer) clearTimeout(ephemeralExpiryTimer);
+  const next = [...ephemeralStates.values()].reduce<number | null>(
+    (expiry, state) => expiry === null || state.expiresAt < expiry ? state.expiresAt : expiry,
+    null,
+  );
+  ephemeralExpiryTimer = next === null ? null : setTimeout(
+    () => pruneEphemeralResponses(),
+    Math.max(1, next - now()),
+  );
+  ephemeralExpiryTimer?.unref?.();
+}
+
+function rememberEphemeralResponseState(
+  request: Record<string, unknown>,
+  response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
+  clientThreadId?: string,
+  ephemeralScope?: string,
+): void {
+  if (!ephemeralScope || ephemeralScope.trim().length === 0) return;
+  if (typeof response.id !== "string" || !Array.isArray(response.output)) return;
+  if (response.status === "incomplete") {
+    const details = response.incomplete_details;
+    if (!details || typeof details !== "object" || Array.isArray(details)
+      || (details as { reason?: unknown }).reason !== "max_output_tokens") return;
+  } else if (response.status !== undefined && response.status !== "completed") return;
+  const createdAt = now();
+  const expiresAt = ephemeralBodyExpiry.get(request) ?? createdAt + EPHEMERAL_RESPONSE_TTL_MS;
+  if (expiresAt <= createdAt) return;
+  let requestItems: unknown[];
+  let output: unknown[];
+  try {
+    requestItems = structuredClone(inputItems(request.input));
+    output = structuredClone(response.output);
+  } catch {
+    return;
+  }
+  const candidate = measureResidentEntry(response.id, {
+    createdAt,
+    ...(normalizedClientThreadId(clientThreadId) ? { clientThreadId: normalizedClientThreadId(clientThreadId) } : {}),
+    items: [...requestItems, ...output],
+    providerOutputStart: requestItems.length,
+  });
+  if (!candidate || candidate.sizeBytes > MAX_EPHEMERAL_RESPONSE_BYTES) return;
+  const key = ephemeralResponseKey(ephemeralScope, response.id);
+  const previous = ephemeralStates.get(key);
+  if (previous) ephemeralResponseBytes -= previous.sizeBytes;
+  ephemeralStates.delete(key);
+  ephemeralStates.set(key, { ...candidate, responseId: response.id, expiresAt });
+  ephemeralResponseBytes += candidate.sizeBytes;
+  pruneEphemeralResponses(createdAt);
+}
+
 export function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
   providerState?: OcxProviderContinuationState | string,
-  opts?: { force?: boolean; clientThreadId?: string },
+  opts?: { force?: boolean; clientThreadId?: string; ephemeral?: boolean; ephemeralScope?: string },
 ): void {
   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
   const request = requestBody as Record<string, unknown>;
-  if (nonPersistableBodies.has(request)) return;
+  if (nonPersistableBodies.has(request)) {
+    if (opts?.ephemeral) {
+      rememberEphemeralResponseState(request, response, opts.clientThreadId, opts.ephemeralScope);
+    }
+    return;
+  }
   // `force` bypasses only the store:false skip: Codex sends `store:false` on every non-Azure
   // HTTP request (and WS inherits it), yet its WS turns still chain with previous_response_id.
   // The passthrough branch records with force so those chains can be expanded locally; the
@@ -2348,6 +2505,11 @@ export function clearResponseStateMemoryForTests(): void {
     persistTimer = null;
   }
   pendingPersistPath = null;
+  if (ephemeralExpiryTimer) clearTimeout(ephemeralExpiryTimer);
+  ephemeralExpiryTimer = null;
+  ephemeralStates.clear();
+  ephemeralBodyExpiry = new WeakMap<object, number>();
+  ephemeralResponseBytes = 0;
   for (const id of [...pendingResponseSpillById.keys()]) cancelPendingResponseSpill(id);
   pendingResponseSpillById.clear();
   states.clear();
@@ -2360,8 +2522,11 @@ export function clearResponseStateMemoryForTests(): void {
   spillCounters.writes = 0;
   spillCounters.writeFailures = 0;
   spillCounters.readFailures = 0;
+  spillCounters.aclRetryReturnedTimeouts = 0;
+  spillCounters.aclTimeoutMemoRefusals = 0;
   spillWriteHealth.consecutiveFailures = 0;
   spillWriteHealth.lastFailureCode = null;
+  spillWriteHealth.lastFailureOrigin = null;
   spillWriteHealth.lastFailureAt = null;
   spillWriteHealth.lastSuccessAt = null;
   replayScopeMismatchDrops = 0;

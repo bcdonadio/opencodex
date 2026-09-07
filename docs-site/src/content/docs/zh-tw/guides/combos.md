@@ -63,7 +63,7 @@ ocx combo show main
 
 ## Codex Desktop 原生 allowlist 相容性
 
-某些 Codex Desktop 版本會在 app-server 已載入 `model_catalog_json` 之後，套用只允許原生的遠端
+某些 Codex Desktop 版本會在 app-server 已載入 proxy 提供的模型目錄之後，套用只允許原生的遠端
 `available_models` allowlist。因此 `Nova1/codex-gpt-5.6-sol` 這類正常路由 id 在 CLI 可用，卻不會
 出現在 Desktop 的選擇器中。這是上游的 [Codex Desktop bug](https://github.com/openai/codex/issues/19694)，
 由 [opencodex #241](https://github.com/lidge-jun/opencodex/issues/241) 追蹤。

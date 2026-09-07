@@ -21,6 +21,7 @@ import { accountNeedsReauth } from "../oauth-health-display";
 import { useCopyFeedback } from "./use-copy-feedback";
 import { DEFAULT_ACCOUNT_POOL_STRATEGY } from "../account-pool-strategy";
 import type { CodexAccountMutationCompletion } from "../codex-account-mutation";
+import { useAliasEditor } from "../hooks/useAliasEditor";
 import { createBoundedFetch, type BoundedFetch } from "../bounded-fetch";
 import CodexQuotaAutoRefreshSetting from "./CodexQuotaAutoRefreshSetting";
 import { quotaActivationWindows, readQuotaActivationSettings, type QuotaAutoRefreshSettings } from "../codex-quota-activation";
@@ -57,6 +58,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
   controller?: CodexAccountPoolController;
 }) {
   const t = useT();
+  const { requestAlias, dialog: aliasDialog } = useAliasEditor();
   const autoSwitch = useCodexAutoSwitch(apiBase, {
     updated: t("codexAuth.autoSwitchUpdated"),
     updateFailed: t("codexAuth.autoSwitchUpdateFailed"),
@@ -226,7 +228,11 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
   };
 
   const editAlias = async (account: CodexAccountEntry) => {
-    const entered = window.prompt(t("prov.aliasPrompt"), account.alias ?? "");
+    const entered = await requestAlias({
+      title: t("prov.editAlias"),
+      label: t("prov.aliasPrompt"),
+      initialValue: account.alias ?? "",
+    });
     if (entered === null) return;
     const result = await controller.saveAlias(account.id, entered);
     showActionFeedback(t(result.ok ? "prov.aliasSaved" : "prov.aliasSaveFailed"), result.ok ? "ok" : "err");
@@ -654,6 +660,7 @@ export default function CodexAccountPool({ apiBase, accountModeState = null, ban
           onAdded={handleAccountAdded}
         />
       )}
+      {aliasDialog}
       {modelsNotice && <ProviderModelsNotice
         provider="openai" loading={false} failed={false} providerKnown initialRegistration={false}
         catalogRefreshPending={modelsNotice.catalogRefreshPending}

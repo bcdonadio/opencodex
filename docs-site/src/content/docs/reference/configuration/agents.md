@@ -117,8 +117,9 @@ opencodex skips disabled, unroutable, unhealthy, cooling-down, or quota-threshol
 availability snapshot is cached for `subagentModelFallbackPollMs`. Encrypted child tasks restrict
 the chain to canonical native ChatGPT targets plus direct key-auth Responses routes explicitly
 trusted with `allowEncryptedV2AgentTasks: true`; if none can consume the encrypted payload, the
-request fails instead of routing unreadable ciphertext elsewhere. Combo routing remains
-canonical-native-only.
+request fails instead of routing unreadable ciphertext elsewhere. Combo routing first tries an
+available canonical native target; when none is selectable and `agentTaskRecovery` is enabled,
+an encrypted `NEW_TASK` is recovered once before routed combo dispatch.
 
 ```json
 {
@@ -138,19 +139,49 @@ canonical-native-only.
 
 ## Encrypted v2 task recovery
 
-`agentTaskRecovery` is an experimental compatibility path for a native ChatGPT parent spawning a
-routed v2 child. It is disabled by default. When explicitly enabled and the final routed child task
-contains an otherwise unreadable Fernet payload, opencodex uses a raw Responses passthrough request
+`agentTaskRecovery` is an experimental compatibility path for encrypted v2 collaboration messages
+from a native ChatGPT parent to a routed child. It is disabled by default. When explicitly enabled
+and the final routed child input contains an otherwise unreadable Fernet `NEW_TASK` or `MESSAGE`
+payload, opencodex uses a raw Responses passthrough request
 to the fixed `https://chatgpt.com/backend-api/codex/responses` endpoint with forward-mode
-authentication. ChatGPT returns the plaintext assignment through a forced function call; opencodex
-then converts only that task item to a standard user message before routed-provider dispatch.
+authentication. By default, the recovery model uses low reasoning effort, requests priority service, and returns
+the plaintext payload through a forced
+function call; opencodex
+then converts only that collaboration item to a standard user message before routed-provider dispatch.
+The routed recovery message strips transport routing metadata and contains exactly one
+payload-only user text value.
+On a later tool-result continuation and only after the final route selects a non-native provider,
+earlier encrypted collaboration items are rehydrated from matching cache entries and exact cache
+misses use the same authenticated fixed endpoint. The complete history is staged and none is
+forwarded unless every item succeeds; a native ChatGPT route retains the original encrypted
+collaboration schema.
+Historical recovery uses at most four concurrent workers, queues behind the process-wide recovery
+cap, and fails closed before dispatch above 128 envelopes, 8 MiB of aggregate ciphertext, or the
+two-minute whole-history deadline. Recovered historical plaintext is independently capped at
+8 MiB before input mutation or provider dispatch.
 
 This is not local decryption and does not fix the Codex wire protocol. It depends on undocumented
-ChatGPT backend behavior and may stop working after a backend change. The recovered assignment is
+ChatGPT backend behavior and may stop working after a backend change. The recovered payload is
 model output, not a cryptographically verified plaintext, so byte-for-byte fidelity is not
 guaranteed. A scoped cache miss may add an authenticated ChatGPT request, consume account quota, and
 add latency before the routed request. Concurrent requests for the same scoped task share one
-recovery request. Startup prints a warning whenever the feature is enabled.
+recovery request. Recovery waits up to 120 seconds by default, including reading the complete
+response. Large task payloads can take longer than 45 seconds to transcribe even while the
+backend is actively streaming. An explicit `timeoutMs` remains authoritative (1,000–120,000 ms);
+older configurations set to 45,000 keep that shorter deadline until changed.
+Startup prints a warning whenever the feature is enabled.
+
+Configure the decrypting request independently of the routed worker under `agentTaskRecovery`:
+
+| Field | Default | Values |
+| --- | --- | --- |
+| `reasoningEffort` | `low` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `serviceTier` | `priority` | `auto`, `default`, `flex`, `priority` |
+
+These map to `reasoning.effort` and `service_tier` on the recovery request only. They do not
+change the downstream worker's model, effort, or tier. Choose values supported by the configured
+recovery model and account; a requested tier does not guarantee the backend's actual service tier.
+
 
 Admission and retention are deliberately narrow:
 
@@ -164,11 +195,12 @@ Admission and retention are deliberately narrow:
 - raw ChatGPT credentials are sent only to the hard-coded ChatGPT endpoint and are never placed in
   the request body, logs, cache keys, or provider request; the in-memory cache scope uses only a
   process-random keyed digest of the caller credential and account;
-- the recovery request forwards only `authorization`, the matching `chatgpt-account-id`,
-  `originator`, and optional `openai-beta` and `user-agent` metadata; opencodex sets `content-type`
-  and `accept` itself, and no other caller headers cross this boundary;
+- the recovery request forwards only `authorization`, the matching `chatgpt-account-id`, and optional
+  `openai-beta` and `user-agent` metadata; the inbound `originator` is ignored rather than forwarded,
+  and this recovery-only request generates `originator: codex_cli_rs` locally. opencodex sets
+  `content-type` and `accept` itself, and no other caller headers cross this boundary;
 - recovered plaintext is never logged or persisted; the process-local cache is credential-, parent-
-  thread-, and ciphertext-scoped, expires after 15 minutes, and is bounded by both configured entry
+  thread-, and ciphertext-scoped, expires 15 minutes after its last use, and is bounded by both configured entry
   count (200 by default, 512 maximum) and 8 MiB total;
 - any malformed envelope, failed recovery, timeout, or validation failure preserves the existing
   fail-closed error; client cancellation returns 499. Neither path forwards ciphertext to the
@@ -192,8 +224,10 @@ model output rather than authenticated plaintext.
 {
   "agentTaskRecovery": {
     "enabled": true,
-    "model": "gpt-5.6-sol",
-    "timeoutMs": 45000,
+    "model": "gpt-5.6-terra",
+    "reasoningEffort": "low",
+    "serviceTier": "priority",
+    "timeoutMs": 120000,
     "cacheEntries": 200
   }
 }
@@ -203,9 +237,13 @@ Enable this only when the additional authenticated request, quota use, plaintext
 and private-backend dependency are acceptable. Prefer a native ChatGPT child or v1 heterogeneous
 delegation when they are not.
 
-This recovery path applies to direct-routed children. At most 32 recovery requests can be active at
-once; additional misses fail closed. Combo routing keeps its existing native-only filter for
-encrypted tasks and does not invoke recovery.
+This recovery path applies to direct-routed children and encrypted combo `NEW_TASK` spawns. At
+most 32 recovery requests can be active at once; additional misses fail closed. A combo with an
+available canonical native target still sends ciphertext directly; recovery runs only when no
+native target is selectable. After a stored Pool account's refresh and same-account replay are
+exhausted, recovery can use the incoming caller credential for one available routed target without
+trying another native account. Policy refusals remain terminal. Failed recovery, exhausted targets,
+or unavailable targets still fail closed without forwarding ciphertext to a routed provider.
 
 ## Effort caps
 

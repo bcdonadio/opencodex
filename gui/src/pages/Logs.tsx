@@ -29,6 +29,7 @@ import {
   sanitizeLogEntryRouteDecision,
   validCachedRouteDecision,
 } from "./log-route-decision";
+import { mergeLogDelta, parseLogPollResponse } from "./log-poll";
 
 function logsCacheKey(apiBase: string): string {
   return `ocx.logs.list.v1:${apiBase}`;
@@ -129,6 +130,10 @@ interface LogAttempt {
   effectiveEffort?: string;
   reasoningWireField?: string;
   reasoningWireValue?: string | number | boolean;
+  /** Actual wire used by this physical upstream attempt. */
+  upstreamTransport?: "http" | "websocket" | "mixed";
+  /** Stable non-PII account identity used by this attempt, when applicable. */
+  accountLogLabel?: string;
   displayMetrics?: LogDisplayMetrics;
 }
 
@@ -158,6 +163,12 @@ export interface LogEntry {
   configuredServiceTier?: string;
   configuredSpeedLabel?: string;
   responseServiceTier?: string;
+  /** Actual client wire observed for this request. */
+  inboundTransport?: "http" | "websocket";
+  /** Actual upstream wire(s) observed for this request. */
+  upstreamTransport?: "http" | "websocket" | "mixed";
+  /** Stable non-PII account identity used by this request, when applicable. */
+  accountLogLabel?: string;
   // #2455: qualifies responseServiceTier in the model tooltip — the echoed tier alone
   // cannot say whether Fast was granted on a backend whose echo is not authoritative.
   tierOutcome?: ModelTitleTierOutcome;
@@ -332,6 +343,27 @@ function statusColor(status: number): string {
   return "var(--amber)";
 }
 
+function transportLabel(
+  transport: string | undefined,
+  t: TFn,
+): string {
+  if (transport === "http") return t("logs.transport.http");
+  if (transport === "websocket") return t("logs.transport.websocket");
+  if (transport === "mixed") return t("logs.transport.mixed");
+  return t("logs.notRecorded");
+}
+
+function accountLabel(account: string | undefined, t: TFn, aliases?: ReadonlyMap<string, string>): string {
+  if (!account) return t("logs.notRecorded");
+  if (account === "main") return t("logs.account.main");
+  const alias = aliases?.get(account);
+  return alias ? t("logs.account.withAlias", { alias, label: account }) : account;
+}
+
+function hasTransportOrAccount(log: Pick<LogEntry, "inboundTransport" | "upstreamTransport" | "accountLogLabel">): boolean {
+  return Boolean(log.inboundTransport || log.upstreamTransport || log.accountLogLabel);
+}
+
 /** Date and time as separate locale strings (no joining comma) for stacked table cells. */
 function formatLogDateParts(ts: number, localeTag?: string, timeZone?: string): { date: string; time: string } {
   const zone = timeZone ? { timeZone } : undefined;
@@ -383,16 +415,22 @@ export default function Logs({ apiBase }: { apiBase: string }) {
     { error: null, count: 0 },
   );
   const [detail, setDetail] = useState<LogEntry | null>(null);
+  const [accountAliases, setAccountAliases] = useState<ReadonlyMap<string, string>>(() => new Map());
   const [filters, setFilters] = useState<LogFilterState>(DEFAULT_LOG_FILTER_STATE);
   const [filterClockNow, setFilterClockNow] = useState(() => Date.now());
   const filterClockRef = useRef<{
     key: string; anchor?: LogsClockAnchor; active: boolean; request: number;
   }>({ key: resourceKey, active: false, request: 0 });
+  const logPollRef = useRef<{ key: string; cursor: string | null; rows: LogEntry[] }>(
+    { key: resourceKey, cursor: null, rows: [] },
+  );
   // Invalidate the old resource at commit, before passive resource-loader effects.
   // A late body read must not mutate this page's clock, cache or retry state.
   useLayoutEffect(() => {
     const clock = { key: resourceKey, active: true, request: 0 };
     filterClockRef.current = clock;
+    // Cached display rows never establish a cursor, including A -> B -> A.
+    logPollRef.current = { key: resourceKey, cursor: null, rows: [] };
     setFilterClockNow(Date.now());
     return () => { clock.active = false; };
   }, [resourceKey]);
@@ -432,6 +470,32 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       controller.abort();
     };
   }, [apiBase]);
+  useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    setAccountAliases(new Map());
+    fetch(`${apiBase}/api/codex-auth/accounts`, { signal: controller.signal })
+      .then(res => (res.ok ? res.json() as Promise<unknown> : null))
+      .then(payload => {
+        if (cancelled || !payload || typeof payload !== "object" || !Array.isArray((payload as { accounts?: unknown }).accounts)) return;
+        const aliases = new Map<string, string>();
+        for (const account of (payload as { accounts: unknown[] }).accounts) {
+          if (!account || typeof account !== "object") continue;
+          const row = account as { isMain?: unknown; logLabel?: unknown; alias?: unknown };
+          if (row.isMain === true || typeof row.logLabel !== "string" || !row.logLabel.trim()) continue;
+          if (typeof row.alias !== "string" || !row.alias.trim()) continue;
+          aliases.set(row.logLabel, row.alias.trim());
+        }
+        setAccountAliases(aliases);
+      })
+      .catch(() => {
+        // Older proxies may not expose the account list; stable labels remain useful alone.
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [apiBase]);
   // The hash is the source of truth for the active tab (#logs vs #logs/debug),
   // so refresh/bookmark/back-forward keep the tab choice.
   const [tab, setTab] = useState<LogsTab>(readTabFromHash);
@@ -465,16 +529,22 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       logRetryRef.current = retry;
     }
     if (retry.failures > 0 && Date.now() < retry.nextAttemptAt) throw retry.error;
+    const poll = logPollRef.current;
+    const cursor = poll.key === resourceKey ? poll.cursor : null;
+    const url = `${apiBase}/api/logs?limit=2000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     try {
-      const res = await fetch(`${apiBase}/api/logs?limit=2000`, { signal });
+      const res = await fetch(url, { signal });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
-      const body = await res.json() as LogEntry[] | { logs?: LogEntry[]; generatedAt?: unknown };
+      const body: unknown = await res.json();
       const receivedAt = performance.now();
-      const raw = Array.isArray(body) ? body : (body.logs ?? []);
-      const next = raw.map(sanitizeLogEntryRouteDecision).map(sanitizeLogEvidence);
+      const parsed = parseLogPollResponse<LogEntry>(body);
+      const incoming = parsed.rows.map(sanitizeLogEntryRouteDecision).map(sanitizeLogEvidence);
+      const next = cursor && parsed.cursor && !parsed.reset
+        ? mergeLogDelta(poll.rows, incoming) : incoming;
       // The resource-store generation guard runs only after this loader returns.
       // Guard these local side effects here as fetch/body readers may ignore abort.
       if (!isCurrent()) throw signal.reason ?? new DOMException("Obsolete log request", "AbortError");
+      logPollRef.current = { key: resourceKey, cursor: parsed.cursor, rows: next };
       // Reconcile when the accepted snapshot changes, using the latest user state
       // rather than filters captured when the request started. Persist disappearance
       // as All so a later ring cannot resurrect a cleared selection.
@@ -491,7 +561,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
         if (previous.model === nextModel && previous.provider === nextProvider) return previous;
         return { ...previous, model: nextModel, provider: nextProvider };
       });
-      const sample = logsClockAnchor(Array.isArray(body) ? undefined : body.generatedAt, receivedAt);
+      const sample = logsClockAnchor(parsed.generatedAt, receivedAt);
       if (sample) clock.anchor = sample;
       setFilterClockNow(logsClockNow(clock.anchor, receivedAt, Date.now()));
       logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
@@ -528,6 +598,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const fetchLogs = logsResource.refresh;
   const retryLogs = useCallback(() => {
     logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
+    logPollRef.current = { key: resourceKey, cursor: null, rows: [] };
     fetchLogs({ forceLoading: true });
   }, [fetchLogs, resourceKey]);
 
@@ -831,7 +902,20 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                       dialog; as a second line it repeated the label and, in mono, outgrew the
                       9% column and painted over the provider cell. */}
                   <td className="mono log-reasoning-cell" title={reasoningWire}>{effortLabel(log)}</td>
-                  <td className="muted">{formatProviderDisplayName(log.provider, t)}</td>
+                  <td className="muted">
+                    <span className="logs-stack-start">
+                      <span>{formatProviderDisplayName(log.provider, t)}</span>
+                      {hasTransportOrAccount(log) && (
+                        <span className="text-caption logs-row-meta" title={t("logs.transport.rowTitle")}>
+                          {t("logs.transport.row", {
+                            inbound: transportLabel(log.inboundTransport, t),
+                            upstream: transportLabel(log.upstreamTransport, t),
+                          })}
+                          {log.accountLogLabel && <> · {t("logs.account.row", { account: accountLabel(log.accountLogLabel, t, accountAliases) })}</>}
+                        </span>
+                      )}
+                    </span>
+                  </td>
                   <td>
                     <span className="log-status-cell">
                       <span className="mono font-semibold" style={{ color: statusColor(log.status) }}>{log.status}</span>
@@ -870,6 +954,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
           localeTag={localeTag}
           serverTimeZone={serverTimeZone}
           t={t}
+          accountAliases={accountAliases}
           onClose={() => setDetail(null)}
           onFilterConversation={id => {
             setFilters(prev => ({ ...prev, conversationId: id }));
@@ -894,7 +979,7 @@ function useModalDialog(open: boolean) {
 }
 
 function LogDetailDialog({
-  apiBase, detail, detailInfo, localeCode, localeTag, serverTimeZone, t, onClose, onFilterConversation,
+  apiBase, detail, detailInfo, localeCode, localeTag, serverTimeZone, t, accountAliases, onClose, onFilterConversation,
 }: {
   apiBase: string;
   detail: LogEntry;
@@ -903,6 +988,7 @@ function LogDetailDialog({
   localeTag?: string;
   serverTimeZone?: string;
   t: TFn;
+  accountAliases: ReadonlyMap<string, string>;
   onClose: () => void;
   onFilterConversation?: (conversationId: string) => void;
 }) {
@@ -973,6 +1059,9 @@ function LogDetailDialog({
             )}
             <span className="muted">{t("logs.col.model")}</span><span className="mono">{modelLabel(detail.resolvedModel ?? detail.model)}</span>
             <span className="muted">{t("logs.col.provider")}</span><span>{formatProviderDisplayName(detail.provider, t)}</span>
+            <span className="muted">{t("logs.detail.clientTransport")}</span><span className="mono">{transportLabel(detail.inboundTransport, t)}</span>
+            <span className="muted">{t("logs.detail.upstreamTransport")}</span><span className="mono">{transportLabel(detail.upstreamTransport, t)}</span>
+            <span className="muted">{t("logs.detail.account")}</span><span className="mono log-detail-break">{accountLabel(detail.accountLogLabel, t, accountAliases)}</span>
             {(detail.requestedEffort || detail.effectiveEffort) && (
               <><span className="muted">{t("logs.col.effort")}</span><span className="mono">{effortLabel(detail)}{reasoningWire ? ` (${reasoningWire})` : ""}</span></>
             )}
@@ -1100,6 +1189,10 @@ function LogDetailDialog({
                       <td>
                         <span>{formatProviderDisplayName(attempt.provider, t)}</span><br />
                         <span className="mono muted log-detail-break">{attempt.model}</span>
+                        <br />
+                        <span className="muted text-caption log-detail-break">
+                          {t("logs.detail.attempt.upstreamTransport")}: {transportLabel(attempt.upstreamTransport, t)} · {t("logs.detail.attempt.account")}: {accountLabel(attempt.accountLogLabel, t, accountAliases)}
+                        </span>
                         {(attempt.requestedEffort || attempt.effectiveEffort) && (
                           <>
                             <br />
