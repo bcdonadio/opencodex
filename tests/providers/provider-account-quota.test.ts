@@ -33,9 +33,11 @@ async function seedTwoAccounts(): Promise<void> {
 }
 
 function usageBody(fiveHour: number, sevenDay: number): string {
+  // These tests exercise current account measurements, not expired historical windows.
+  const now = Date.now();
   return JSON.stringify({
-    five_hour: { utilization: fiveHour, resets_at: "2026-07-05T12:00:00Z" },
-    seven_day: { utilization: sevenDay, resets_at: "2026-07-08T12:00:00Z" },
+    five_hour: { utilization: fiveHour, resets_at: new Date(now + 5 * 60 * 60_000).toISOString() },
+    seven_day: { utilization: sevenDay, resets_at: new Date(now + 7 * 24 * 60 * 60_000).toISOString() },
   });
 }
 
@@ -794,8 +796,8 @@ describe("google-antigravity per-account quota (#1082)", () => {
       expect(posted).toHaveLength(urls.length * 2);
       for (const url of urls) {
         expect(resolved.filter(row => row.url === url)).toEqual([
-          { url, benchmark: true, private: false, mihomo: false },
-          { url, benchmark: true, private: false, mihomo: false },
+          { url, benchmark: true, private: false, mihomo: true },
+          { url, benchmark: true, private: false, mihomo: true },
         ]);
       }
       for (const [auth, project] of [["Bearer agy-first", "proj-first"], ["Bearer agy-second", "proj-second"]]) {

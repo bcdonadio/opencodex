@@ -125,6 +125,12 @@ export function parseRequest(
     }
     return holder;
   };
+  const preservePendingReplay = () => {
+    const replay = pendingReasoning.filter(entry => entry.envelopeSigned || entry.part.redacted?.length);
+    if (replay.length > 0) {
+      ensureAssistantPlaceholder(messages, data.model, now).content.push(...replay.map(entry => entry.part));
+    }
+  };
   // Tool specs surfaced by a prior tool_search (deferred tools, e.g. subagents). Codex does not
   // re-list these in `tools`, but chat models can only call listed tools — so we re-inject them.
   const loadedToolSpecs: unknown[] = [];
@@ -147,6 +153,12 @@ export function parseRequest(
       const effectiveType = (item as { type?: string }).type ?? ("role" in item ? "message" : undefined);
       const itemRole = (item as { role?: string }).role;
       const externalTaskInput = effectiveType === "function_call_output" ? externalTaskInputContent(item) : undefined;
+      // A signed/opaque assistant-only turn still owns its replay blocks, even
+      // without a following assistant text or tool call to drain the pending list.
+      if (effectiveType === "agent_message" || externalTaskInput !== undefined
+        || (effectiveType === "message" && ["user", "developer", "system"].includes(itemRole ?? ""))) {
+        preservePendingReplay();
+      }
       // Raw protocol items do not map one-to-one onto context messages. Capture the boundary while
       // both representations are available so later metadata can stay before conversation in both.
       if (
@@ -268,7 +280,7 @@ export function parseRequest(
         const envelope = typeof reasoning.encrypted_content === "string"
           ? decodeReasoningEnvelope(reasoning.encrypted_content)
           : null;
-        const thinkingText = envelope?.txt || text;
+        const thinkingText = envelope?.txt ?? text;
 
         // Kiro reasoning round-trip: a krc-only item carries nothing renderable — it is provider
         // state for the assistant turn that ALREADY closed, because Kiro emits its
@@ -284,7 +296,7 @@ export function parseRequest(
 
         // Native/non-ocxr1 encrypted-only reasoning is opaque here. Do not create a detached
         // assistant turn or invent replayable plaintext/signatures from the encrypted payload.
-        if (thinkingText.length > 0) {
+        if (thinkingText.length > 0 || envelope?.sig || envelope?.red?.length) {
           const part: OcxThinkingContent = {
             type: "thinking",
             thinking: thinkingText,
@@ -295,7 +307,7 @@ export function parseRequest(
           const envelopeSigned = typeof envelope?.sig === "string";
           const previous = pendingReasoning[pendingReasoning.length - 1];
 
-          if (!envelopeSigned && previous && !previous.envelopeSigned) {
+          if (!envelopeSigned && !part.redacted && previous && !previous.envelopeSigned && !previous.part.redacted) {
             previous.part = {
               ...part,
               thinking: `${previous.part.thinking}\n${part.thinking}`,
@@ -465,6 +477,7 @@ export function parseRequest(
       }
     }
   }
+  preservePendingReplay();
   if (data.previous_response_id && continuationConversationMessageIndex === undefined) {
     continuationConversationMessageIndex = messages.length;
   }

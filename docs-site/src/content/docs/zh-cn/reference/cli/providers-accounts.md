@@ -14,7 +14,7 @@ description: 提供方配置、凭据、配额，以及模型目录命令。
 
 | 子命令 | 支持的标志 | 操作 |
 | --- | --- | --- |
-| `list` | `--json` | 列出已配置的提供方以及剩余的注册表条目。 |
+| `list` | `--json`, `--jsonl` | 列出已配置的提供方以及剩余的注册表条目。 `--jsonl` 为每个已配置的提供方输出一行 JSON 对象。 |
 | `add <name>` | `--adapter <adapter>`, `--base-url <url>`, `--api-key <key>`, `--default-model <model>`, `--set-default`, `--force`, `--json`, `--sync` | 添加一个注册表/自定义提供方。`--force` 会覆盖；`--sync` 会在有人类输出模式运行的代理上刷新配置。 |
 | `edit <name>` | 提供方字段标志，`--headers <json>`，`--json` | 在不替换密钥池的情况下，编辑经过校验的在线提供方字段。`--headers` 会合并自定义请求头；传入 `{}` 或 `-` 可清空。 |
 | `test <name>` | `--json` | 探测真实的上游模型端点。 |
@@ -28,6 +28,7 @@ description: 提供方配置、凭据、配额，以及模型目录命令。
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl
 ocx provider test ark
 ocx provider add anthropic --api-key sk-ant-... --set-default --sync
 ocx provider add local-dev --adapter openai-chat --base-url http://localhost:11434/v1
@@ -35,6 +36,8 @@ ocx provider show anthropic --json
 ocx models --provider anthropic --json
 ocx models live --provider ark --json
 ```
+
+`--jsonl` 仅输出已配置的提供方，每行一个 JSON 对象。每个对象的字段与 `--json` 输出中 `configured` 数组的元素相同，不包含 `registryCount` 汇总。脚本可以逐行处理这些对象。`--json` 与 `--jsonl` 不能同时使用。
 
 :::caution[自定义请求头不是凭据通道]
 `--headers` 用于非机密的请求元数据 —— 路由提示、租户或项目选择器、追踪 ID 等。它不是

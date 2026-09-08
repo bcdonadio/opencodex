@@ -29,16 +29,23 @@ describe("agent task recovery cache", () => {
     resetAgentTaskRecoveryCache();
   });
 
-  test("shared failure gives each waiter its own result without contaminating another key", async () => {
+  test.each([
+    { kind: "http", reason: "recovery_http_rejected" },
+    { kind: "reader", reason: "recovery_transport_error" },
+    { kind: "decode", reason: "recovery_invalid_output" },
+  ] as const)("shared $kind failure gives each waiter its own result without contaminating another key", async ({ kind, reason }) => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let fetches = 0;
     globalThis.fetch = (async () => {
       const requestNumber = ++fetches;
       await gate;
-      return requestNumber === 1
-        ? new Response("raw-failure-sentinel", { status: 503 })
-        : new Response(recoverySse("Independent assignment."));
+      if (requestNumber !== 1) return new Response(recoverySse("Independent assignment."));
+      if (kind === "decode") return new Response(new Uint8Array([0xff]));
+      if (kind === "reader") return new Response(new ReadableStream({
+        pull(controller) { controller.error(new TypeError("private-reader-failure")); },
+      }));
+      return new Response("raw-failure-sentinel", { status: 503 });
     }) as typeof fetch;
     const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
     const config = routedConfig();
@@ -53,8 +60,8 @@ describe("agent task recovery cache", () => {
       expect(fetches).toBe(2);
       release?.();
       const [firstResult, secondResult, otherResult] = await Promise.all([first, second, other]);
-      expect(firstResult).toEqual({ recovered: false, reason: "recovery_unavailable" });
-      expect(secondResult).toEqual({ recovered: false, reason: "recovery_unavailable" });
+      expect(firstResult).toEqual({ recovered: false, reason });
+      expect(secondResult).toEqual({ recovered: false, reason });
       expect(firstResult).not.toBe(secondResult);
       expect(otherResult).toEqual({ recovered: true });
       expect(firstInput).toEqual(encryptedInput());
@@ -65,6 +72,39 @@ describe("agent task recovery cache", () => {
     } finally {
       release?.();
       await Promise.all([first, second, other]);
+    }
+  });
+
+  test("shared flight reset reports abort to surviving callers and never caches late plaintext", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let fetches = 0;
+    globalThis.fetch = (async () => {
+      fetches++;
+      await gate;
+      return new Response(recoverySse("private-late-assignment"));
+    }) as typeof fetch;
+    const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
+    const firstInput = encryptedInput();
+    const secondInput = encryptedInput();
+    const first = recoverEncryptedAgentTaskWithResult(req, firstInput, {}, routedConfig());
+    const second = recoverEncryptedAgentTaskWithResult(req, secondInput, {}, routedConfig());
+    try {
+      expect(fetches).toBe(1);
+      resetAgentTaskRecoveryCache();
+      release();
+      const results = await Promise.all([first, second]);
+      expect(results).toEqual([
+        { recovered: false, reason: "recovery_aborted" },
+        { recovered: false, reason: "recovery_aborted" },
+      ]);
+      expect(results[0]).not.toBe(results[1]);
+      expect(firstInput).toEqual(encryptedInput());
+      expect(secondInput).toEqual(encryptedInput());
+      expect(agentTaskRecoveryCacheSnapshotForTests()).toEqual({ entries: 0, bytes: 0 });
+    } finally {
+      release();
+      await Promise.all([first, second]);
     }
   });
 
@@ -95,7 +135,7 @@ describe("agent task recovery cache", () => {
         release?.();
         expect(await second).toEqual(succeeds
           ? { recovered: true }
-          : { recovered: false, reason: "recovery_unavailable" });
+          : { recovered: false, reason: "recovery_http_rejected" });
         expect(fetches).toBe(1);
         expect(restoreCachedEncryptedAgentTasks(req, encryptedInput(), config)).toBe(succeeds ? 1 : 0);
       } finally {

@@ -145,6 +145,18 @@ then trusted catalog metadata such as a configured qualified provider/model alia
 This overlay never changes route identity or the upstream wire model, and its catalog fingerprint makes
 a label edit refresh Codex output.
 
+Supported bare native GPT rows also consume `providers.openai.modelDisplayNames`. Retained sync
+and convergence pass the same map to the observed-state merge. After native normalization and
+ordering, the merge applies the exact nonblank trimmed label and saves
+`opencodex_native_display_name: { slug, original, applied }` in the local catalog only. The next
+merge detaches its inputs, removes that marker, and restores `original` only if the native slug
+still matches and the current name equals `applied`. Removing or blanking the override therefore
+restores the owned name before normal native metadata upgrades. Divergent external names remain
+subject to those upgrades: Astra still replaces non-pinned names with its pinned native name.
+Template-derived rows discard the marker. The overlay leaves model IDs, metadata (including
+capabilities), ordering, routed combo aliases, custom rows and account-qualified rows unchanged;
+it does not relabel HTTP model listings or virtual `*-pro` rows.
+
 ## Native passthrough
 
 Astra has its own pinned native row: 272,000 default context, 872,000 opt-in ceiling,
@@ -334,6 +346,15 @@ wire-clamps ultra/max to each model's real top rung (e.g. gpt-5.5 ultra → xhig
 (`src/server/effort-policy.ts`): they lower or preserve the requested effort rather than rejecting
 the request, and they never raise it.
 
+Operator-owned `pinnedReasoningEffort`, `modelPinnedReasoningEfforts`, and root
+`modelPinnedEfforts` resolve before applicable effort caps at the final destination.
+Provider model pins precede provider-wide pins, then global selector/destination pins.
+A pin can raise the effective caller effort; the later cap can still lower or omit it.
+`none` means explicit-effort omission (provider default), not guaranteed reasoning disablement.
+Compaction maintenance is exempt. Pins are user overlays and do not alter registry seeds,
+model discovery or advertised ladders. Native Chat normalizes newly pinned values through
+provider wire mapping; unpinned native requests retain their existing pass-through contract.
+
 [Decision Log]
 - 목적과 의도: Xiaomi MiMo의 공식 OpenAI Chat endpoint가 실제로 받지 않는 `max`/
   `ultra` reasoning tier를 catalog에 노출하지 않도록 한다.
@@ -443,6 +464,30 @@ the active Codex routing; external user-managed provider configs remain untouche
 cause delegation. The TOML edit owns only marker-tagged values, preserves existing unmarked
 user-owned `[agents]` defaults rather than overwriting them, and rejects ambiguous table shapes
 without changing the file.
+
+V2 proxy guidance uses `<opencodex_subagent_guidance>` for both built-in metadata and
+custom `injectionPrompt` bodies. The built-in text reports the resolved preferred model,
+effort, roster and fallback chain without prescribing delegation, spawn overrides or
+`fork_turns`. Custom bodies retain their placeholder behavior. The guidance switch and
+catalog-state gates still apply; stale or unknown catalog state suppresses proxy guidance.
+V1 retains its `<multi_agent_mode>` proactive text at `max` or `ultra`.
+
+Replay deduplication compares the latest exact generated developer text separately for
+each tag family, preserving built-in → custom → built-in transitions without duplicating
+unchanged proxy metadata after a native policy change. Native and legacy-tagged history
+remain intact: tags do not establish historical authorship or revoke old instructions,
+and mixed-version transition detection is not guaranteed.
+
+The native mode hint is separate from proxy guidance and native `[agents]` defaults.
+`src/codex/multi-agent-mode-policy.ts` owns the proactive recommendation; the dashboard
+obtains it from `/api/v2` rather than maintaining its own preset. An explicit dashboard,
+API or CLI hint write passes through `setMultiAgentModeHintText`, which replaces only
+the two byte-exact released OpenCodex presets with the current recommendation. Other
+valid custom text, including whitespace variants, is preserved. Reads, unrelated writes
+and upgrades do not migrate stored hints. The writer retains its native capability check
+and stores only `features.multi_agent_v2.multi_agent_mode_hint_text` in Codex TOML;
+`null` removes that key. The hint affects new native Codex sessions when their v2 surface
+is active, without changing reasoning effort or the proxy guidance switch.
 
 Claude Code `ocx-*` agent definitions consume the same effective `claudeCode.blockedSkills` policy
 as inbound bundle elision. When the list is non-empty (default: `claude-api`), generated definitions

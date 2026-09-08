@@ -72,10 +72,29 @@ requests keep their captured credential. An all-paused pool fails closed.
 The dashboard's bulk pause action refreshes all account quotas and mutates only accounts whose
 plan-relevant window is freshly confirmed at exactly 100%; unknown and failed refreshes are skipped.
 
+A confirmed manual reset-credit consumption may immediately reconcile that account's
+eligible pre-existing ordinary reset-derived cooldown after a complete, non-exhausted usage
+observation started after the reset. Paused or reauthentication-required accounts and
+cooldowns held by another in-flight probe remain excluded; their cooldowns are retained.
+Recovery owns the specific cooldown and authenticates
+main and added Pool accounts through their respective credential contracts. Main usage
+publication keeps the latest successfully published observation authoritative. Pool recovery
+across a credential refresh requires the actual self/joined refresh lineage, not matching
+replacement timestamps. It preserves
+newer failures, independent Spark/Reserve scopes, explicit Retry-After, pause, pin and
+selection state. Replay and `already_redeemed` are not new-reset evidence. Failed usage
+recovery leaves the cooldown in place and preserves the confirmed consume success;
+retrying usage must not require another credit.
+
 `codexQuotaAutoRefresh` is a separate default-off spending intent. For each explicitly enabled
 account/window, the one-minute state sweep compares the cached upstream reset timestamp, sends the
 existing minimal non-stored warmup through that exact account once the timestamp is due, then
-field-patches the completed timestamp; the next normal quota poll reports the activated window.
+field-patches the completed timestamp. The next observed reset boundary is also retained in
+`nextFiveHourResetAt` / `nextWeeklyResetAt` until completed; later idle-window metadata cannot
+postpone it. Successful warmups publish quota headers under the captured credential/identity fence.
+For opted-in accounts only, stale metadata is refreshed at most once per five minutes through
+the existing WHAM recovery path, independently of dashboard traffic or reset notifications.
+Inference 401s quarantine the rejected credential; failures log an opaque label and safe reason.
 Paused or reauthentication-required
 accounts are skipped, simultaneous 5-hour/weekly resets share one warmup, transient failures retry
 after five minutes, and account deletion removes its setting and completion markers.

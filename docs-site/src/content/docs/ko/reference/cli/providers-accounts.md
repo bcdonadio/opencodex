@@ -13,7 +13,7 @@ description: 제공자 설정, 자격 증명, 할당량, 모델 카탈로그 명
 
 | 하위 명령 | 지원 플래그 | 동작 |
 | --- | --- | --- |
-| `list` | `--json` | 설정된 제공자와 남아 있는 레지스트리 항목을 나열합니다. |
+| `list` | `--json`, `--jsonl` | 설정된 제공자와 남아 있는 레지스트리 항목을 나열합니다. `--jsonl`은 설정된 제공자마다 JSON 객체를 한 줄씩 출력합니다. |
 | `add <name>` | `--adapter <adapter>`, `--base-url <url>`, `--api-key <key>`, `--default-model <model>`, `--set-default`, `--force`, `--json`, `--sync` | 레지스트리/사용자 지정 제공자를 추가합니다. `--force`는 덮어쓰고, `--sync`는 사람이 읽는 출력 모드에서 실행 중인 프록시를 새로 고칩니다. |
 | `edit <name>` | 제공자 필드 플래그, `--headers <json>`, `--json` | 키 풀을 바꾸지 않고 검증된 실시간 제공자 필드를 수정합니다. `--headers`는 사용자 지정 요청 헤더를 병합하며, `{}` 또는 `-`로 지울 수 있습니다. |
 | `test <name>` | `--json` | 실제 상위 모델 엔드포인트를 확인합니다. |
@@ -27,6 +27,7 @@ description: 제공자 설정, 자격 증명, 할당량, 모델 카탈로그 명
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl
 ocx provider test ark
 ocx provider add anthropic --api-key sk-ant-... --set-default --sync
 ocx provider add local-dev --adapter openai-chat --base-url http://localhost:11434/v1
@@ -34,6 +35,8 @@ ocx provider show anthropic --json
 ocx models --provider anthropic --json
 ocx models live --provider ark --json
 ```
+
+`--jsonl`은 설정된 제공자만 JSON 객체 하나당 한 줄로 출력합니다. 각 객체의 필드는 `--json`의 `configured` 배열 항목과 같으며, `registryCount` 요약은 포함하지 않습니다. 스크립트에서 각 줄의 객체를 순서대로 처리할 수 있습니다. `--json`과 `--jsonl`은 함께 사용할 수 없습니다.
 
 :::caution[커스텀 헤더는 자격증명 통로가 아닙니다]
 `--headers`는 비밀이 아닌 요청 메타데이터용입니다 — 라우팅 힌트, 테넌트나 프로젝트

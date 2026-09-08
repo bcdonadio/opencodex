@@ -15,7 +15,7 @@ pool'ами и контролируют каталог моделей, кото�
 
 | Подкоманда | Поддерживаемые флаги | Действие |
 | --- | --- | --- |
-| `list` | `--json` | Показать настроенных провайдеров и оставшиеся записи registry. |
+| `list` | `--json`, `--jsonl` | Показать настроенных провайдеров и оставшиеся записи registry. `--jsonl` выводит по одному JSON-объекту настроенного провайдера на строку. |
 | `add <name>` | `--adapter <adapter>`, `--base-url <url>`, `--api-key <key>`, `--default-model <model>`, `--set-default`, `--force`, `--json`, `--sync` | Добавить registry/custom-провайдера. `--force` перезаписывает; `--sync` обновляет живой прокси в human-output mode. |
 | `edit <name>` | provider field flags, `--headers <json>`, `--json` | Изменить валидированные live-поля провайдера, не заменяя key-pool'ы. `--headers` объединяет пользовательские request-header'ы; передайте `{}` или `-`, чтобы очистить их. |
 | `test <name>` | `--json` | Пробный запрос к реальному upstream model-endpoint'у. |
@@ -29,6 +29,7 @@ pool'ами и контролируют каталог моделей, кото�
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl
 ocx provider test ark
 ocx provider add anthropic --api-key sk-ant-... --set-default --sync
 ocx provider add local-dev --adapter openai-chat --base-url http://localhost:11434/v1
@@ -36,6 +37,8 @@ ocx provider show anthropic --json
 ocx models --provider anthropic --json
 ocx models live --provider ark --json
 ```
+
+`--jsonl` выводит только настроенных провайдеров: один JSON-объект на строку. Поля каждого объекта совпадают с полями элемента массива `configured` в `--json`; сводка `registryCount` не включается. Скрипты могут обрабатывать объекты построчно. Флаги `--json` и `--jsonl` нельзя использовать вместе.
 
 :::caution[Пользовательские заголовки — не канал для учётных данных]
 `--headers` предназначен для несекретных метаданных запроса — подсказок

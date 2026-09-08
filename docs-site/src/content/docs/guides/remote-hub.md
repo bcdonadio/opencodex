@@ -167,7 +167,11 @@ opencodex does not publish an official container image. The repository does main
 [`compose.yaml`](https://github.com/lidge-jun/opencodex/blob/main/compose.yaml), and a narrow
 `.dockerignore`. The build pins the multi-platform Bun 1.4.0 image index by digest, runs the proxy as
 the non-root `bun` user, keeps the root filesystem read-only, drops Linux capabilities, and publishes
-only the data listener on the host's `127.0.0.1:10100` by default.
+only the data listener on the host's `127.0.0.1:10100` by default. The foreground process uses
+`OCX_SERVICE=1`, so stopping or recreating the container preserves routed Codex state instead
+of restoring a native desktop configuration. Docker supplies supervision; no OS service manager
+is installed in the image. Use Compose to restart/recreate the container; this does not extend
+support to every dashboard restart path.
 
 The image seeds a first-run `hub` configuration that binds the container listener to `0.0.0.0`.
 Before the first normal start, stream a freshly generated data-plane token into the bootstrap helper.
@@ -286,6 +290,12 @@ unreadable, a non-loopback hub must not be accepted as ready. Never treat livene
 `docker compose down` removes the container and network but retains both named volumes. Treat
 `docker compose down --volumes` as destructive: it deletes configuration, OAuth credentials, usage
 history, the data-plane token, and persisted Codex state together.
+
+Cross-platform CI builds the source image and checks startup, data-plane token admission, and
+container recreation using an isolated Compose project with throwaway credentials. It verifies that
+both named volumes and a synthetic catalog survive replacement. This check does not validate a
+real provider account, OAuth callback, custom mount migration, or every CPU architecture; perform
+the authenticated routed-response check above for your deployment.
 
 ## Rollback
 

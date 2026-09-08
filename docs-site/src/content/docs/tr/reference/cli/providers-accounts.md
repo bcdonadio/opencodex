@@ -16,7 +16,7 @@ bir ad hem `--adapter` hem de `--base-url` gerektirir.
 
 | Alt komut | Desteklenen bayraklar | Eylem |
 | --- | --- | --- |
-| `list` | `--json` | Yapılandırılmış sağlayıcıları ve kalan kayıt defteri girdilerini listeleyin. |
+| `list` | `--json`, `--jsonl` | Yapılandırılmış sağlayıcıları ve kalan kayıt defteri girdilerini listeleyin. `--jsonl`, yapılandırılmış her sağlayıcı için satır başına bir JSON nesnesi üretir. |
 | `add <ad>` | `--adapter <adapter>`, `--base-url <url>`, `--api-key <key>`, `--default-model <model>`, `--set-default`, `--force`, `--json`, `--sync` | Bir kayıt defteri/özel sağlayıcı ekleyin. `--force` üzerine yazar; `--sync`, insan çıktısı modunda çalışan bir proxy'yi yeniler. |
 | `edit <ad>` | sağlayıcı alan bayrakları, `--headers <json>`, `--json` | Anahtar havuzlarını değiştirmeden doğrulanmış canlı sağlayıcı alanlarını düzenleyin. `--headers` özel istek başlıklarını birleştirir; temizlemek için `{}` veya `-` iletin. |
 | `test <ad>` | `--json` | Gerçek yukarı akış model uç noktasını araştırın. |
@@ -30,6 +30,7 @@ bir ad hem `--adapter` hem de `--base-url` gerektirir.
 
 ```bash
 ocx provider list --json
+ocx provider list --jsonl
 ocx provider test ark
 ocx provider add anthropic --api-key sk-ant-... --set-default --sync
 ocx provider add local-dev --adapter openai-chat --base-url http://localhost:11434/v1
@@ -37,6 +38,8 @@ ocx provider show anthropic --json
 ocx models --provider anthropic --json
 ocx models live --provider ark --json
 ```
+
+`--jsonl` yalnızca yapılandırılmış sağlayıcıları, her satırda bir JSON nesnesi olacak şekilde yazar. Her nesne, `--json` çıktısındaki `configured` dizisinin bir öğesiyle aynı alanları içerir; `registryCount` özeti eklenmez. Betikler nesneleri satır satır işleyebilir. `--json` ve `--jsonl` birlikte kullanılamaz.
 
 :::caution[Özel başlıklar bir kimlik bilgisi kanalı değildir]
 `--headers`, gizli olmayan istek meta verileri içindir — yönlendirme ipuçları,

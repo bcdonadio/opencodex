@@ -25,7 +25,10 @@ RUN cd gui && bun run build
 FROM ${BUN_IMAGE} AS runtime
 WORKDIR /home/bun/app
 
+# Docker supervises this foreground process; retain routed state on stop/recreate.
+# This uses the existing service lifecycle mode and does not install a service manager.
 ENV NODE_ENV=production \
+    OCX_SERVICE=1 \
     OPENCODEX_HOME=/home/bun/.opencodex \
     CODEX_HOME=/home/bun/.codex \
     OCX_API_TOKEN_FILE=/home/bun/.opencodex/service-api-token

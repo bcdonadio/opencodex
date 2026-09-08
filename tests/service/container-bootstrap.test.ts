@@ -63,6 +63,7 @@ describe("container deployment contract", () => {
     const runtime = readFileSync(repoPath("Dockerfile"), "utf8").split(" AS runtime")[1]!;
     expect(runtime).toContain("OPENCODEX_HOME=/home/bun/.opencodex");
     expect(runtime).toContain("CODEX_HOME=/home/bun/.codex");
+    expect(runtime).toContain("OCX_SERVICE=1");
     expect(runtime).toContain("install -d -m 0700 -o bun -g bun /home/bun/.opencodex /home/bun/.codex");
     expect(runtime).toContain('VOLUME ["/home/bun/.opencodex", "/home/bun/.codex"]');
     expect(runtime).toContain("USER bun");
