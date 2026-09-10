@@ -123,8 +123,11 @@ görevlerinde zincir, kurallı yerel ChatGPT hedefleriyle ve
 kimlik doğrulamalı Responses rotalarıyla sınırlıdır. Hiçbiri şifrelenmiş yükü
 işleyemezse istek, okunamayan şifreli metni başka bir yere yönlendirmek yerine
 başarısız olur. Kombo önce kullanılabilir kurallı yerel hedefi dener; seçilebilir
-yerel hedef kalmazsa ve `agentTaskRecovery` etkinse, şifrelenmiş `NEW_TASK` yönlendirilen
-kombo gönderiminden önce bir kez kurtarılır.
+yerel hedef kalmazsa ya da yerel denemeler tükenirse ve `agentTaskRecovery` etkinse,
+şifrelenmiş `NEW_TASK` yönlendirilen
+kombo gönderiminden önce bir kez kurtarılır. Kombo kurtarma yalnızca spawn edilen çocuk
+turlarında çalışır; doğrudan yönlendirilen yol, konuşma ortasındaki bir model değişimini de
+kurtarır.
 
 ```json
 {
@@ -144,11 +147,15 @@ kombo gönderiminden önce bir kez kurtarılır.
 
 ## Şifrelenmiş v2 görev kurtarma
 
-`agentTaskRecovery`, yerel bir ChatGPT ebeveyninden yönlendirilen bir çocuğa
-gönderilen şifreli v2 işbirliği iletileri için deneysel bir uyumluluk yoludur.
-Varsayılan olarak devre dışıdır. Açıkça etkinleştirildiğinde ve yönlendirilen
-çocuğun son girdisi aksi takdirde okunamayan bir Fernet `NEW_TASK` veya `MESSAGE`
-yükü içerdiğinde, opencodex iletme modu kimlik
+`agentTaskRecovery`, yönlendirilen bir sağlayıcıya ulaşan arka uçta şifrelenmiş
+v2 görevleri için deneysel bir uyumluluk yoludur. İki istek biçimi kapsanır:
+yönlendirilen bir v2 çocuğu oluşturan yerel bir ChatGPT ebeveyni ve yerel bir
+ChatGPT modelinden yönlendirilen bir modele geçirilen canlı bir konuşma —
+geçmişi, sonraki her turda arka uçta üretilmiş şifreli bir ajan mesajını yeniden
+oynatır ([#4089](https://github.com/lidge-jun/opencodex/issues/4089)).
+Varsayılan olarak devre dışıdır.
+Açıkça etkinleştirildiğinde ve nihai yönlendirilen görev aksi takdirde
+okunamayan bir Fernet `NEW_TASK` veya `MESSAGE` yükü içerdiğinde, opencodex iletme modu kimlik
 doğrulamasıyla sabit `https://chatgpt.com/backend-api/codex/responses` uç
 noktasına ham bir Responses doğrudan geçiş isteği kullanır. ChatGPT düz metin
 yükünü zorunlu bir fonksiyon çağrısı aracılığıyla döndürür; opencodex daha

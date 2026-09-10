@@ -124,16 +124,27 @@ export function providerFetch(
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
   };
+  // Rebuilt dispatches must use the same physical-send boundary as ordinary HTTP sends.
+  // Return the original 3xx so the response owner retains its retry/health/relay contract.
+  const dispatch = Object.assign(
+    (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
+      base(input, { ...init, redirect: "manual" }),
+    { preconnect },
+  ) as typeof globalThis.fetch;
   const httpFetch = Object.assign(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
-      const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
+      const dispatchInit = {
+        ...withUpstreamHttpVersion(input, init, provider),
+        redirect: "manual" as const,
+        timeout: 0,
+      };
       options.beforeDispatch?.(new Headers(dispatchInit.headers ?? (input instanceof Request ? input.headers : undefined)));
       // Recovery may rebuild the destination and body at the dispatch boundary.
       // Observe the executor's arguments so diagnostics describe that actual send.
       const execute = Object.assign(async (wireInput: Parameters<typeof globalThis.fetch>[0], wireInit?: RequestInit) => {
         notifyTransport(options.observeTransport, { kind: "send", transport: "http", body: wireInit?.body,
           target: options.observeTransport ? diagnosticTarget(wireInput, wireInit) : undefined });
-        const response = await base(wireInput, wireInit);
+        const response = await dispatch(wireInput, wireInit);
         notifyTransport(options.observeTransport, { kind: "response", transport: "http", response });
         return response;
       }, { preconnect });
@@ -232,6 +243,10 @@ export function storedPoolReplayDispatchNotifier(
   }) as ProviderFetch;
 }
 
+/**
+ * Fetch through the header deadline with redirects always manual.
+ * @param _manualRedirect Ignored; retained for call compatibility. Even false uses manual.
+ */
 export async function fetchWithHeaderTimeout(
   url: string,
   init: Omit<RequestInit, "signal">,
@@ -239,7 +254,8 @@ export async function fetchWithHeaderTimeout(
   timeoutMs: number,
   preferIdentityEncoding = false,
   executor: typeof globalThis.fetch = globalThis.fetch,
-  manualRedirect = false,
+  // Retained for existing callers; credential-bearing transport no longer opts out.
+  _manualRedirect = false,
 ): Promise<Response> {
   const pacing = executor as ProviderFetch;
   await pacing.waitForPacing?.(abortSignal);
@@ -258,10 +274,9 @@ export async function fetchWithHeaderTimeout(
     return await fetchExecutor(url, {
       ...init,
       headers,
-      // Credential-bearing sends opt into manual redirects so a 3xx is relayed
-      // as a Response instead of being followed into a rejection that is
-      // indistinguishable from a pre-connection failure (#914).
-      ...(manualRedirect ? { redirect: "manual" as const } : {}),
+      // Never replay provider credentials or request bodies to a redirect destination.
+      // Preserve the 3xx for the owner's existing response/health policy (#914, #1471).
+      redirect: "manual",
       signal: AbortSignal.any([abortSignal, timeout.signal]),
       timeout: 0,
     });

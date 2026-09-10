@@ -109,7 +109,12 @@ import { fastPolicyForModel } from "../../providers/service-tier";
 import { parseFastOnlyRowId } from "../fast-row";
 import { applyOpenAiVirtualModel, resolveOpenAiCompactModel } from "../../providers/openai-virtual-models";
 import { isUsageDebugEnabled } from "../../usage/debug";
-import { readJsonRequestBody, DecompressedBodyTooLargeError, UnsupportedContentEncodingError } from "../request-decompress";
+import {
+  readJsonRequestBody,
+  resolveInboundBodyLimitBytes,
+  DecompressedBodyTooLargeError,
+  UnsupportedContentEncodingError,
+} from "../request-decompress";
 import { resolveAdapter, resolveWireProtocolOverride } from "../adapter-resolve";
 import { hasKeyPoolFailover, rotateProviderTransportOn429 } from "../../providers/key-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
@@ -533,7 +538,7 @@ export async function handleResponsesCompact(
     && hasForwardableCodexBearer(req.headers, config);
   let body: unknown;
   try {
-    body = await readJsonRequestBody(req);
+    body = await readJsonRequestBody(req, undefined, resolveInboundBodyLimitBytes(config.maxInboundBodyBytes));
     recordRequestShape(logCtx, body);
   } catch (err) {
     return decodeRequestErrorResponse(err, "responses-compact");
@@ -1057,6 +1062,7 @@ export async function handleResponsesCompact(
             upstream.headers,
             authCtx.writerGeneration,
             authCtx.kind === "main-pool" ? authCtx.mainQuotaWriter : undefined,
+            { modelId: route.modelId },
           );
         }
         recordCompactPoolOutcome(authCtx, upstream.status, {

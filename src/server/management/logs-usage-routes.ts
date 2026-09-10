@@ -142,9 +142,12 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     }
     const all = getRequestLogEntries();
     const total = filteredRequestLogCount(all, url.searchParams);
-    const logs = filterRequestLogs(all, url.searchParams).map(
-      url.searchParams.get("view") === "summary" ? requestLogSummaryDto : requestLogDto,
-    );
+    // Explicit arrows matter because requestLogDto takes an options object second;
+    // Array.map would otherwise pass the element index. Summary projection also
+    // removes heavy diagnostics before DTO calculation and cursor hashing.
+    const summary = url.searchParams.get("view") === "summary";
+    const logs = filterRequestLogs(all, url.searchParams).map(entry =>
+      summary ? requestLogSummaryDto(entry) : requestLogDto(entry));
     const poll = selectRequestLogPoll(logs, url.searchParams, cursor);
     return jsonResponse({
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -454,6 +457,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         bytes: result.bytes,
         ...(result.trashDir ? { trashDir: result.trashDir } : {}),
         removedPaths: result.removedPaths,
+        ...(result.skippedReferencedPaths?.length ? { skippedReferencedPaths: result.skippedReferencedPaths } : {}),
       });
     } catch {
       return jsonResponse({

@@ -198,7 +198,9 @@ export interface PersistedUsageEntry {
   upstreamError?: string;
   localTerminalReason?: string;
   affinity?: "reused" | "new_bind" | "rebound" | "cleared";
+  /** Where the terminal/failure was observed; absent on historic rows. */
   transportPhase?: "pre_headers" | "mid_stream" | "terminal_sse";
+  /** Whether the terminal came from upstream or a proxy-generated tail. */
   terminalSource?: "upstream" | "synthetic";
   /**
    * Bounded route-decision trace (RI-01): why this provider/model/account was
@@ -253,6 +255,22 @@ export function isKnownAdmissionKind(value: unknown): value is NonNullable<Persi
 
 export function isKnownInboundProtocol(value: unknown): value is NonNullable<PersistedUsageEntry["inboundProtocol"]> {
   return typeof value === "string" && KNOWN_INBOUND_PROTOCOLS.has(value as NonNullable<PersistedUsageEntry["inboundProtocol"]>);
+}
+
+const KNOWN_TRANSPORT_PHASES = new Set<NonNullable<PersistedUsageEntry["transportPhase"]>>([
+  "pre_headers", "mid_stream", "terminal_sse",
+]);
+
+export function isKnownTransportPhase(value: unknown): value is NonNullable<PersistedUsageEntry["transportPhase"]> {
+  return typeof value === "string" && KNOWN_TRANSPORT_PHASES.has(value as NonNullable<PersistedUsageEntry["transportPhase"]>);
+}
+
+const KNOWN_TERMINAL_SOURCES = new Set<NonNullable<PersistedUsageEntry["terminalSource"]>>([
+  "upstream", "synthetic",
+]);
+
+export function isKnownTerminalSource(value: unknown): value is NonNullable<PersistedUsageEntry["terminalSource"]> {
+  return typeof value === "string" && KNOWN_TERMINAL_SOURCES.has(value as NonNullable<PersistedUsageEntry["terminalSource"]>);
 }
 
 export function usageLogPath(configDir?: string): string {
@@ -563,6 +581,8 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
   const responseServiceTier = sanitizeLogMetadataString(entry.responseServiceTier);
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
   const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
+  const transportPhase = isKnownTransportPhase(entry.transportPhase) ? entry.transportPhase : undefined;
+  const terminalSource = isKnownTerminalSource(entry.terminalSource) ? entry.terminalSource : undefined;
   const routeDecision = entry.routeDecision
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
@@ -649,6 +669,8 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ...(entry.usage ? { usage: normalizeUsageValue(entry.usage) } : {}),
     ...(typeof entry.totalTokens === "number" ? { totalTokens: entry.totalTokens } : {}),
     ...(Array.isArray(entry.attempts) ? { attempts } : {}),
+    ...(transportPhase ? { transportPhase } : {}),
+    ...(terminalSource ? { terminalSource } : {}),
     ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
     ...(entry.terminalStatus === "completed" || entry.terminalStatus === "failed"
       || entry.terminalStatus === "incomplete"
@@ -664,13 +686,6 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ...(entry.affinity === "reused" || entry.affinity === "new_bind"
       || entry.affinity === "rebound" || entry.affinity === "cleared"
       ? { affinity: entry.affinity }
-      : {}),
-    ...(entry.transportPhase === "pre_headers" || entry.transportPhase === "mid_stream"
-      || entry.transportPhase === "terminal_sse"
-      ? { transportPhase: entry.transportPhase }
-      : {}),
-    ...(entry.terminalSource === "upstream" || entry.terminalSource === "synthetic"
-      ? { terminalSource: entry.terminalSource }
       : {}),
     ...(routeDecision ? { routeDecision } : {}),
     ...(claudeCompatibility ? { claudeCompatibility } : {}),

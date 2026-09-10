@@ -141,8 +141,10 @@ availability snapshot is cached for `subagentModelFallbackPollMs`. Encrypted chi
 the chain to canonical native ChatGPT targets plus direct key-auth Responses routes explicitly
 trusted with `allowEncryptedV2AgentTasks: true`; if none can consume the encrypted payload, the
 request fails instead of routing unreadable ciphertext elsewhere. Combo routing first tries an
-available canonical native target; when none is selectable and `agentTaskRecovery` is enabled,
-an encrypted `NEW_TASK` is recovered once before routed combo dispatch.
+available canonical native target; when none is selectable or their attempts are exhausted, and
+`agentTaskRecovery` is enabled, an encrypted `NEW_TASK` is recovered once before routed combo
+dispatch. Combo recovery runs only on spawned child turns; the direct routed path also recovers
+on a mid-thread model switch.
 
 ```json
 {
@@ -163,7 +165,10 @@ an encrypted `NEW_TASK` is recovered once before routed combo dispatch.
 ## Encrypted v2 task recovery
 
 `agentTaskRecovery` is an experimental compatibility path for encrypted v2 collaboration messages
-from a native ChatGPT parent to a routed child. It is disabled by default. When explicitly enabled
+that reach a routed provider: a native ChatGPT parent spawning a routed child, or a live thread
+switched from native ChatGPT to a routed model whose history replays a backend-encrypted agent
+message on later turns ([#4089](https://github.com/lidge-jun/opencodex/issues/4089)).
+It is disabled by default. When explicitly enabled
 and the final routed child input contains an otherwise unreadable Fernet `NEW_TASK` or `MESSAGE`
 payload, opencodex uses a raw Responses passthrough request
 to the fixed `https://chatgpt.com/backend-api/codex/responses` endpoint with forward-mode

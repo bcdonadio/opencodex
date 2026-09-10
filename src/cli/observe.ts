@@ -26,7 +26,7 @@ import { redactSecretString } from "../lib/redact";
 
 const USAGE = `Usage:
   ocx observe logs [--provider <name>] [--model <id>] [--status <code>]
-      [--conversation <id>] [--limit <n>] [--follow] [--json|--jsonl]
+      [--conversation <id>] [--account <label>] [--limit <n>] [--follow] [--json|--jsonl]
   ocx logs explain <request-id> [--json]
   ocx logs export (--request <id> ... | --from <ms> --to <ms>) [--out <path>] [--force] [--json]
   ocx logs rebuild-index
@@ -72,6 +72,7 @@ function formatLog(row: LogEntry): string {
     ? `client=${row.inboundTransport}` : "";
   const upstream = row.upstreamTransport === "http" || row.upstreamTransport === "websocket" || row.upstreamTransport === "mixed"
     ? `upstream=${row.upstreamTransport}` : "";
+  // Only render the stable non-PII label persisted by the proxy.
   const account = typeof row.accountLogLabel === "string" && ACCOUNT_LOG_LABEL_RE.test(row.accountLogLabel)
     ? `account=${row.accountLogLabel}` : "";
   return [time, String(status), route, duration, conversation, client, upstream, account].filter(Boolean).join("  ");
@@ -88,6 +89,9 @@ async function logs(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   // Both spellings, because the server accepts both (`request-log.ts:1032`) and an operator
   // should not have to remember which one this surface wanted.
   const conversationId = takeOption(args, "--conversation") ?? takeOption(args, "--conversationId");
+  // Server-side, so `--limit` caps the rows that MATCHED rather than the rows scanned; a
+  // client-side filter after a 200-row cap would silently hide older matches.
+  const account = takeOption(args, "--account");
   const limit = takeIntegerOption(args, "--limit", { min: 1 }) ?? 200;
   rejectArgs(args, USAGE);
   if (wantsJson && wantsJsonl) throw new CliUsageError("--json and --jsonl cannot be combined", USAGE);
@@ -96,7 +100,7 @@ async function logs(argv: string[], deps: RuntimeApiDeps): Promise<void> {
   }
   let seen = new Set<string>();
   do {
-    const data = await runtimeRequest(`/api/logs${query({ provider, model, status, conversationId, limit })}`, {}, deps);
+    const data = await runtimeRequest(`/api/logs${query({ provider, model, status, conversationId, account, limit })}`, {}, deps);
     const rows = logRows(data);
     if (!follow && wantsJson) printData(data, true);
     else {
