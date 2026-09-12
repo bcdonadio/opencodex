@@ -416,6 +416,28 @@ JSON mode: `payload`.
 
 - Uses the exact upstream model ID after the first slash. Omitted cache rates default to zero; sibling model prices are preserved.
 
+### `ocx hub invite`
+
+Mint a single-use pairing code on a hub and print the exact `ocx connect` line for one more machine.
+
+Drives no management route.
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit code, expiresAt, dataUrl, managementUrl, and command. |
+| `--data-url` | string | Advertise this data origin instead of hub.dataPublicOrigin or the bind address. |
+| `--management-url` | string | Confirm the management origin; it must equal hub.managementPublicOrigin. |
+| `--clients` | string | Pre-select codex and/or claude in the printed connect command. |
+
+JSON mode: `envelope`.
+
+- Hub only: refuses when runtimeRole is not hub, and requires a running attested proxy.
+- The code is secret, single-use and short-lived; it is bound to hub.managementPublicOrigin and to the connecting machine's loopback browser origin.
+- The bound browser origin is always printed; when it is not http://localhost:10100 the warning names the port the connecting machine must use.
+- Refuses when the advertised data origin would be loopback (a loopback or wildcard bind with no hub.dataPublicOrigin and no --data-url) rather than printing a line that dials the other machine itself.
+- Prints no data-plane token. Remote machines receive their own revocable per-client key from the exchange.
+- Mints through the attested local pairing-grant route, the same one ocx gui pair uses; no admin token is read.
+
 ### `ocx connect rotate`
 
 Rotate the connected client's data key against the hub, with commit and abort.
@@ -472,6 +494,28 @@ JSON mode: `payload`.
 
 - CLI/admin-token refreshes only observe usage. After quota recovery, a human must click Refresh quotas in the dashboard to authorize model validation. Do not mint a GUI session to work around this consent boundary.
 
+### `ocx account grok-reset-coupons`
+
+Inspect or redeem Grok billing reset coupons; redemption is journaled and idempotent.
+
+| Method | Route |
+|---|---|
+| GET | `/api/grok/reset-coupons` |
+| POST | `/api/grok/reset-coupons/consume` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--consume` | boolean | Redeem one reset coupon; requires --yes. |
+| `--yes` | boolean | Explicit confirmation required by --consume. |
+| `--token-id` | string | Redeem a specific reset token instead of the default selection. |
+| `--operation-id` | string | UUIDv4 making a redemption idempotent: retries replay the journaled outcome. |
+| `--json` | boolean | Emit the coupon list or redemption result as JSON. |
+
+JSON mode: `payload`.
+
+- Without --consume this is a read: remaining coupons and their validity windows.
+- The operation is journaled before the upstream call, so retrying the same --operation-id replays the recorded outcome instead of spending a second coupon.
+
 ### `ocx account pause`
 
 Stop routing new requests to one account in the Codex pool.
@@ -525,10 +569,9 @@ Show or set how an account pool picks the next account.
 
 | Method | Route |
 |---|---|
-| GET | `/api/codex-auth/active` |
-| PUT | `/api/codex-auth/pool-strategy` |
-| GET | `/api/oauth/accounts/pool` |
-| PUT | `/api/oauth/accounts/pool` |
+| GET | `/api/pool/settings` |
+| PUT | `/api/pool/settings` |
+| PATCH | `/api/pool/settings` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -539,7 +582,7 @@ JSON mode: `envelope`.
 - A bare invocation reads and never writes.
 - The APPLIED value is echoed, not the requested one, so a server-side normalization stays visible.
 - Values are not re-validated in the CLI: the server owns the strategy names and the 1-100 sticky bound.
-- `anthropic` owns the full pool contract. Other OAuth providers reach the same endpoint with a generic subset (enabled/strategy/autoSwitchThreshold) whose settings persist but do not yet steer selection; `sticky` and `quotaWindow` are refused for them.
+- One route answers for every pool kind and declares which fields that kind honours in `supported`, so an unsupported field is a stated null rather than an absence. `anthropic` alone carries `quotaWindow`. Generic-provider settings steer selection only while `pool.kernel` is on. The legacy per-pool paths still work and are unchanged.
 
 ### `ocx account sticky`
 
@@ -547,10 +590,9 @@ Show or set how many consecutive requests stay on one account.
 
 | Method | Route |
 |---|---|
-| GET | `/api/codex-auth/active` |
-| PUT | `/api/codex-auth/pool-strategy` |
-| GET | `/api/oauth/accounts/pool` |
-| PUT | `/api/oauth/accounts/pool` |
+| GET | `/api/pool/settings` |
+| PUT | `/api/pool/settings` |
+| PATCH | `/api/pool/settings` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -559,6 +601,27 @@ Show or set how many consecutive requests stay on one account.
 JSON mode: `envelope`.
 
 - Only meaningful under the sticky-capable strategies; the pool strategy is the other half of this setting.
+
+### `ocx account auto-switch`
+
+Show or set the usage percentage at which a pool moves to another account.
+
+| Method | Route |
+|---|---|
+| GET | `/api/codex-auth/active` |
+| PUT | `/api/codex-auth/auto-switch` |
+| GET | `/api/oauth/accounts/pool` |
+| PUT | `/api/oauth/accounts/pool` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit the stored threshold and whether it is applied. |
+
+JSON mode: `envelope`.
+
+- A bare invocation reads and never writes.
+- `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0-100.
+- For a generic OAuth pool, `inert: true` means the threshold is stored but not applied, `inert: false` means the pool is applying it, and an absent `inert` is an unknown capability.
 
 ### `ocx storage cleanup`
 
@@ -728,6 +791,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 39
-- of those, state-changing: 17
+- declared capabilities: 42
+- of those, state-changing: 20
 - head-resolved invocations: 2

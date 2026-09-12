@@ -1,4 +1,5 @@
 import { normalizeRoutedAgentMessages } from "./routed-agent-messages";
+import { stripBracketedModelSuffix } from "./openai-chat";
 import { normalizeOpenCodeGoAdditionalTools } from "./opencode-go-additional-tools";
 import { isXaiResponsesDestination } from "../providers/xai-transport";
 import { createHash } from "node:crypto";
@@ -2559,11 +2560,24 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         actualServiceTier === null ? null : "service-tier",
         actualServiceTier,
       );
-      const body = JSON.stringify(finalBody);
+      // The Responses adapter is passthrough: it forwards `parsed._rawBody` rather than
+      // rebuilding the body from `parsed.modelId`, and the router writes the routed id into
+      // that raw body. So a provider whose upstream rejects bracketed ids has to be honoured
+      // here, on the serialized body, not on the parsed selector. One place covers both the
+      // HTTP and the WebSocket outbound, because the WS path transports this same request
+      // instead of rebuilding it.
+      const outboundBody = provider.modelSuffixBracketStrip
+          && finalBody !== null
+          && typeof finalBody === "object"
+          && !Array.isArray(finalBody)
+          && typeof (finalBody as { model?: unknown }).model === "string"
+          ? { ...(finalBody as Record<string, unknown>), model: stripBracketedModelSuffix((finalBody as { model: string }).model) }
+          : finalBody;
+      const body = JSON.stringify(outboundBody);
       // All wire rewrites have settled. Parsed intent may differ from this body,
       // and an absent emitted field must not acquire an inferred effective effort.
-      const wireEffort = isPlainObject(finalBody) && isPlainObject(finalBody.reasoning)
-        ? finalBody.reasoning.effort : undefined;
+      const wireEffort = isPlainObject(outboundBody) && isPlainObject(outboundBody.reasoning)
+        ? outboundBody.reasoning.effort : undefined;
       const reasoningLog: AdapterRequest["reasoningLog"] = typeof wireEffort === "string" && wireEffort.length > 0
         ? { effectiveEffort: wireEffort, wireField: "reasoning.effort", wireValue: wireEffort }
         : undefined;

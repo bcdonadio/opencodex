@@ -304,6 +304,18 @@ describe("web-search sidecar planning", () => {
     expect(shouldResolveOpenAiWebSearchSidecar(config(), parsed, false)).toBe(true);
   });
 
+  test("a forbidden hosted search does not resolve OpenAI auth", () => {
+    for (const toolChoice of ["none", { type: "function", name: "read_file" }]) {
+      const parsed = parseRequest({ model: "routed/model", input: "hi",
+        tools: [{ type: "web_search" }, { type: "function", name: "read_file", parameters: { type: "object" } }],
+        tool_choice: toolChoice,
+      });
+      expect(parsed._webSearch).toBeDefined();
+      expect(shouldResolveOpenAiWebSearchSidecar(config(), parsed, false)).toBe(false);
+      expect(planWebSearch(config(), parsed, false, routedProvider, "model")).toBeUndefined();
+    }
+  });
+
   test("parseRequest stashes hosted web_search while keeping normal tools", () => {
     const parsed = parsedWithWebSearch();
 
@@ -953,7 +965,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       onRequestBuilt: request => reasoningLogs.push(request.reasoningLog),
       on429: async retryAfter => {
@@ -1024,7 +1036,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       retryOn429Policy: { enabled: true, attempts: 2, intervalMs: 120, maxIntervalMs: 60_000, respectRetryAfter: false },
       on429: () => {
@@ -1077,7 +1089,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       stallTimeoutSec: 1,
       retryOn429Policy: { enabled: true, attempts: 1, intervalMs: 1_500, maxIntervalMs: 60_000, respectRetryAfter: false },
@@ -1119,7 +1131,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       connectTimeoutMs: 100,
       retryOn429Policy: { enabled: true, attempts: 1, intervalMs: 150, maxIntervalMs: 60_000, respectRetryAfter: false },
@@ -1176,7 +1188,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       retryOn429Policy: { enabled: true, attempts: 1, intervalMs: 50, maxIntervalMs: 60_000, respectRetryAfter: false },
       on429: () => {
@@ -1209,7 +1221,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       on429: () => null,
     });
@@ -1232,7 +1244,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       connectTimeoutMs: 100,
     });
@@ -1270,7 +1282,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       connectTimeoutMs: 100,
       on429: () => rotatedAdapter,
@@ -1301,7 +1313,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       connectTimeoutMs: 30_000,
       abortSignal: parent.signal,
@@ -1373,7 +1385,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 2,
     });
     await collectSse(response.body!);
@@ -1438,7 +1450,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 2,
     });
     await collectSse(response.body!);
@@ -1508,7 +1520,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 2,
     });
     await collectSse(response.body!);
@@ -1582,7 +1594,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 2,
     });
     await collectSse(response.body!);
@@ -1621,7 +1633,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
 
@@ -1653,7 +1665,7 @@ describe("web-search sidecar native web_search_call emission", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
 
@@ -1726,7 +1738,7 @@ describe("web-search forced-answer nudge", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
     // Iteration 2 (the forced-answer pass) runs live inside the SSE body — drain it so it executes.
@@ -1765,7 +1777,7 @@ describe("web-search forced-answer nudge", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
     await drain(response.body!);
@@ -1805,7 +1817,7 @@ describe("web-search live spinner ordering", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
 
@@ -1882,7 +1894,7 @@ describe("web-search batched queries", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 3,
     });
 
@@ -1936,7 +1948,7 @@ describe("web-search sources -> url_citation annotations", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
 
@@ -1979,7 +1991,7 @@ describe("web-search sources -> url_citation annotations", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
 
@@ -2006,7 +2018,7 @@ describe("web-search sources -> url_citation annotations", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
     const frames = await collectSse(response.body!);
@@ -2049,7 +2061,7 @@ describe("web-search batched sources -> url_citation annotations", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 3,
     });
 
@@ -2095,7 +2107,7 @@ describe("web-search batched sources -> url_citation annotations", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 3,
     });
 
@@ -2173,7 +2185,7 @@ describe("web-search stall deadline", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 600_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 600_000 },
       maxSearches: 1,
       // Bridge clamps to >= 1s and checks on its 2s tick: the hung search dies on the first
       // silent tick (~4s), proving deps.stallTimeoutSec actually reaches bridgeToResponsesSSE.
@@ -2208,7 +2220,7 @@ describe("#398 sidecar failure degradation", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
     });
 

@@ -167,7 +167,7 @@ describe("sidecar abort propagation", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       abortSignal: turn.signal,
     });
@@ -195,7 +195,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       turn.signal,
       value => recorded.push(value),
     );
@@ -217,7 +217,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       undefined,
       outcome => recorded.push(outcome),
     );
@@ -236,7 +236,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       lateAbort.signal,
       outcome => recorded.push(outcome),
     );
@@ -252,7 +252,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
     );
     expect(outcome.error).toBe("sidecar HTTP 401: upstream echoed Bearer [REDACTED]");
   });
@@ -294,7 +294,7 @@ describe("sidecar abort propagation", () => {
       forwardProvider,
       hostedTool: { type: "web_search" },
       selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       maxSearches: 1,
       recordSidecarOutcome: outcome => recorded.push(outcome),
     });
@@ -320,7 +320,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
       turn.signal,
       value => recorded.push(value),
     );
@@ -342,7 +342,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       webTurn.signal,
       value => webRecorded.push(value),
     );
@@ -364,7 +364,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
       visionTurn.signal,
       value => visionRecorded.push(value),
     );
@@ -388,7 +388,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       webTurn.signal,
       value => webRecorded.push(value),
     );
@@ -408,7 +408,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
       visionTurn.signal,
       value => visionRecorded.push(value),
     );
@@ -430,7 +430,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
       turn.signal,
       value => recorded.push(value),
     );
@@ -449,7 +449,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
       undefined,
       value => webRecorded.push(value),
     );
@@ -464,7 +464,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
       undefined,
       value => visionRecorded.push(value),
     );
@@ -482,7 +482,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
       undefined,
       outcome => recorded.push(outcome),
     );
@@ -502,7 +502,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
       lateAbort.signal,
       outcome => recorded.push(outcome),
     );
@@ -519,7 +519,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 1 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 1 },
       undefined,
       outcome => webRecorded.push(outcome),
     );
@@ -534,7 +534,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 1 },
+      { model: "gpt-5.6-luna", timeoutMs: 1 },
       undefined,
       outcome => visionRecorded.push(outcome),
     );
@@ -550,7 +550,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       new Headers({ authorization: "Bearer token" }),
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
     );
     expect(outcome.error).toBe("vision sidecar HTTP 403: upstream echoed Bearer [REDACTED]");
   });
@@ -574,7 +574,7 @@ describe("sidecar abort propagation", () => {
       { type: "web_search" },
       forwardProvider,
       selectedHeaders,
-      { model: "gpt-5.4-mini", reasoning: "low", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
     );
 
     expect(seenAuthorization).toBe("Bearer pool-token");
@@ -639,7 +639,7 @@ describe("sidecar abort propagation", () => {
       "inspect screenshot",
       forwardProvider,
       selectedHeaders,
-      { model: "gpt-5.4-mini", timeoutMs: 30_000 },
+      { model: "gpt-5.6-luna", timeoutMs: 30_000 },
     );
 
     expect(seenAuthorization).toBe("Bearer pool-token");

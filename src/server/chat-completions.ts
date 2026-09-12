@@ -26,7 +26,10 @@ import { NoEligiblePolicyCandidateError, UnknownRoutingPolicyError, routeModel }
 import { evidenceFromBody } from "../routing/request-evidence";
 import { resolveWireProtocolOverride } from "./adapter-resolve";
 import { resolveOpenCodeGoTransport } from "../providers/opencode-go-transport";
-import { normalizeLogConversationId, sessionLaneIdFromRequest } from "./request-log-conversation";
+import {
+  getOrAllocateRequestSessionLane,
+  linkRequestSessionLane,
+} from "./request-log-conversation";
 import type { OcxConfig } from "../types";
 import { readJsonRequestBody, resolveInboundBodyLimitBytes } from "./request-decompress";
 import {
@@ -142,8 +145,7 @@ async function handleChatCompletionsWithBudget(
   let chatNativeRoute: ReturnType<typeof routeModel> | null = null;
   try {
     const route = routeModel(config, chatBody.model as string, evidenceFromBody(chatBody));
-    route.provider = resolveOpenCodeGoTransport(route.provider,
-      sessionLaneIdFromRequest(req.headers) ?? normalizeLogConversationId(req.headers.get("x-opencode-session")));
+    route.provider = resolveOpenCodeGoTransport(route.provider, getOrAllocateRequestSessionLane(req));
     // Settle the wire once so every branch below reads the adapter this model will
     // actually use, not the provider-wide default (#404).
     route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, "chat");
@@ -258,9 +260,9 @@ async function handleChatCompletionsWithBudget(
     const value = req.headers.get(name);
     if (value) headers.set(name, value);
   }
-  // A noncanonical caller-auth route can use stored main auth only through a sidecar snapshot.
-  // Later shadow/thread rewrites strip primary credentials at the actual Responses boundary.
-  if (!callerAuthorizationRoute || (settledRoute && !isCanonicalOpenAiForwardProvider(settledRoute.provider))) {
+  // Existing primary enrichment stays on non-caller-auth routes. Caller-auth routes defer
+  // optional stored sidecar auth until the final helper plan actually needs it.
+  if (!callerAuthorizationRoute) {
     // This enrichment is optional for routed/non-main providers. If native main
     // is fenced, omit it and let auth-context reject only a final physical-main
     // selection while healthy pool/provider routes continue.
@@ -305,6 +307,7 @@ async function handleChatCompletionsWithBudget(
     headers,
     body: internalBodyJson,
   });
+  linkRequestSessionLane(req, internalReq);
 
   let nativeLogged = false;
   const finalizeNativeLog = (status: number, meta: { terminalStatus?: RequestLogEntry["terminalStatus"]; closeReason: "terminal" | "client_cancel" | "non_stream" }) => {
@@ -314,6 +317,8 @@ async function handleChatCompletionsWithBudget(
   };
   const upstream = await handleResponses(internalReq, config, logCtx, {
     openAiSidecarAuth,
+    allowStoredOpenAiSidecarAuth: !!(callerAuthorizationRoute && settledRoute
+      && !isCanonicalOpenAiForwardProvider(settledRoute.provider)),
     nativeCallerAuth,
     callerDirectAuth,
     ...(logIds?.turnAdmissionLease ? { turnAdmissionLease: logIds.turnAdmissionLease } : {}),
