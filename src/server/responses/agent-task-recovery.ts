@@ -4,7 +4,13 @@ import type { OcxConfig } from "../../types";
 import { boundedBodyDecodeFailure, readBoundedResponseBody } from "../../lib/bounded-body";
 import { sanitizeLogMetadataString } from "../../lib/redact";
 import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
-import { AGENT_MESSAGE_CONTROL_PREAMBLE, structurallyValidFernetTokens } from "./encrypted-payload";
+import {
+  AGENT_MESSAGE_CONTROL_PREAMBLE,
+  hasUnreadableEncryptedAgentTask,
+  MAX_AGENT_TASK_CIPHERTEXT_BYTES,
+  MAX_AGENT_TASK_ENCRYPTED_PARTS,
+  structurallyValidFernetTokens,
+} from "./encrypted-payload";
 import {
   cachedAgentTaskRecovery,
   discardCachedAgentTaskRecovery,
@@ -31,7 +37,6 @@ const RECOVERY_PROMPT =
 const CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_TOKEN_ISSUERS = new Set(["https://auth.openai.com", "https://auth.openai.com/"]);
 const OPENAI_TOKEN_AUDIENCE = "https://api.openai.com/v1";
-const MAX_CIPHERTEXT_BYTES = 2 * 1024 * 1024;
 const MAX_ASSIGNMENT_BYTES = 2 * 1024 * 1024;
 const MAX_RECOVERY_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_HISTORY_RECOVERY_WORKERS = 4;
@@ -140,12 +145,13 @@ export function agentTaskRecoveryConfig(config: OcxConfig): AgentTaskRecoveryOpt
 
 interface AgentEnvelope {
   itemIndex: number;
-  encryptedIndex: number;
+  encryptedStartIndex: number;
+  inputSnapshot: string;
   headerText: string;
   messageType: "NEW_TASK" | "MESSAGE";
   taskName: string;
   sender: string;
-  ciphertext: string;
+  ciphertexts: readonly string[];
   author: string;
   recipient: string;
 }
@@ -182,10 +188,9 @@ function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): 
   let messageType: "NEW_TASK" | "MESSAGE" | null = null;
   let taskName: string | null = null;
   let sender: string | null = null;
-  let encryptedIndex = -1;
-  let ciphertext = "";
-  let encryptedPartCount = 0;
-  let ciphertextCount = 0;
+  let encryptedStartIndex = -1;
+  const ciphertexts: string[] = [];
+  let ciphertextBytes = 0;
 
   for (let index = 0; index < content.length; index += 1) {
     const part = content[index] as { type?: unknown; text?: unknown; encrypted_content?: unknown } | null;
@@ -211,23 +216,19 @@ function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): 
     } else if (part.type !== "encrypted_content") {
       return reject("extra_content_block");
     }
-    if (part.type !== "encrypted_content" || typeof part.encrypted_content !== "string") continue;
-    encryptedPartCount += 1;
-    for (const token of structurallyValidFernetTokens(part.encrypted_content)) {
-      ciphertextCount += 1;
-      encryptedIndex = index;
-      ciphertext = token;
-    }
+    if (part.type !== "encrypted_content") continue;
+    if (typeof part.encrypted_content !== "string") return null;
+    ciphertextBytes += Buffer.byteLength(part.encrypted_content);
+    if (ciphertexts.length >= MAX_AGENT_TASK_ENCRYPTED_PARTS || ciphertextBytes > MAX_AGENT_TASK_CIPHERTEXT_BYTES) return null;
+    const tokens = structurallyValidFernetTokens(part.encrypted_content);
+    if (tokens.length !== 1 || tokens[0] !== part.encrypted_content) return null;
+    if (encryptedStartIndex < 0) encryptedStartIndex = index;
+    if (index !== encryptedStartIndex + ciphertexts.length) return null;
+    ciphertexts.push(part.encrypted_content);
   }
 
   if (!headerText || !messageType || !taskName || !sender) return reject("routing_header_missing");
-  if (encryptedIndex < 0) return reject("ciphertext_missing");
-  if (encryptedPartCount !== 1) return reject("encrypted_part_count");
-  if (ciphertextCount !== 1) return reject("fernet_token_count");
-  if ((content[encryptedIndex] as { encrypted_content?: unknown }).encrypted_content !== ciphertext) {
-    return reject("encrypted_part_not_standalone");
-  }
-  if (Buffer.byteLength(ciphertext) > MAX_CIPHERTEXT_BYTES) return reject("ciphertext_too_large");
+  if (encryptedStartIndex < 0 || ciphertexts.length === 0) return reject("ciphertext_missing");
 
   const itemRecord = item as { author?: unknown; recipient?: unknown };
   if (typeof itemRecord.author !== "string" || typeof itemRecord.recipient !== "string") {
@@ -237,12 +238,13 @@ function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): 
 
   const envelope = {
     itemIndex,
-    encryptedIndex,
+    encryptedStartIndex,
+    inputSnapshot: JSON.stringify(item),
     headerText,
     messageType,
     taskName,
     sender,
-    ciphertext,
+    ciphertexts,
     author: itemRecord.author,
     recipient: itemRecord.recipient,
   };
@@ -318,12 +320,7 @@ function injectAssignment(input: unknown, envelope: AgentEnvelope, assignment: s
   const item = structuredClone(sourceItem) as Record<string, unknown>;
   const content = (item as { content?: unknown }).content;
   if (!Array.isArray(content)) return false;
-  const part = content[envelope.encryptedIndex] as { type?: unknown; encrypted_content?: unknown } | undefined;
-  if (
-    !part
-    || part.type !== "encrypted_content"
-    || part.encrypted_content !== envelope.ciphertext
-  ) return false;
+  if (JSON.stringify(item) !== envelope.inputSnapshot) return false;
 
   // Once recovery succeeds the transport envelope is no longer meaningful to a routed
   // provider. Replace the whole message content so no routing/control blocks survive.
@@ -463,7 +460,7 @@ function cacheKeyForEnvelope(
     .update("\0")
     .update(envelope.sender)
     .update("\0")
-    .update(envelope.ciphertext)
+    .update(JSON.stringify(envelope.ciphertexts))
     .digest("hex");
 }
 
@@ -487,15 +484,7 @@ function itemHasStandaloneFernet(input: unknown[], itemIndex: number): boolean {
   if (!item || typeof item !== "object" || (item as { type?: unknown }).type !== "agent_message") {
     return false;
   }
-  const content = (item as { content?: unknown }).content;
-  if (!Array.isArray(content)) return false;
-  return content.some(part => (
-    !!part
-    && typeof part === "object"
-    && (part as { type?: unknown }).type === "encrypted_content"
-    && typeof (part as { encrypted_content?: unknown }).encrypted_content === "string"
-    && structurallyValidFernetTokens((part as { encrypted_content: string }).encrypted_content).length > 0
-  ));
+  return hasUnreadableEncryptedAgentTask([item], { strictEnvelope: true });
 }
 
 export async function recoverAgentTaskHistory(
@@ -532,7 +521,9 @@ export async function recoverAgentTaskHistory(
   }
   if (
     envelopes.length > MAX_HISTORY_ENVELOPES
-    || envelopes.reduce((bytes, envelope) => bytes + Buffer.byteLength(envelope.ciphertext), 0)
+    || envelopes.reduce((bytes, envelope) => (
+      bytes + envelope.ciphertexts.reduce((sum, ciphertext) => sum + Buffer.byteLength(ciphertext), 0)
+    ), 0)
       > MAX_HISTORY_CIPHERTEXT_BYTES
   ) {
     return {
@@ -713,7 +704,7 @@ function recoveryPayload(envelope: AgentEnvelope, model: string, options: AgentT
       recipient: envelope.recipient,
       content: [
         { type: "input_text", text: envelope.headerText },
-        { type: "encrypted_content", encrypted_content: envelope.ciphertext },
+        ...envelope.ciphertexts.map(encrypted_content => ({ type: "encrypted_content", encrypted_content })),
       ],
     }],
   });

@@ -1,15 +1,24 @@
 /**
  * Devin / Cognition OAuth.
  *
- * Login opens the Auth0 browser sign-in flow (windsurf.com/windsurf/signin
- * with redirect_uri=show-auth-token), then exchanges the pasted Firebase ID
- * token via Cognition's RegisterUser for a long-lived API key.
+ * Login is import-first: a signed-in Devin CLI has already completed PKCE, so
+ * its credentials.toml session is adopted without opening a browser (the kiro
+ * shape). Only when no CLI credential exists does login fall back to the Auth0
+ * browser sign-in flow (windsurf.com/windsurf/signin with
+ * redirect_uri=show-auth-token), which exchanges the pasted Firebase ID token
+ * via Cognition's RegisterUser for a long-lived API key. The browser path is
+ * kept because it is the only login route for a user without the CLI.
+ *
+ * `devin-cli` used to be a second provider id owning the import half; it is
+ * now a deprecated alias for `devin` (see DEPRECATED_OAUTH_PROVIDER_ALIASES in
+ * ./index), and this module is the single login/refresh owner for both.
  */
 import { randomUUID } from "node:crypto";
 import type { OAuthController, OAuthCredentials } from "./types";
 import { DEFAULT_REGION, type WindsurfRegion } from "./devin/types";
 import { registerUser } from "./devin/register-user";
 import { DEVIN_DEFAULT_API_SERVER, resolveDevinApiBaseUrl, validateDevinApiBaseUrl } from "./devin/api-base";
+import { readDevinCliCredentialOutcome } from "./devin/cli-import";
 import { getCredential } from "./store";
 
 export { DEVIN_DEFAULT_API_SERVER } from "./devin/api-base";
@@ -25,10 +34,13 @@ export { DEVIN_DEFAULT_API_SERVER } from "./devin/api-base";
  */
 export function resolveDevinApiServer(configuredBaseUrl?: string, providerId = "devin"): string {
   return (
-    // Provider-scoped. `devin` and `devin-cli` share this transport and this token
-    // format but sign in to different accounts, and an EU or FedStart tenant is
-    // recorded on the credential rather than in the registry. Reading a fixed
-    // "devin" slot sent one provider's key to the other's host.
+    // Provider-scoped, keyed by the configured provider id verbatim. `devin-cli`
+    // is a deprecated alias for `devin`, but an unmigrated config row still owns
+    // its old credential slot until the startup migration rekeys the row and the
+    // slot together — normalizing the id here would read the wrong slot for that
+    // window. An EU or FedStart tenant is recorded on the credential rather than
+    // in the registry, so a fixed "devin" slot would send the key to the wrong
+    // host either way.
     validateDevinApiBaseUrl(getCredential(providerId)?.apiBaseUrl) ??
     validateDevinApiBaseUrl(configuredBaseUrl) ??
     DEVIN_DEFAULT_API_SERVER
@@ -153,7 +165,50 @@ async function loginDevinBrowser(ctrl: OAuthController, region: WindsurfRegion):
   return credentials;
 }
 
-export async function loginDevin(ctrl: OAuthController): Promise<OAuthCredentials> {
+/**
+ * Import-first login for the merged `devin` provider.
+ *
+ * A signed-in CLI already completed PKCE, so its session is adopted directly
+ * and no browser opens. Only `missing` falls through to the browser flow:
+ * `unreadable` and `incomplete` describe a file that exists but is broken,
+ * and a browser sign-in would not repair it, so they throw rather than
+ * silently routing around the real problem. `forceLogin` skips the import
+ * outright — reauth and add-account must be able to reach a different account
+ * than the CLI's, and the management routes already set it for both.
+ */
+export async function loginDevin(
+  ctrl: OAuthController,
+  opts?: { forceLogin?: boolean },
+): Promise<OAuthCredentials> {
+  if (opts?.forceLogin !== true) {
+    const outcome = readDevinCliCredentialOutcome();
+    // No branch names path contents or parsed values. A Connect error can echo
+    // a request, and redactSecretString does not recognise a bare JWT or a
+    // devin-session-token — the same caution register-user.ts applies to error
+    // bodies applies to anything thrown here.
+    if (outcome.kind === "unreadable") {
+      // The file is there and we could not read it, so `devin auth login` is
+      // the wrong instruction: it would succeed and change nothing.
+      throw new Error(
+        "Found a Devin CLI credential file but could not read it. Check its permissions and size, then try again.",
+      );
+    }
+    if (outcome.kind === "incomplete") {
+      throw new Error(
+        "The Devin CLI credential file is missing its session key or API server URL. Run `devin auth login` again to rewrite it.",
+      );
+    }
+    if (outcome.kind === "ok") {
+      // The host comes off disk and then receives the key, so it passes the
+      // same allowlist as the RegisterUser host. An unallowlisted value falls
+      // back to the default rather than becoming an exfiltration target.
+      const apiBaseUrl = resolveDevinApiBaseUrl(outcome.file.apiServerUrl);
+      ctrl.onProgress?.("Imported the signed-in Devin CLI session.");
+      return credentialsFromApiKey(outcome.file.apiKey, apiBaseUrl, "local-cli");
+    }
+    // "missing": no CLI session to adopt. The browser flow below is the only
+    // login path left for a user without the CLI installed.
+  }
   return loginDevinBrowser(ctrl, DEFAULT_REGION);
 }
 

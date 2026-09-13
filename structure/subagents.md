@@ -1,5 +1,32 @@
 # Subagents And Multi-Agent Surface
 
+## Plaintext V2 agent messages
+
+`src/responses/plaintext-v2-agent-messages.ts` owns the experimental, configuration-only
+`plaintextV2AgentMessages` request compiler and response restoration. The default is unset;
+only explicit true on Responses ingress to the final canonical ChatGPT forward route activates it.
+A default top-level collaboration catalog is required. The compiler preserves caller objects,
+aliases the namespace and three message functions, and removes only their true encryption marker.
+Declaration/reference collisions refuse the whole rewrite without changing the request.
+
+`src/adapters/openai-responses.ts` returns request-local alias capabilities. The Responses core
+refreshes them after every request rebuild and restores JSON, SSE and WebSocket identities after
+snapshot repair. Malformed, conflicting, unsupported or over-limit responses fail closed without
+retrying the model. Raw stream inspection cannot publish plaintext continuation state: only
+restored client blocks reach its dedicated bounded collector. Foreign namespaces and opaque
+argument/metadata values remain unchanged; the empty encrypted-function-args marker is preserved.
+
+Startup warns that task text can remain in Codex history, selected-provider requests and local
+response/debug state. This is application-level plaintext over HTTPS, depends on undocumented
+upstream behavior, and does not decrypt existing tasks or replace authenticated recovery.
+
+Restored calls and selectors carry an explicit collaboration namespace and unqualified child name.
+Codex treats qualified names literally and defaults absent namespaces to functions. Only child
+declarations inherit their restored namespace container; the compiler never invents an empty
+encryption marker when the upstream omitted it or returned a nonempty marker.
+
+Shared parsing and streaming follow the [request-copy](transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](transports/byte-accounting.md#stream-buffer-accounting) contracts.
+
 ## Multi-agent surface mode (3-state)
 
 `OcxConfig.multiAgentMode` controls the `multi_agent_version` field stamped on catalog entries:
@@ -7,13 +34,25 @@
 | Mode | Behavior |
 | --- | --- |
 | `"v1"` | Force ALL entries to `multi_agent_version = "v1"` — overrides upstream pins (sol/terra included). |
-| `"default"` (install default) | Respect upstream model pins (sol/terra=v2, luna=v1, others=null → codex feature flag decides). On sync, stale forced values are cleared and upstream pins restored. |
+| `"default"` | Respect upstream model pins (sol/terra=v2, luna=v1, others=null → codex feature flag decides). On sync, stale forced values are cleared and upstream pins restored. |
 | `"v2"` | Force ALL entries to `multi_agent_version = "v2"` — overrides upstream pins (luna included). |
 
 The override is applied as a final pass in both `buildCatalogEntries` (live `/v1/models` path) and
 `mergeCatalogEntriesForSync` (on-disk sync), AFTER all normalization and visibility processing. This
 ensures `normalizeRoutedCatalogEntry` (which deletes `multi_agent_version` from routed entries) does
 not clobber the forced value.
+
+`getDefaultConfig()` (`src/config.ts`) writes `multiAgentMode: "v1"` explicitly, using the version
+constant from `src/config/multi-agent-surface.ts`, so v1 is the install default while a v2
+native-to-routed child task is undeliverable ciphertext. The repair and salvage merges in
+`src/config.ts` pin `multiAgentMode` and `multiAgentSurfaceAdvisoryVersion` to the stored
+document, because spreading the defaults underneath would repair an unrelated missing field
+into a surface change its operator never made.
+An absent key still means `"default"`, because selecting base deletes the key — absence cannot be
+read as "never configured". An install that predates that change is therefore not rewritten; it is
+asked once. `multiAgentSurfaceAdvisoryRequired()` is true while the resolved mode is not v1 and
+the stored `multiAgentSurfaceAdvisoryVersion` is below `MULTI_AGENT_SURFACE_ADVISORY_VERSION`, and
+only the operator answering the dashboard notice writes that version.
 
 CLI: `ocx v2 mode v1|default|v2`. GUI: segmented control on the Models page. API: `GET/PUT /api/v2`
 with `multiAgentMode` field.
@@ -89,10 +128,25 @@ ordering behavior. This does not change the separate `opencodex_spawn_priority` 
 Retained rows recompute their natural ranks from the current featured roster and account-selector
 stride before display order is applied, so a discovery outage cannot preserve an obsolete
 featured or picker rank. Canonical `opencode-go` rows retain their configured reasoning ladder
-both when generated and when merged from retained catalog state; synthetic max/ultra choices
-are not added to that provider's declared ladder.
+and provider-scoped context metadata both when generated and when merged from retained catalog
+state; `deepseek-v4.1-flash` therefore keeps its 1,048,576-token window, while synthetic max/ultra
+choices are not added to that provider's declared ladder.
 
 Full derivation with per-line citations: `devlog/_plan/260816_codexrs_multiagent_v2_and_history_perf/013_five_cap_v1_vs_v2.md`.
+
+## Multipart encrypted task recovery
+
+`src/server/responses/agent-task-recovery.ts` admits at most 32 consecutive, individually complete
+Fernet-shaped parts with a combined 2 MiB ciphertext limit. Every encrypted slot must belong to
+that run. The existing credential admission precedes cache access; the cache key includes an
+unambiguous ordered sequence. One fixed-endpoint request forwards separate parts, and assignment
+replacement compares the complete original item snapshot before splicing the run. Recovery output
+is model-transcribed plaintext, not cryptographic fidelity proof, and no internal outage retry is added.
+
+`src/server/responses/encrypted-payload.ts` uses bounded concatenation only to recognize otherwise
+unreadable split-token shapes. The sanitizer preserves just those fragment objects and continues
+normalizing independent plaintext slots. Detection never authorizes reconstruction or recovery;
+other fragment layouts and mixed readable content retain their documented residual boundaries.
 
 ## Subagents
 
@@ -115,7 +169,9 @@ Codex `spawn_agent` advertises only the highest-priority first five picker-visib
 Use at most five configured `subagentModels` ids; they may contain bare catalog ids, routed
 `provider/model` ids, or exact account-qualified `<selector>/<native-openai-model>` ids. The
 dashboard offers bare native and routed choices; exact account-qualified choices are configured
-through `ocx agent subagents set` or the opencodex configuration.
+through `ocx agent subagents set` or the opencodex configuration. Retired native rows are
+excluded by the [shared catalog](catalog.md#shared-catalog); saved user choices are not rewritten
+by that retirement. Quota fallback retains independent shared/Reserve evidence.
 
 When account selectors are active, one featured bare native id expands into a complete selector row
 group. Catalog priorities use the selector count as a stride so each group stays together without
@@ -181,7 +237,6 @@ behaviors.
 
 > Decision record: [ADR-0027](decisions/ADR-0027-subagents.md)
 
-
 ### Saved picker presets
 
 The Models page saves routed snapshots in `modelPickerOrder` and records their origin in
@@ -199,18 +254,56 @@ Native Codex advertisements still follow display priority; private guidance rank
 Codex display-cache expiry, retained main-policy evidence, and reset history follow the
 [quota cache contract](providers/openai-tiers.md#quota-cache-and-short-window-history).
 
+Usage consumers preserve positive incomplete-history metadata as specified in [usage accounting](gui-and-management-api.md#usage-accounting); readable totals are not represented as a complete ledger.
+
+Connected CLI usage follows the [client-scoped hub usage contract](gui-and-management-api.md#usage-accounting); local management and account data remain separate.
+
+Remote Workspace uses a separate, explicitly enabled server surface with structural WebSocket callbacks and awaited per-server cleanup; [its contract](remote-workspace.md) owns that integration.
+
+Listener startup diagnostics follow [the runtime lifecycle contract](runtime.md#lifecycle); malformed optional listener blocks follow [config loading](config.md#config-surface).
 Chat helper admission in `src/server/responses/core.ts` follows the
 [deferred stored-main contract](providers/openai-tiers.md): only a needed Direct OpenAI helper
 claims stored main, after terminal vision, routed vision and search exclusions.
+
+Subagent automatic pool preview returns no candidate when all pool plans are excluded; explicit account-qualified models retain the [selection-policy distinction](providers/openai-tiers.md#automatic-pool-plan-exclusions).
 
 Provider-level Combo eligibility uses explicit inference evidence for the current single credential; account-specific admission remains separate. See [scoped provider quota](runtime.md#scoped-provider-quota-for-combo-selection).
 
 The management quota DTO keeps Combo editing aligned with scoped inference evidence;
 see [Combo editor routing quota](gui-and-management-api.md#combo-editor-routing-quota).
 
+Optional Codex transport-hint suppression is scoped to canonical Responses client output;
+its defaults and exclusions are owned by [Responses transport](transports/responses.md).
+
+Final-route summary visibility is recomputed after fallback from the original Responses preference; an earlier provider opt-in does not carry into a later provider. See [reasoning presentation](providers/chat-compat.md).
+
 ## Paginated history writer boundary
 
-`src/codex/history-provider.ts` refuses external writes to paginated or migration-capable history. `src/codex/inject.ts` checks affected rows and manifest-owned restore targets before artifact changes and compensates detected migration. Failed config restore stops later catalog/history work. See the [history writer contract](codex-home.md#paginated-history-writer-boundary) for guarantees and concurrent-writer limits.
+`src/codex/history-provider.ts` refuses external writes to paginated or migration-capable history. `src/codex/inject.ts` checks affected rows and manifest-owned restore targets before and after config/profile/journal changes, including successful journal and fallback restores, and compensates detected migration. Failed config restore stops later catalog/history work and rolls back a coordinated remove transition. See the [history writer contract](codex-home.md#paginated-history-writer-boundary) for guarantees and concurrent-writer limits.
+
+Codex pool settings and their consumers follow the [reset-first ordering contract](providers/openai-tiers.md#reset-first-account-ordering), including independent-quota fallback and preserved affinity.
 
 Claude replay carries [Go conversation affinity](data-planes/inbound-compat.md#claude-affinity-at-final-go-dispatch)
 privately to final dispatch; preliminary route selection does not inject Go-only headers.
+
+Native Chat applies qualifying effort ceilings independently of model pins; pin selection precedes the cap and only pins or cap rewrites enter wire mapping. The [catalog effort contract](catalog.md#ultra-reasoning-level) records the V1/compaction exemptions and caller-preservation boundary.
+
+Private pool credential metadata follows the [quota-history publication identity contract](providers/openai-tiers.md#quota-history-publication-identity); credential-only and account DTO projections omit it.
+
+Pool quota producers and account commands follow the [bounded raw-observation contract](providers/openai-tiers.md#bounded-pool-quota-observations), separate from the latest display snapshot and capacity estimates.
+
+The account history response can include a [low-confidence effective capacity estimate](providers/openai-tiers.md#observed-effective-token-capacity); usage normalization retains local-answer provenance so local responses cannot supply samples.
+
+Account quota surfaces use [safe probe diagnostics](transports/inventory.md#account-quota-failure-diagnostics) separately from quota validity, credential health and routing authority.
+
+Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](transports/responses.md) documents this boundary, and native Chat removes effort only for an explicit empty declaration or no-reasoning model.
+
+Live sideband admission and its bounded upstream handshake follow the [runtime contract](runtime.md#live-sideband-handshake); the ordinary Responses WebSocket exchange remains separate.
+
+The [explicit model-capability contract](config.md#explicit-per-model-capability-declarations) preserves operator declarations through provider storage and catalog capture; it does not infer upstream capability or change this surface's routing behavior.
+
+Exact [model input declarations](config.md#explicit-per-model-capability-declarations) now feed text-only eligibility and catalog hints; existing image-description/omission handling consumes them before the main upstream send.
+
+Provider-scoped approval reviewer settings are projected by the [catalog owner](catalog.md#provider-scoped-approval-reviewer); this surface retains its existing routing, transport and account-selection behavior.
+
+Renamed fixed-key providers receive [missing reasoning metadata](catalog.md#renamed-destination-reasoning-metadata) during derivation; explicit per-model entries and provider defaults retain precedence.

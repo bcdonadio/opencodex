@@ -145,15 +145,16 @@ ocx combo set balanced \
 
 ## 기본 reasoning effort
 
-`defaultEffort`는 다음 조건이 모두 참일 때만 `reasoning.effort`를 채웁니다.
+`defaultEffort`는 콤보 기본값이 null이 아니고, 선택한 대상의 지원 목록이 알려져 있으며 비어 있지 않을 때 생략된 `reasoning.effort`를 채웁니다. 설정값을 지원하면 그대로 사용합니다. 그렇지 않으면 설정값 이하의 가장 높은 지원 단계를 사용하고, 그런 단계가 없으면 가장 낮은 지원 단계를 사용합니다. 지원 목록이 없거나 비어 있으면 기본값을 생략합니다.
 
-1. 콤보에 null이 아닌 기본값이 있습니다.
-2. 호출자가 effort를 설정하지 않았습니다.
-3. 선택된 대상의 카탈로그가 그 정확한 effort를 광고합니다.
+기본값 주입은 기존 effort와 다른 reasoning 필드를 보존합니다. 아래의 capability 정규화는 별도로 지원되지 않는 effort·thinking 제어를 제거할 수 있습니다. 기본값은 `low`, `medium`, `high`, `xhigh`, `max`, `ultra`이며, 필드를 생략하거나 `null`로 설정하면 주입하지 않습니다.
 
-요청에 `reasoning` 객체가 없으면 opencodex가 새로 만듭니다. `reasoning`은 있지만 `effort` 속성이 없으면 다른 필드는 그대로 두고 기본값만 추가합니다. 호출자가 준 effort는 절대 덮어쓰지 않습니다.
 
-대상 기능을 알 수 없거나 설정한 effort를 포함하지 않으면 opencodex는 기본값을 생략하고 대상의 동작은 그대로 둡니다. 지원 값은 `low`, `medium`, `high`, `xhigh`, `max`, `ultra`입니다. effort를 호출자와 대상에 완전히 맡기려면 이 필드를 생략하거나 `null`로 설정하십시오.
+## 서로 다른 reasoning capability
+
+`reasoningEffortMode`의 기본값은 `"strict"`입니다. 모든 대상의 effort 목록을 교집합으로 계산하므로 명시적 빈 목록도 반영합니다. `"adaptive"`는 빈 목록을 교집합에서 제외해 혼합 콤보에서도 선택기를 유지합니다. 알 수 없는 목록은 두 모드 모두 카탈로그 교집합을 제한하지 않습니다.
+
+전송 시 명시적 빈 목록은 두 모드 모두에서 effort·thinking 제어를 제거하고, 알 수 없는 목록은 adaptive에서만 제거합니다. `reasoning.summary`와 다른 비-effort 필드는 보존하며, 알려진 비어 있지 않은 대상은 기존 방식으로 effort를 결정합니다. strict의 unknown 대상과 일반 native Chat의 unknown 선언은 그대로 유지됩니다. 기본값 주입은 기존 effort를 덮어쓰지 않지만, 이 capability 정규화는 지원되지 않는 제어를 제거할 수 있습니다.
 
 ## 암호화된 v2 서브에이전트 작업
 
@@ -241,6 +242,7 @@ ocx combo remove <id> --yes
 | `cooldownMs` | 아니요 | 미설정 → 업스트림 폴백(요청 속도 제한 429 코드 `1302`/`1305`는 5초, 그 외는 60초) | 1에서 600000 사이의 정수입니다. 설정하면 사용 가능한 업스트림 `Retry-After` 또는 Codex 재설정 신호가 없을 때 요청 속도 제한 429를 포함한 대상별 쿨다운으로 적용됩니다. 설정하지 않으면 업스트림 폴백을 사용합니다. |
 | `waitForCooldownMs` | 아니요 | `0` | 0에서 600000 사이의 정수입니다. `combo_unavailable`을 반환하기 전에 가장 먼저 적합해지는 쿨다운 중인 대상을 기다리는 최대 시간입니다. 중단하면 대기가 취소됩니다. |
 | `defaultEffort` | 아니요 | `null` | `low`, `medium`, `high`, `xhigh`, `max`, 또는 `ultra`입니다. 호출자가 effort를 생략하고 대상이 지원을 광고할 때만 적용됩니다. |
+| `reasoningEffortMode` | 아니요 | `"strict"` | `strict` 또는 `adaptive`; 혼합 capability의 교집합과 대상별 제어 정규화를 선택합니다. |
 | `alias` | 아니요 | 없음 | 선택적으로 앞뒤 공백을 제거한 공개 모델 ID입니다. 위의 alias 규칙을 따릅니다. 빈 값은 alias 없음으로 저장됩니다. |
 | `nativeAlias` | 아니요 | `false` | 현재 지원되는 bare native alias가 routing/catalog 우선권을 갖도록 명시적으로 허용합니다. |
 | `displayName` | 아니요 | 없음 | catalog 표시 전용 label입니다. `nativeAlias`가 true이면 필수입니다. |

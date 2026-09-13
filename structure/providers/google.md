@@ -2,12 +2,14 @@
 
 ## Google thought-text visibility boundary
 
-Google-family responses may represent model-internal reasoning as a text-bearing part with
-`thought: true`. The Google adapter maps that text to the internal `reasoning_raw_delta` event;
-only text without the marker becomes visible `text_delta`. Streaming SSE and buffered JSON share
-one classifier so transport selection cannot change whether provider-declared reasoning is shown
-as assistant output. Thought-signature observation still runs on the original parts before text
-classification, preserving the opaque continuation state independently of display semantics.
+Google-family parts with `thought: true` stay separate from assistant output. After a CCA
+Gemini request is built, the shared streaming/buffered classifier emits `thinking_delta` for
+these provider-authored summaries. Other Google wires, non-Gemini CCA models and uninitialized
+adapters retain `reasoning_raw_delta`. Model provenance is refreshed on every build.
+`showThinkingSummary` defaults on only for the Antigravity preset; explicit provider false and
+explicit wire summary none win. Eligible CCA Gemini requests use `includeThoughts: true` only
+when provider opt-in and per-request display both allow it. Thought signatures remain attached
+to their tool calls independently; they never become Anthropic thinking signatures.
 
 > Decision record: [ADR-0055](../decisions/ADR-0055-google-thought-text-visibility-boundary.md)
 

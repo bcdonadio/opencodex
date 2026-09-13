@@ -1,5 +1,6 @@
 import { transportObserver, recordRequestShape, recordContextTransformation, recordCompletedCompaction } from "../transaction-capture";
 import { recordRouteAuth } from "../transaction-auth-capture";
+import { capturePoolQuotaWriter } from "../../codex/account-store";
 import type { Server } from "bun";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import {
@@ -362,6 +363,7 @@ async function refreshPoolCompactContext(args: {
       accessToken: refreshed.accessToken,
       chatgptAccountId: refreshed.chatgptAccountId,
       generation: refreshed.generation,
+      poolQuotaWriter: capturePoolQuotaWriter(authCtx.accountId, refreshed),
     };
     const refreshedProvider = applyCodexAuthContextToProvider(
       stripCodexRuntimeProviderFields(provider),
@@ -1079,7 +1081,7 @@ export async function handleResponsesCompact(
             upstream.headers,
             authCtx.writerGeneration,
             authCtx.kind === "main-pool" ? authCtx.mainQuotaWriter : undefined,
-            { modelId: route.modelId },
+            { modelId: route.modelId, poolWriter: authCtx.kind === "pool" ? authCtx.poolQuotaWriter : undefined },
           );
         }
         recordCompactPoolOutcome(authCtx, upstream.status, {
@@ -1120,6 +1122,12 @@ export async function handleResponsesCompact(
           return formatErrorResponse(502, "upstream_error", "Failed to connect to compact upstream");
         }
       }
+    }
+    // Capture the final serving account as well as an earlier rejected account, once per response.
+    if (outcomeCtx.kind === "pool") {
+      const { applyAccountQuotaFromUpstreamHeaders } = await import("../../codex/quota");
+      applyAccountQuotaFromUpstreamHeaders(outcomeCtx.accountId, upstream.headers, outcomeCtx.writerGeneration,
+        undefined, { modelId: route.modelId, poolWriter: outcomeCtx.poolQuotaWriter });
     }
     const retryAfter = upstream.headers.get("retry-after");
     const resetAt = [

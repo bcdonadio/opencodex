@@ -26,7 +26,10 @@ import {
   clearCodexUpstreamHealth,
   formatCodexProviderForLog,
   getCodexUpstreamHealth,
+  getCodexQuotaHealthSnapshot,
+  codexQuotaScopeForModel,
 } from "../../src/codex/routing";
+import { clearAccountQuota, getAccountQuota } from "../../src/codex/quota";
 import { startServer } from "../../src/server";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
@@ -1209,6 +1212,88 @@ describe("server combo failover 030 activation matrix", () => {
     expectMappedReceipt(hydrated[0]!);
   });
 
+  test("adaptive combo normalizes unknown and empty target capability before the upstream wire", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const upstream = serve(async request => {
+      bodies.push(await request.json() as Record<string, unknown>);
+      return chatSuccess("normalized", "m1");
+    });
+    const request = {
+      reasoning: { effort: "xhigh", summary: "concise" },
+      reasoning_effort: "xhigh",
+      thinking_budget: 8192,
+      thinking: { type: "enabled" },
+    };
+
+    const unknownResponse = await post(
+      comboConfig(
+        { a: provider("openai-chat", baseUrl(upstream), "key-a") },
+        undefined,
+        { reasoningEffortMode: "adaptive" },
+      ),
+      request,
+    );
+    expect(unknownResponse.status).toBe(200);
+
+    const emptyResponse = await post(
+      comboConfig(
+        { a: provider("openai-chat", baseUrl(upstream), "key-a", { reasoningEfforts: [] }) },
+        undefined,
+        { reasoningEffortMode: "adaptive" },
+      ),
+      request,
+    );
+    expect(emptyResponse.status).toBe(200);
+
+    const knownResponse = await post(
+      comboConfig(
+        { a: provider("openai-chat", baseUrl(upstream), "key-a", {
+          reasoningEfforts: ["low", "medium", "high", "xhigh"],
+        }) },
+        undefined,
+        { reasoningEffortMode: "adaptive" },
+      ),
+      request,
+    );
+    expect(knownResponse.status).toBe(200);
+
+    expect(bodies).toHaveLength(3);
+    for (const body of bodies.slice(0, 2)) {
+      expect(body).not.toHaveProperty("reasoning_effort");
+      expect(body).not.toHaveProperty("thinking_budget");
+      expect(body).not.toHaveProperty("thinking");
+    }
+    expect(bodies[2]!.reasoning_effort).toBe("xhigh");
+  });
+
+  test("adaptive Responses combo preserves summary after removing unsupported controls", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const upstream = serve(async request => {
+      bodies.push(await request.json() as Record<string, unknown>);
+      return Response.json(responsesSuccess("normalized", "m1"));
+    });
+    for (const reasoningEfforts of [undefined, [], ["high", "xhigh"]]) {
+      const response = await post(comboConfig({
+        a: provider("openai-responses", baseUrl(upstream), "key-a", {
+          ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
+          modelSupportsReasoningSummaries: { m1: true },
+        }),
+      }, undefined, { reasoningEffortMode: "adaptive" }), {
+        reasoning: { effort: "xhigh", summary: "concise" },
+        reasoning_effort: "xhigh", thinking_budget: 8192, thinking: { type: "enabled" },
+      });
+      expect(response.status).toBe(200);
+    }
+    expect(bodies).toHaveLength(3);
+    for (const body of bodies.slice(0, 2)) {
+      expect(body.reasoning).toEqual({ summary: "concise" });
+      expect(body).not.toHaveProperty("reasoning_effort");
+      expect(body).not.toHaveProperty("thinking_budget");
+      expect(body).not.toHaveProperty("thinking");
+    }
+    expect(bodies[2]!.reasoning).toMatchObject({ effort: "xhigh", summary: "concise" });
+  });
+
   test("all-target exhaustion promotes the final attempt reasoning wire to the logical row", async () => {
     const a = serve(() => Response.json({ error: { message: "first overloaded" } }, { status: 503 }));
     const b = serve(() => Response.json({ error: { message: "last overloaded" } }, { status: 503 }));
@@ -1520,7 +1605,7 @@ describe("server combo failover 030 activation matrix", () => {
     });
   });
 
-  test("lets a same-provider combo try its next model after a reset-derived 429", async () => {
+  test("a stale explicit Spark combo target cannot publish quota before ordinary fallback", async () => {
     const rawAccountId = "combo-reset-account";
     const config = comboConfig({
       openai: {
@@ -1547,28 +1632,45 @@ describe("server combo failover 030 activation matrix", () => {
       expiresAt: Date.now() + 300_000,
       chatgptAccountId: "acct-combo-reset",
     });
+    // A manually saved target can still dispatch; retirement removes native support and evidence.
+    expect(codexQuotaScopeForModel("gpt-5.3-codex-spark")).toBe("shared");
     let calls = 0;
     customTransientResponse = async () => {
       calls += 1;
+      if (calls === 2) {
+        expect(getAccountQuota(rawAccountId)).toBeNull();
+        expect(getCodexQuotaHealthSnapshot(rawAccountId, "shared")).toBeNull();
+      }
       return calls === 1
         ? Response.json(
           { error: { message: "spark quota window exhausted", type: "rate_limit_error" } },
           {
             status: 429,
-            headers: { "x-codex-primary-reset-at": String(Math.floor(Date.now() / 1000) + 3600) },
+            headers: {
+              "x-codex-primary-reset-at": String(Math.floor(Date.now() / 1000) + 3600),
+              "x-codex-primary-used-percent": "100",
+              "x-codex-primary-window-minutes": "300",
+              "x-codex-secondary-used-percent": "100",
+              "x-codex-secondary-window-minutes": "10080",
+            },
           },
         )
         : Response.json(responsesSuccess("model fallback succeeded", "gpt-5.6-luna"));
     };
 
-    const response = await postLogged(config);
-    expect(response.status).toBe(200);
-    await response.text();
-    expect(calls).toBe(2);
-    expect(getCodexUpstreamHealth(rawAccountId)?.cooldownUntil).toBeUndefined();
+    try {
+      const response = await postLogged(config);
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(calls).toBe(2);
+      expect(getCodexUpstreamHealth(rawAccountId)?.cooldownUntil).toBeUndefined();
+      expect(getAccountQuota(rawAccountId)).toBeNull();
+    } finally {
+      clearAccountQuota();
+    }
   });
 
-  test("keeps explicit Retry-After account-wide during same-provider combo failover", async () => {
+  test("a retired Spark response still enforces account-wide Retry-After during combo failover", async () => {
     const rawAccountId = "combo-retry-after-account";
     const config = comboConfig({
       openai: {
@@ -1617,10 +1719,13 @@ describe("server combo failover 030 activation matrix", () => {
     await response.text();
     expect(calls).toBe(1);
     expect(getCodexUpstreamHealth(rawAccountId)?.cooldownSource).toBe("retry-after");
+    for (const scope of ["shared", "reserve"] as const) {
+      expect(getCodexQuotaHealthSnapshot(rawAccountId, scope)?.cooldownSource).toBe("retry-after");
+    }
   });
 
-  test("Spark reset cooldown fails over to the shared native quota on the same account (#590)", async () => {
-    const rawAccountId = "spark-scope-account";
+  test("a retired Spark reset leaves the same account usable on a later ordinary request", async () => {
+    const rawAccountId = "retired-reset-account";
     const config = comboConfig({
       openai: {
         adapter: "openai-responses",
@@ -1630,7 +1735,6 @@ describe("server combo failover 030 activation matrix", () => {
       },
     }, [
       { provider: "openai", model: "gpt-5.3-codex-spark" },
-      { provider: "openai", model: "gpt-5.5" },
     ]);
     config.codexAccounts = [{
       id: rawAccountId,
@@ -1660,10 +1764,20 @@ describe("server combo failover 030 activation matrix", () => {
       return Response.json(responsesSuccess("Shared-native fallback", "gpt-5.5"));
     };
 
-    const response = await post(config);
-    expect(response.status).toBe(200);
+    // A single target cannot defer its outcome to another combo candidate.
+    const retired = await post(config);
+    expect(retired.status).toBe(429);
+    await retired.text();
+    expect(upstreamCalls).toBe(1);
+    expect(getCodexUpstreamHealth(rawAccountId)).toBeNull();
+    expect(getCodexQuotaHealthSnapshot(rawAccountId, "shared")).toBeNull();
+    expect(getCodexQuotaHealthSnapshot(rawAccountId, "reserve")).toBeNull();
+    expect(config.activeCodexAccountId).toBe(rawAccountId);
+
+    const ordinary = await post(config, { model: "openai/gpt-5.5" });
+    expect(ordinary.status).toBe(200);
     expect(upstreamCalls).toBe(2);
-    expect(await response.json()).toMatchObject({ model: "gpt-5.5" });
+    expect(await ordinary.json()).toMatchObject({ model: "gpt-5.5" });
   });
 
   test("keeps a failed estimate on A without overwriting B reported usage", async () => {
@@ -3963,4 +4077,36 @@ describe("combo compact failover", () => {
     expect(response.status).toBe(502);
     expect(await response.text()).toContain("empty summary");
   });
+});
+
+
+describe("thinking-summary defaults follow the serving combo route", () => {
+  for (const firstVisible of [true, false]) for (const summary of [undefined, "none", "auto"]) {
+    test(`fallback from ${firstVisible} with summary=${summary}`, async () => {
+      const observed: Array<[string, boolean | undefined]> = [];
+      customRunTurn = async (parsed, _incoming, emit) => {
+        observed.push([parsed.modelId, parsed.options.hideThinkingSummary]);
+        if (parsed.modelId === "m1") {
+          emit({ type: "error", message: "provider unavailable", status: 503, retryable: true });
+          return;
+        }
+        emit({ type: "thinking_delta", thinking: "Actual provider summary" });
+        emit({ type: "text_delta", text: "Final fallback answer" });
+        emit({ type: "done" });
+      };
+      const config = comboConfig({
+        a: provider("test-run-turn", "https://a.test/v1", "key-a", { showThinkingSummary: firstVisible }),
+        b: provider("test-run-turn", "https://b.test/v1", "key-b", { showThinkingSummary: !firstVisible }),
+      });
+      const response = await post(config, { ...(summary ? { reasoning: { summary } } : {}) });
+      const output = JSON.stringify(await response.json());
+      expect(response.status).toBe(200);
+      expect(observed).toEqual([
+        ["m1", summary === "none" || (!summary && !firstVisible)],
+        ["m2", summary === "none" || (!summary && firstVisible)],
+      ]);
+      expect(output.includes("Actual provider summary")).toBe(summary === "auto" || (!summary && !firstVisible));
+      expect(output).toContain("Final fallback answer");
+    });
+  }
 });

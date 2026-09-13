@@ -20,6 +20,7 @@ import {
   type TransactionDiagnosticsV1,
 } from "../diagnostics/transaction";
 import { claudeCompatibilityReason, normalizeClaudeFeatureCodes, type ClaudeFeatureCode } from "../claude/compatibility";
+import type { CodexWsStageRecord } from "../server/responses/codex-ws-wire";
 
 export interface PersistedClaudeCompatibilityLog {
   decision: "shadow";
@@ -84,8 +85,10 @@ export type AttemptRecoveryKind =
   | "anthropic-oauth-429"
   | "oauth-account-429"
   | "image-413"
+  | "console-go-upload-retry"
   | "opaque-blob-rejection"
-  | "empty-completion";
+  | "empty-completion"
+  | "reasoning-effort-downgrade";
 
 /** Request-time upstream credential class, never a credential or account identifier. */
 export type UsageCredentialSource = "grok-oauth" | "xai-api-key";
@@ -137,6 +140,14 @@ export interface PersistedUsageAttempt {
   reasoningWireValue?: string | number | boolean;
   /** Adapter-produced tier fact for this physical attempt; absent on pre-B0 rows. */
   tierOutcome?: AttemptTierOutcome;
+  /**
+   * #4191: content-free stage record of a Codex WS upstream exchange that
+   * served this attempt (frame size, counters, close code, versions). Absent
+   * on HTTP-transport attempts and pre-instrumentation rows. Numbers,
+   * booleans, and semver strings only — never reason text, headers, or
+   * account identifiers.
+   */
+  codexWsStage?: CodexWsStageRecord;
 }
 
 export interface PersistedUsageEntry {
@@ -345,8 +356,10 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "anthropic-oauth-429",
   "oauth-account-429",
   "image-413",
+  "console-go-upload-retry",
   "opaque-blob-rejection",
   "empty-completion",
+  "reasoning-effort-downgrade",
 ]);
 const USAGE_STATUSES = new Set<UsageStatus>([
   "reported",
@@ -472,6 +485,9 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
   const tierOutcome = "tierOutcome" in attempt
     ? normalizeAttemptTierOutcome(attempt.tierOutcome)
     : undefined;
+  const codexWsStage = "codexWsStage" in attempt
+    ? normalizeCodexWsStageRecord(attempt.codexWsStage)
+    : undefined;
   const recoveryKinds = Array.isArray(attempt.recoveryKinds)
     ? [...new Set(attempt.recoveryKinds.filter(
       (value): value is AttemptRecoveryKind => typeof value === "string"
@@ -540,6 +556,46 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
         : { reasoningWireValue: attempt.reasoningWireValue }
       : {}),
     ...(tierOutcome ? { tierOutcome } : {}),
+    ...(codexWsStage ? { codexWsStage } : {}),
+  };
+}
+
+/**
+ * #4191: a persisted stage record is trusted only when every field matches the
+ * exchange's own shapes. Anything else — a hand-edited number as a string, an
+ * injected free-form field — drops the whole record rather than passing
+ * attacker text into the DTO.
+ */
+function normalizeCodexWsStageRecord(value: unknown): CodexWsStageRecord | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const stage = value as Record<string, unknown>;
+  for (const key of ["upstreamFrames", "controlFrames", "relayedEvents", "pings", "pongs"] as const) {
+    if (!isNonNegativeFiniteNumber(stage[key])) return undefined;
+  }
+  if (!(stage.requestBytes === null || isNonNegativeFiniteNumber(stage.requestBytes))) return undefined;
+  if (!(stage.firstFrameMs === null || isNonNegativeFiniteNumber(stage.firstFrameMs))) return undefined;
+  if (!(stage.elapsedMs === null || isNonNegativeFiniteNumber(stage.elapsedMs))) return undefined;
+  if (!(stage.closeCode === null || (typeof stage.closeCode === "number"
+    && Number.isInteger(stage.closeCode) && stage.closeCode >= 1000 && stage.closeCode <= 4999))) {
+    return undefined;
+  }
+  if (typeof stage.sent !== "boolean" || typeof stage.reused !== "boolean") return undefined;
+  if (typeof stage.ocxVersion !== "string" || !stage.ocxVersion || stage.ocxVersion.length > 32) return undefined;
+  if (typeof stage.bunVersion !== "string" || !stage.bunVersion || stage.bunVersion.length > 32) return undefined;
+  return {
+    requestBytes: stage.requestBytes as number | null,
+    sent: stage.sent,
+    upstreamFrames: stage.upstreamFrames as number,
+    controlFrames: stage.controlFrames as number,
+    relayedEvents: stage.relayedEvents as number,
+    firstFrameMs: stage.firstFrameMs as number | null,
+    elapsedMs: stage.elapsedMs as number | null,
+    pings: stage.pings as number,
+    pongs: stage.pongs as number,
+    closeCode: stage.closeCode as number | null,
+    reused: stage.reused,
+    ocxVersion: stage.ocxVersion,
+    bunVersion: stage.bunVersion,
   };
 }
 

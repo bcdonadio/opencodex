@@ -398,8 +398,7 @@ ocx config set codexPool '{"excludedPlans":["free"]}'
 
 C'est une politique de sélection, pas un blocage. Un compte écarté conserve ses identifiants, son historique de quota et son affinité de thread, reste visible dans la liste des comptes et demeure joignable par sélection explicite comme `work/gpt-5.5`. Seule la rotation automatique cesse de le choisir, y compris lorsqu'il est déjà le compte actif ou déjà lié à un thread — l'état exact que laisse un abonnement expiré.
 
-Deux limites volontaires. Le compte Codex principal n'est jamais écarté par forfait, car le routage en mode sélection seule ne lit pas son forfait dans les identifiants natifs protégés ; une règle le couvrant se contredirait. Et lorsqu'il ne reste aucun compte non écarté, le compte écarté répond quand même au lieu d'échouer : mettre tous les comptes en pause reste le moyen d'arrêter complètement le service. Il n'existe pas de `minimumPlan`, car classer les forfaits ChatGPT entre eux exige un ordre total qui n'existe pas ici.
-
+Le compte Codex principal reste exempt de l’exclusion par forfait : le routage en mode sélection seule ne lit pas ses identifiants natifs protégés. Si tous les comptes éligibles du pool sont exclus, la sélection automatique ne renvoie aucun compte. Les routes désignant explicitement un compte restent disponibles, avec les contrôles de pause, d’authentification et de droits du modèle. La carte et le CLI affichent le forfait exclu séparément de l’état des identifiants. Il n’existe pas de réglage `minimumPlan`, faute d’ordre total des forfaits.
 ## Restauration de Codex natif
 
 `ocx stop` arrête le proxy et le service d'arrière-plan installé, puis tente de restaurer Codex natif. OpenCodex retire les éléments de routage dont il peut vérifier la propriété et signale une restauration incomplète si les fichiers de configuration ne peuvent pas être récupérés en toute sécurité.

@@ -65,6 +65,10 @@ stop/start 대체 동작 없이 안전하게 실패합니다. 소유권을 확�
 프록시를 중지하지 않고 기본 Codex를 **복원**합니다. 주입된 설정 줄과 라우팅된 카탈로그 항목을
 제거하므로 일반 `codex`가 다시 네이티브로 동작합니다. `eject`는 `restore`의 별칭입니다.
 
+복원된 카탈로그에서는 `gpt-5.3-codex-spark` 등 지원이 종료된 네이티브 모델의 bare id와
+신뢰된 계정 한정 항목을 제외합니다. 카탈로그 백업 유무와 관계없이 적용되며, 원본 백업과
+사용자가 저장한 과거 모델 선택 설정은 보존합니다.
+
 저장된 저널에 해당 파일의 주입 상태 해시가 없으면, 변경된 설정 파일을 덮어쓰는 대신 복원 실패를
 보고합니다. 현재 파일과 저널은 검토용으로 보존됩니다.
 [해시 없는 저널의 복구 규칙](/guides/codex-integration/#recovery-without-injection-hashes)을 참고하세요.
@@ -231,6 +235,18 @@ single-flight/lock 파일을 만들 수 있는지, 건강하지 않은 OAuth 또
 
 Codex의 로컬 모델 선택기 캐시를 무효화하여, 활성 opencodex 카탈로그에서 다시 빌드되게 합니다.
 `ocx sync`와 같은 오래된 `app-server` 경고와 선택적 `--restart-codex` 동작이 적용됩니다.
+
+### `ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex]`
+
+다른 OpenCodex 인스턴스의 `/v1/catalog` 엔드포인트가 제공하는 완성된 카탈로그를 설치한 뒤
+`models_cache.json`을 맞춥니다. URL은 HTTPS여야 하고 HTTP는 루프백만 허용합니다. URL에 박힌
+자격증명, 쿼리, 프래그먼트, 리다이렉트, 크기를 넘는 응답, 잘못된 카탈로그는 로컬에 쓰기 전에
+거절합니다. 인증은 선택이며 환경변수 이름(`--auth-env`)으로만 읽고 argv로는 받지 않습니다.
+
+카탈로그와 캐시는 공유 Codex 카탈로그 잠금 아래에서 쓰고, 실패하면 직전까지 정상이던 파일을
+그대로 둡니다. 바이트가 같으면 mtime까지 건드리지 않는 no-op입니다. `--restart-codex`는 실제로
+쓴 뒤에만 적용됩니다. `ETag` 조건부 요청과 Desktop 앱 재시작은 이 명령에 없습니다. `--json`
+envelope 필드와 종료 코드는 [영문 레퍼런스](/reference/cli/lifecycle/)를 보세요.
 
 ## 백그라운드 서비스
 

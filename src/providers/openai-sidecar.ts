@@ -6,6 +6,7 @@ import {
   isCallerBackedMainPoolContext,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
+  releaseCodexAuthContextProbeLease,
   type CodexAccountSelectionAdmission,
   type CodexAuthContext,
   type CodexAuthPolicyConfig,
@@ -136,6 +137,7 @@ export async function resolveFirstUsableOpenAiSidecar(
     admission?: Pick<DataPlaneAdmission, "source">;
     codexAuthPolicy?: CodexAuthPolicyConfig;
     beginCodexAccountSelection?: () => CodexAccountSelectionAdmission | undefined;
+    signal?: AbortSignal;
   } = {},
 ): Promise<ResolvedOpenAiForwardSidecar | undefined> {
   const { exactAccount } = options;
@@ -158,12 +160,21 @@ export async function resolveFirstUsableOpenAiSidecar(
         modelId: exactAccount.modelId,
         admission: options.admission,
         beginCodexAccountSelection: options.beginCodexAccountSelection,
+        signal: options.signal,
       });
-      const selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, policy, exactAccount.modelId, options.admission);
+      let selectedHeaders: Headers;
+      try {
+        options.signal?.throwIfAborted();
+        selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, policy, exactAccount.modelId, options.admission);
+      } catch (error) {
+        releaseCodexAuthContextProbeLease(authContext);
+        throw error;
+      }
       if ((authContext.kind !== "pool" && authContext.kind !== "main-pool")
         || !isCodexAuthContextUsable(authContext, config)) {
         // Exact selection is fail-closed. A generation/runtime-state race must not fall through
         // to the caller-bearer error or let a later candidate select another account.
+        releaseCodexAuthContextProbeLease(authContext);
         throw new CodexPoolAuthenticationError("Selected Codex account is unavailable");
       }
       return {
@@ -209,9 +220,20 @@ export async function resolveFirstUsableOpenAiSidecar(
       requestScopedMainCredential: callerBearerMayBeForwarded
         && hasForwardableCodexBearer(incomingHeaders, config),
       beginCodexAccountSelection: options.beginCodexAccountSelection,
+      signal: options.signal,
     });
-    const selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, policy, undefined, options.admission);
-    if (!isCodexAuthContextUsable(authContext, config)) continue;
+    let selectedHeaders: Headers;
+    try {
+      options.signal?.throwIfAborted();
+      selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, policy, undefined, options.admission);
+    } catch (error) {
+      releaseCodexAuthContextProbeLease(authContext);
+      throw error;
+    }
+    if (!isCodexAuthContextUsable(authContext, config)) {
+      releaseCodexAuthContextProbeLease(authContext);
+      continue;
+    }
     return {
       ...candidate,
       authContext,

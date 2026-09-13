@@ -822,8 +822,7 @@ ocx config set codexPool '{"excludedPlans":["free"]}'
 
 This is a selection policy, not a block. An excluded account keeps its credential, quota history, and thread affinity, stays visible on the account surface, and is still reachable by explicit account selection such as `work/gpt-5.5`. What changes is that automatic rotation stops choosing it, including when it is already the active account or already bound to a thread — which is the state a lapsed subscription leaves behind.
 
-Two deliberate limits. The main Codex account is never excluded by plan, because selection-only routing withholds its plan rather than reading the fenced native credential, so a rule covering it would disagree with itself. And when no unexcluded account remains, the excluded one still answers rather than failing closed; pausing every account is still the way to stop serving entirely. There is no `minimumPlan` counterpart, because ranking ChatGPT plans against each other needs a total ordering that does not exist here.
-
+The main Codex account remains exempt from plan exclusion; selection-only routing does not read its fenced native credential. If every eligible pool account is excluded, automatic selection returns no account. Explicit account-qualified routes remain available and still enforce pause, authentication and model entitlement. The account card and CLI show the excluded routing plan separately from credential health. There is no `minimumPlan` setting because the plan names do not define a total order.
 ## Restoring native Codex
 
 `ocx stop` stops the proxy and any installed background service, then attempts to restore native Codex. OpenCodex removes verified routing artifacts and reports an incomplete restore when it cannot safely recover configuration files.
@@ -868,5 +867,7 @@ When a routed preferred model may receive V2 work from a native ChatGPT parent, 
 ## Paginated history safety refusal
 
 When an affected history store supports paginated records, a provider transition may return `history_paginated_requires_native_writer`. OpenCodex preserves the current configuration, profile, catalog, rollout and restore provenance instead of assigning ordinals outside Codex. This includes legacy rows in a migration-capable store. No-transition exits, such as preserving an external provider, remain available.
+
+Native restore checks again after restoring the journal or removing owned configuration. If migration is detected during that write interval, it puts back the prior configuration, profile and journal, skips catalog/history restoration, and rolls back any coordinated remove transition. This compensation does not lock out Codex's own writer or exclude changes after the final check.
 
 Do not delete a provider definition still referenced by a conversation, repeatedly run `ocx sync` or legacy recovery, or rewrite an active rollout to work around this refusal. Keep the current files, close the affected conversation before any recovery, and report the exact error and versions without uploading private history. Use a verified fix with native-writer coordination; a backup or a successful script alone does not prove the conversation is visible again. Check the restored conversation in Codex after reopening.

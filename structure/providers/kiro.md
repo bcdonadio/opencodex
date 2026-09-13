@@ -1,5 +1,11 @@
 # Kiro Provider
 
+The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
+is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged.
+
+The shared hosted-tool policy has no Codex Spark-specific branch. Kiro continues to use its
+provider capabilities below; see [Responses compatibility](../transports/responses.md#responses-httpsse).
+
 ## Kiro client parallel-tool hint
 
 Kiro's wire remains serialized even when an OpenAI Responses client sends
@@ -9,6 +15,10 @@ advertise `supports_parallel_tool_calls: false`, and the adapter emits no parall
 while accepting the client hint and translating the ordinary tool catalog normally.
 
 > Decision record: [ADR-0060](../decisions/ADR-0060-kiro-client-parallel-tool-hint.md)
+
+Kiro's own `kiroToolName` rewrite in `src/adapters/kiro-wire.ts` is CodeWhisperer-only and
+reserves the private completion tool. Meta Muse 64-character MCP aliases live in
+`src/responses/muse-tool-name-alias.ts` and must not import that Kiro helper.
 
 ## Kiro Responses text controls
 

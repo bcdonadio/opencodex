@@ -375,3 +375,12 @@ describe("chat-surface recursion fence (full path)", () => {
     }
   });
 });
+
+
+test("explicit routed image capability enables a describer despite stale legacy metadata", () => {
+  const main: OcxProviderConfig = { adapter: "openai-chat", baseUrl: "https://main.test/v1", modelCapabilities: { blind: { inputModalities: ["text"] } } };
+  const helper: OcxProviderConfig = { adapter: "openai-chat", baseUrl: "https://helper.test/v1", noVisionModels: ["vision"], modelCapabilities: { vision: { inputModalities: ["text", "image"] } } };
+  const parsed = parseRequest({ model: "main/blind", input: [{ role: "user", content: [{ type: "input_image", image_url: PNG_DATA_URL }] }] });
+  const plan = planVisionSidecar({ port: 10100, defaultProvider: "main", providers: { main, helper }, visionSidecar: { enabled: true, backend: "routed", model: "helper/vision" } } as OcxConfig, main, "blind", parsed);
+  expect(plan?.backend).toBe("routed");
+});

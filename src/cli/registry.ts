@@ -108,6 +108,17 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     ],
   },
   {
+    name: "remote-workspace",
+    usage: "ocx remote-workspace <pair|agent|status>",
+    summary: "Pair this OCX-only computer with a hub and run its remote workspace executor.",
+    details: [
+      "Pair: ocx remote-workspace pair <hub-url> --pairing-code-stdin --root <absolute-path> [--toolchain-root <absolute-directory>] [--executor-helper <absolute-file>] [--name <device-name>]",
+      "Agent: ocx remote-workspace agent",
+      "Status: ocx remote-workspace status [--json]",
+      "Codex, Claude Code, Pi, provider logins, and API keys remain on the hub; only workspace tools execute here.",
+    ],
+  },
+  {
     name: "disconnect",
     usage: "ocx disconnect [--keep-catalog] [--json]",
     summary: "Restore local client state offline and clear the remote-hub connection.",
@@ -130,6 +141,16 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "Warns when Codex app-server processes still hold an in-memory model list.",
       "--restart-codex sends SIGTERM only to matching app-server / code-mode-host processes (may interrupt active turns).",
       "--restart-desktop-app (Windows only, opt-in) fully restarts the Codex desktop app so its model picker re-reads the catalog. Never implied by --restart-codex: it ends live conversations.",
+    ],
+  },
+  {
+    name: "catalog",
+    usage: "ocx catalog pull <https-url> [--auth-env <NAME>] [--json] [--restart-codex]",
+    summary: "Install a validated remote /v1/catalog snapshot into Codex.",
+    details: [
+      "Authentication is read only from the named environment variable and sent as a Bearer token.",
+      "HTTPS is required except for loopback HTTP; redirects are refused.",
+      "The catalog and models_cache.json are coordinated under the Codex catalog write lock.",
     ],
   },
   { name: "status", usage: "ocx status", summary: "Check proxy server status." },

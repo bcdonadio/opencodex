@@ -308,6 +308,9 @@ ocx account main doctor [--json]
 ocx account main list [--json]
 ocx account main register <label> [--json]
 ocx account main add <label>
+ocx account main reauth --device [--no-wait] [--json]
+ocx account main reauth status --flow <id> [--json]
+ocx account main reauth cancel --flow <id> [--json]
 ocx account main switch <profile-id-or-label> --yes [--json]
 ocx account main recover [--rollback --yes] [--json]
 ```
@@ -364,3 +367,11 @@ ocx models remove deepseek/deepseek-v4 --yes
 슬래시가 있는 모델 선택기는 라우팅됩니다(`anthropic/claude-opus-5`). 슬래시가 없는 id는 native OpenAI 모델로 취급되므로, 라우팅된 것처럼 보일 수 있는 id에 대해 그 읽기를 강제하려면 `--native`가 필요합니다.
 
 `--modalities`는 `text`, `image`, `audio`만 허용합니다. Codex는 이 필드를 닫힌 enum으로 해석하고 다른 값이 하나라도 있으면 카탈로그 전체를 거부하므로, `add`, `edit`, 관리 API는 나중에 카탈로그 작성기가 정리해야 할 값을 저장하지 않도록 잘못된 값을 바로 거부합니다(#759).
+
+### 저장된 쿼터 기록
+
+`ocx account history openai <pool-account-id> [--limit 1-200] [--json]`은 제공자에게 요청하지 않고 저장된 관측을 읽습니다. 관측 시각, WHAM·응답 헤더 출처, 한도 종류와 사용률을 구분해 표시합니다. 계정마다 최대 200개를 30일간 보관하며 전체 저장량에도 제한이 있습니다.
+
+일반 토큰 갱신은 기록을 유지합니다. 재로그인·삭제·계정 교체는 이전 기록과 분리합니다. 네이티브 메인 계정과 로그인 저장 전 조회는 포함하지 않습니다. 기록이 없다는 것은 관측 부족이며 사용량 0을 뜻하지 않습니다. 이 명령은 쿼터를 소비하지 않습니다. 관측을 바탕으로 한 용량 추정에는 아래 한계가 적용됩니다.
+
+같은 초기화 구간의 관측과 계정별 사용 기록이 있으면 보고된 토큰 기준 용량 추정도 표시합니다. 표본 수와 낮은 신뢰도를 함께 표시하며, 쿼터 반올림·외부 사용량·로그 라벨 유지 여부 때문에 제공자의 실제 토큰 한도와 다를 수 있습니다. 기록이 없거나 잘렸으면 근거 부족으로 표시합니다. `--limit`은 표시할 기록 수만 제한하며 추정 입력은 전체 보관 범위입니다.

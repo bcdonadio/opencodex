@@ -293,3 +293,14 @@ describe("vision eligibility core", () => {
     expect(withRouted.some((o) => o.value === "cursor/cursor-vision-capable" && o.backend === "routed")).toBe(true);
   });
 });
+
+
+test("explicit routed image declarations outrank stale candidate metadata", () => {
+  const config = configWithProviders({ custom: {
+    adapter: "openai-chat", baseUrl: "https://example.test/v1", noVisionModels: ["ModelA"],
+    modelCapabilities: { ModelA: { inputModalities: ["text", "image"] } },
+  } });
+  expect(modelAcceptsImageInput(config, { provider: "custom", id: "ModelA", inputModalities: ["text"] })).toBe(true);
+  expect(modelAcceptsImageInput(config, { provider: "custom", id: "modela", inputModalities: ["text"] })).toBe(false);
+  expect(modelAcceptsImageInput(config, { provider: "custom", id: "ModelA:variant", inputModalities: ["text"] })).toBe(false);
+});

@@ -63,7 +63,7 @@ import {
 import { requestBoundSystemRestart } from "./system-restart-client";
 import { installCrashGuards } from "../lib/crash-guard";
 import { dispatchCommand , decideStartWithLiveOwner } from "./dispatch";
-import { findAvailablePort, isAddrInUse, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../server/ports";
+import { AuxiliaryListenerBindError, findAvailablePort, isAddrInUse, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../server/ports";
 import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
 import { createReadinessGate } from "../server/readiness";
 import { isApiAuthRequired } from "../server/auth-cors";
@@ -391,7 +391,7 @@ async function handleStart(options: { block?: boolean } = {}) {
       scheduleCatalogPrewarm();
       break;
     } catch (err) {
-      if (!isAddrInUse(err) || attempt >= 2) throw err;
+      if (err instanceof AuxiliaryListenerBindError || !isAddrInUse(err) || attempt >= 2) throw err;
       if (requestedPort !== undefined) {
         console.log(`⚠️  Port ${port} was taken while starting; waiting to retry the same port...`);
         const hostname = loadConfig().hostname ?? "127.0.0.1";

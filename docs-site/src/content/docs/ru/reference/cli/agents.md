@@ -79,6 +79,8 @@ ocx route combo set reliable --targets ark/model-a:2,openai/gpt-5.5
 ocx observe usage --range 30d --json
 ```
 
+Если часть записей нельзя учесть, человекочитаемый вывод показывает предупреждение, даже если нет читаемых строк. Отображаемые итоги учитывают только читаемые записи. Если фильтр не находит читаемых совпадений, вместо строк итогов выводятся предупреждение и подсказки; пропущенные записи могут содержать совпадения. `--json` сохраняет диагностику `usageIncomplete` и её причину из ответа.
+
 ### `ocx debug <provider|usage|injection|claude> <on|off|status|reset|logs [-f]>`
 
 Прочитать или изменить runtime debug-override'ы через management API работающего прокси.

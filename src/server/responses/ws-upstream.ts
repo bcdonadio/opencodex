@@ -182,5 +182,8 @@ export function codexWsUpstreamFetch(
   } catch {
     return sseFallback(url, init);
   }
-  return codexWsExchange({ session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport, observeTransport });
+  return codexWsExchange({
+    session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport, observeTransport,
+    bunVersion: typeof runtime === "string" ? runtime : runtime.version,
+  });
 }

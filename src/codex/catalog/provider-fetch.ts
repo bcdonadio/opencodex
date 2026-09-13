@@ -600,6 +600,7 @@ function providerCatalogFingerprint(name: string, prov: OcxProviderConfig): Reco
     maxOut: prov.modelMaxOutputTokens ?? null,
     autoCompact: prov.modelAutoCompactTokenLimits ?? null,
     inMod: prov.modelInputModalities ?? null,
+    capabilities: prov.modelCapabilities ?? null,
     re: prov.modelReasoningEfforts ?? null,
     defRe: prov.modelDefaultReasoningEfforts ?? null,
     rsSum: prov.modelSupportsReasoningSummaries ?? null,
@@ -673,7 +674,9 @@ export function configuredContextWindow(prov: OcxProviderConfig, id: string): nu
 }
 
 export function configuredInputModalities(prov: OcxProviderConfig, id: string): string[] | undefined {
-  const modalities = modelRecordValue(prov.modelInputModalities, id);
+  const declared = Object.hasOwn(prov.modelCapabilities ?? {}, id)
+    ? prov.modelCapabilities?.[id]?.inputModalities : undefined;
+  const modalities = declared ?? modelRecordValue(prov.modelInputModalities, id);
   return Array.isArray(modalities) && modalities.length > 0 ? [...modalities] : undefined;
 }
 
@@ -1736,6 +1739,12 @@ async function fetchProviderModelsWithAuth(
           id,
           provider: name,
           ...(liveWindow ? { contextWindow: liveWindow } : {}),
+          // The account catalog names the effort variants each base model has, so
+          // its ladder is measured rather than assumed. Without this the entry
+          // inherits the generic routed ladder and offers rungs the model rounds
+          // away, and every client that keys an effort control off this field —
+          // the Pi-shaped exports — renders no control at all.
+          ...(liveResult.efforts[id]?.length ? { reasoningEfforts: liveResult.efforts[id] } : {}),
           ...catalogHintsFromProviderConfig(name, prov, id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
         } as CatalogModel;
       });

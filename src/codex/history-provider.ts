@@ -8,6 +8,7 @@ import { atomicWriteFile, getConfigDir } from "../config";
 import {
   CODEX_HISTORY_RESUMABLE_SOURCES,
   codexHistoryBackupId,
+  legacyCodexHistoryBackupId,
   sameCodexHistoryPath,
   validateCodexHistoryBackupManifest,
   type CodexHistoryBackupEntry,
@@ -30,6 +31,32 @@ export const MAX_ROLLOUT_ZST_DECOMPRESSED_BYTES = 64 * 1024 * 1024;
  */
 export function historyBackupPathFor(stateDbPath: string): string {
   return join(getConfigDir(), `codex-history-backup-${codexHistoryBackupId(stateDbPath)}.json`);
+}
+
+/**
+ * Manifest name a database path spelled with the Win32 extended-length prefix
+ * (`\\?\C:\...`) received before that prefix was normalized out of the identity
+ * (#4442). Identical to historyBackupPathFor for every other spelling.
+ */
+export function legacyHistoryBackupPathFor(stateDbPath: string): string {
+  return join(getConfigDir(), `codex-history-backup-${legacyCodexHistoryBackupId(stateDbPath)}.json`);
+}
+
+/**
+ * The manifest that actually shadows one state database. Canonical name first; when
+ * only a pre-#4442 extended-length name exists, that manifest still shadows the
+ * database rather than reading as absent. When BOTH names exist the canonical
+ * manifest wins and the legacy file is left untouched — a conflict is resolved by
+ * keeping both, never by silently replacing one.
+ */
+export function resolveExistingHistoryBackupPath(
+  stateDbPath: string,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  const canonical = historyBackupPathFor(stateDbPath);
+  if (exists(canonical)) return canonical;
+  const legacy = legacyHistoryBackupPathFor(stateDbPath);
+  return legacy !== canonical && exists(legacy) ? legacy : canonical;
 }
 
 /**
@@ -318,7 +345,7 @@ export function preflightCodexHistoryInjection(
     // A partially restored row may already be native while its manifest still
     // owns work. Match the restore worker's target set before removing routing.
     const restoreEntries = providerTableMode ? []
-      : Object.values(readBackup(historyBackupPathFor(resolvedPath), resolvedPath).manifest.entries);
+      : Object.values(readBackup(resolveExistingHistoryBackupPath(resolvedPath), resolvedPath).manifest.entries);
     if (!existsSync(resolvedPath)) {
       return restoreEntries.length > 0 ? "history_state_database_missing" : null;
     }
@@ -1388,7 +1415,7 @@ function openaiRestoreIsNoop(stateDbPath: string, backupPath: string): boolean {
 export function syncCodexHistoryProvider(
   provider: CodexHistoryProvider,
   stateDbPath = resolveCodexStateDbPath(),
-  backupPath = historyBackupPathFor(stateDbPath),
+  backupPath = resolveExistingHistoryBackupPath(stateDbPath),
   opts: { skipWhenProvablyNoop?: boolean } = {},
 ): CodexHistorySyncResult {
   // Opt-in steady-state gate (Design B loopback callers only): default semantics of
@@ -1714,7 +1741,7 @@ export function restoreLegacyOpenaiHistory(stateDbPath = resolveCodexStateDbPath
  */
 export function migrateHistoryToOpenai(
   stateDbPath = resolveCodexStateDbPath(),
-  backupPath = historyBackupPathFor(stateDbPath),
+  backupPath = resolveExistingHistoryBackupPath(stateDbPath),
   opts: { attempts?: number; delayMs?: number; sleepFn?: (ms: number) => void } = {},
 ): CodexHistorySyncResult {
   // Steady-state gate: this migration is Design-B-specific (inject + guardian callers),
@@ -1747,7 +1774,7 @@ export function snapshotCodexHistoryNoop(
   const stateDbPresent = existsSync(stateDbPath);
   const backupPresent = existsSync(backupPath);
   const base = { canonicalStateDbPath, stateDbPresent, canonicalBackupPath, backupPresent };
-  if (!sameCodexHistoryPath(backupPath, historyBackupPathFor(stateDbPath))) {
+  if (!sameCodexHistoryPath(backupPath, resolveExistingHistoryBackupPath(stateDbPath))) {
     return { kind: "unknown", pendingRows: null, backupEntries: null, ...base, reason: "backup-path" };
   }
   const backup = inspectBackupForNoop(backupPath, stateDbPath);
@@ -1831,7 +1858,7 @@ export interface PendingHistoryCount {
  */
 export function countPendingOpencodexHistory(
   stateDbPath = resolveCodexStateDbPath(),
-  backupPath = historyBackupPathFor(stateDbPath),
+  backupPath = resolveExistingHistoryBackupPath(stateDbPath),
   opts: { validateRestoreTargets?: boolean } = {},
 ): PendingHistoryCount {
   const backup = readBackupStrict(backupPath, stateDbPath);

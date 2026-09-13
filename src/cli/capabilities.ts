@@ -96,6 +96,85 @@ export const HEAD_CAPABILITIES: readonly HeadCapability[] = [
  */
 export const CAPABILITIES: readonly Capability[] = [
   {
+    "command": [
+      "remote-workspace",
+      "pair"
+    ],
+    "summary": "Enroll this executor with one Hub using a one-time code from stdin and locally approved roots.",
+    "routes": [],
+    "flags": [
+      {
+        "name": "--json",
+        "value": "boolean",
+        "summary": "Emit the public local executor status."
+      },
+      {
+        "name": "--pairing-code-stdin",
+        "value": "boolean",
+        "summary": "Read the one-time pairing code from stdin."
+      },
+      {
+        "name": "--root",
+        "value": "string",
+        "summary": "Approve an absolute workspace directory; repeatable."
+      },
+      {
+        "name": "--toolchain-root",
+        "value": "string",
+        "summary": "Approve a read-only toolchain directory; repeatable."
+      },
+      {
+        "name": "--executor-helper",
+        "value": "string",
+        "summary": "Select a reviewed native helper file."
+      },
+      {
+        "name": "--name",
+        "value": "string",
+        "summary": "Name this executor."
+      }
+    ],
+    "mutates": true,
+    "json": "payload",
+    "details": [
+      "Executor-local operation; Hub consent and session control stay in the dashboard."
+    ]
+  },
+  {
+    "command": [
+      "remote-workspace",
+      "agent"
+    ],
+    "summary": "Keep the paired executor connected to its Hub.",
+    "routes": [],
+    "flags": [],
+    "mutates": true,
+    "json": "none",
+    "details": [
+      "Executor-local operation; Hub consent and session control stay in the dashboard."
+    ]
+  },
+  {
+    "command": [
+      "remote-workspace",
+      "status"
+    ],
+    "summary": "Read local executor enrollment and available capabilities without printing credentials.",
+    "routes": [],
+    "flags": [
+      {
+        "name": "--json",
+        "value": "boolean",
+        "summary": "Emit the public local executor status."
+      }
+    ],
+    "mutates": false,
+    "json": "payload",
+    "details": [
+      "Executor-local operation; Hub consent and session control stay in the dashboard."
+    ]
+  },
+  {
     command: ["models", "price"],
     summary: "Read the saved manual price for an exact provider/model selector.",
     routes: [{ method: "GET", path: "/api/providers/{provider}/model-costs" }],
@@ -233,6 +312,40 @@ export const CAPABILITIES: readonly Capability[] = [
     details: [
       "`store` verifies every keychain write by read-back before config.json is rewritten with keychain: references; an unavailable keychain refuses with 503 and leaves the file untouched.",
       "Headless services usually have no unlocked keychain session; prefer ${ENV_VAR} references there.",
+    ],
+  },
+  {
+    command: ["account", "history"],
+    summary: "Cached quota observations for one stored Codex pool account.",
+    routes: [{ method: "GET", path: "/api/codex-auth/quota/history" }],
+    flags: [
+      { name: "--json", value: "boolean", summary: "Emit the bounded observation history." },
+      { name: "--limit", value: "number", summary: "Return the newest 1 to 200 observations." },
+    ],
+    mutates: false,
+    json: "payload",
+    details: ["Use account history openai <pool-account-id>. Reads cached observations only; no refresh or warmup. Native main is not included."],
+  },
+  {
+    command: ["account", "main", "reauth"],
+    summary: "Reauthenticate the native main Codex login with a device code (#3898); headless hubs need no Codex App or keyring.",
+    routes: [
+      { method: "POST", path: "/api/codex-auth/main/reauth-device" },
+      { method: "GET", path: "/api/codex-auth/main/reauth-device" },
+      { method: "DELETE", path: "/api/codex-auth/main/reauth-device" },
+    ],
+    flags: [
+      { name: "--device", value: "boolean", summary: "Run the device-code flow (the only reauth mode)." },
+      { name: "--no-wait", value: "boolean", summary: "Print the flow handle and code without waiting for completion." },
+      { name: "--flow", value: "string", summary: "Flow id for status and cancel." },
+      { name: "--json", value: "boolean", summary: "Emit the flow status as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: [
+      "Same-identity reauth only: the device login must complete for the ChatGPT account that already holds the native main slot, and the commit is fenced by the exclusive claim plus a path/hash/inode snapshot.",
+      "/api/codex-auth/login stays pool-only and keeps rejecting __main__; this namespace is the only device-reauth surface for the native main slot.",
+      "Payloads carry only flowId, status, the verification URL, the device code, and a closed set of failure codes -- never tokens, emails, or raw account ids.",
     ],
   },
   {

@@ -446,8 +446,7 @@ ocx config set codexPool '{"excludedPlans":["free"]}'
 
 Bu bir engelleme değil, seçim politikasıdır. Dışarıda bırakılan hesap kimlik bilgisini, kota geçmişini ve iş parçacığı bağını korur, hesap listesinde görünmeye devam eder ve `work/gpt-5.5` gibi açık bir seçimle hâlâ erişilebilir. Değişen tek şey, otomatik rotasyonun onu artık seçmemesidir; hesap zaten etkin olsa ya da bir iş parçacığına bağlı olsa bile. Süresi dolan bir abonelik tam olarak bu durumu bırakır.
 
-İki kasıtlı sınır var. Ana Codex hesabı plana göre hiçbir zaman dışarıda bırakılmaz: yalnızca-seçim yönlendirmesi korunan yerel kimlik bilgisini okumamak için planını saklar, dolayısıyla ana hesabı kapsayan bir kural kendisiyle çelişirdi. Ayrıca dışarıda bırakılmamış hiçbir hesap kalmadığında, dışarıda bırakılan hesap başarısız olmak yerine yine yanıt verir; hizmeti tamamen durdurmak için hâlâ tüm hesapları duraklatmak gerekir. `minimumPlan` karşılığı yoktur, çünkü ChatGPT planlarını sıralamak burada bulunmayan bir tam sıralama gerektirir.
-
+Ana Codex hesabı plan hariç tutma politikasından muaftır; yalnızca seçim yapan yönlendirme korunan yerel kimlik bilgilerini okumaz. Kullanılabilir tüm havuz hesapları hariç tutulursa otomatik seçim hesap döndürmez. Açıkça hesap belirten yollar kullanılabilir; duraklatma, kimlik doğrulama ve model yetkisi denetimleri korunur. Hesap kartı ve CLI, hariç tutulan yönlendirme planını kimlik bilgisi durumundan ayrı gösterir. Planların tam sıralaması olmadığından `minimumPlan` ayarı yoktur.
 ## Yerel Codex'i geri yükleme
 
 `ocx stop`, proxy'yi ve kurulu arka plan servisini durdurur, ardından yerel Codex'i geri yüklemeyi dener. OpenCodex yalnızca sahipliğini doğrulayabildiği yönlendirme öğelerini kaldırır; yapılandırma dosyaları güvenle geri yüklenemiyorsa işlemin tamamlanmadığını bildirir.

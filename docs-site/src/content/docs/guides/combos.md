@@ -256,20 +256,10 @@ instead of growing memory without a bound.
 
 ## Default reasoning effort
 
-`defaultEffort` supplies `reasoning.effort` only when all of these are true:
+`defaultEffort` fills an absent `reasoning.effort` when the combo has a non-null default and the selected target has a known, nonempty supported ladder. If the target supports the configured value, it is retained; otherwise the highest supported rung at or below it is used, or the lowest supported rung when none is lower. Unknown or empty ladders omit the default.
 
-1. the combo has a non-null default;
-2. the caller did not set an effort; and
-3. the selected target's catalog advertises that exact effort.
+The default-injection step preserves existing effort and other reasoning fields. Capability normalization can separately remove unsupported effort/thinking controls as described below. Supported defaults are `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`; omit the field or use `null` to disable default injection.
 
-If the request has no `reasoning` object, opencodex creates one. If `reasoning` exists without an
-`effort` property, it preserves the other fields and adds the default. A caller-provided effort is
-never overwritten.
-
-When target capability is unknown or does not include the configured effort, opencodex omits the
-default and leaves the target's own behavior unchanged. Supported values are `low`, `medium`,
-`high`, `xhigh`, `max`, and `ultra`; omit the field or set it to `null` to leave effort entirely to
-the caller and target.
 
 ### Mixed-capability groups (`reasoningEffortMode`)
 
@@ -297,9 +287,12 @@ as wildcards in both modes.
 }
 ```
 
-The default is `"strict"`, which keeps the original behavior. This setting changes published
-catalog metadata only — it does not change target order, failover policy, or which effort a given
-target receives at dispatch. In the dashboard it is the **Adaptive reasoning ladder** switch in a
+The default is `"strict"`, which keeps the original picker behavior. This setting does not change
+target order or failover policy. At dispatch, an explicitly empty target ladder has its unsupported
+effort/thinking controls removed in either mode while preserving supported non-effort reasoning fields
+such as `reasoning.summary`; `"adaptive"` applies the same normalization to an unknown target
+capability, while known non-empty targets keep their existing per-target effort resolution.
+In the dashboard it is the **Adaptive reasoning ladder** switch in a
 combo's Capabilities section.
 
 ## Image / multimodal capability
@@ -414,7 +407,7 @@ Combos are stored in the top-level `combos` object, keyed by combo id:
 | `cooldownMs` | No | unset → upstream fallback (5 s for request-rate 429 codes `1302`/`1305`, otherwise 60 s) | Integer from 1 to 600000. When set, applies as the per-target cooldown whenever no usable upstream `Retry-After` or Codex reset signal exists, including request-rate 429s; when unset, uses the upstream fallback. |
 | `waitForCooldownMs` | No | `0` | Integer from 0 to 600000. Maximum time to wait for the earliest eligible cooling target before returning `combo_unavailable`; abort cancels the wait. |
 | `defaultEffort` | No | `null` | `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`; applied only when the caller omits effort and the target advertises support. |
-| `reasoningEffortMode` | No | `"strict"` | `"strict"` intersects every known target ladder, so one target advertising no effort control empties the combo's picker. `"adaptive"` excludes those empty ladders from the published intersection. Metadata only; dispatch is unchanged. |
+| `reasoningEffortMode` | No | `"strict"` | `"strict"` intersects every known target ladder, so one target advertising no effort control empties the combo's picker. `"adaptive"` excludes those empty ladders from the published intersection. At dispatch, explicit empty or adaptive unknown ladders remove unsupported effort/thinking controls while preserving supported non-effort reasoning fields such as `reasoning.summary`; known non-empty targets keep existing effort resolution. |
 | `imageInput` | No | `"auto"` | `"auto"` or `"disabled"`. `"auto"` publishes image support only when every target supports images; `"disabled"` forces text-only (drops image from published modalities and rejects image-bearing requests before dispatch). |
 | `alias` | No | none | Optional trimmed public model id; use the alias rules above. An empty value is stored as no alias. |
 | `nativeAlias` | No | `false` | Explicitly permit a currently supported bare native `alias` to take routing and catalog precedence. Never inferred from the alias. |

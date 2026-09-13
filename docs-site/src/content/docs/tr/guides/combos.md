@@ -249,22 +249,16 @@ veya politika retlerini gizlemez.
 
 ## Varsayılan akıl yürütme çabası
 
-`defaultEffort`, yalnızca bunların tümü doğru olduğunda `reasoning.effort`
-sağlar:
+`defaultEffort`, combo varsayılanı null değilse ve hedefin desteklenen seviye listesi bilinen ve boş olmayan bir listeyse eksik `reasoning.effort` değerini doldurur. Yapılandırılmış değer destekleniyorsa korunur; değilse bu değeri aşmayan en yüksek desteklenen seviye, böyle bir seviye yoksa en düşük desteklenen seviye kullanılır. Liste bilinmiyor veya boşsa varsayılan eklenmez.
 
-1. kombonun boş olmayan (non-null) bir varsayılanı vardır;
-2. arayan bir çaba ayarlamamıştır; ve
-3. seçilen hedefin kataloğu tam olarak bu çabayı bildirmektedir.
+Varsayılan ekleme mevcut effort ve diğer reasoning alanlarını korur. Aşağıdaki yetenek normalizasyonu desteklenmeyen effort/thinking denetimlerini ayrıca kaldırabilir. Desteklenen varsayılanlar: `low`, `medium`, `high`, `xhigh`, `max`, `ultra`; alanı atlamak veya `null` kullanmak eklemeyi kapatır.
 
-İstekte bir `reasoning` nesnesi yoksa opencodex bir tane oluşturur. Bir `effort`
-özelliği olmadan `reasoning` varsa diğer alanları korur ve varsayılanı ekler.
-Arayan tarafından sağlanan bir çabanın üzerine asla yazılmaz.
 
-Hedef yeteneği bilinmediğinde veya yapılandırılan çabayı içermediğinde opencodex
-varsayılanı atlar ve hedefin kendi davranışını değiştirmeden bırakır.
-Desteklenen değerler `low`, `medium`, `high`, `xhigh`, `max` ve `ultra`'dır;
-çabayı tamamen arayana ve hedefe bırakmak için alanı atlayın veya `null` olarak
-ayarlayın.
+## Farklı reasoning yetenekleri
+
+`reasoningEffortMode` varsayılan olarak `"strict"` kullanır: açıkça boş listeler dahil tüm hedeflerin effort listelerinin kesişimi yayımlanır. `"adaptive"`, karma kombolarda seçiciyi korumak için boş listeleri kesişimden çıkarır. Bilinmeyen listeler her iki modda da katalog kesişimini sınırlamaz.
+
+Gönderim sırasında açıkça boş liste her iki modda effort ve thinking denetimlerini kaldırır; bilinmeyen liste bunları yalnızca adaptive modunda kaldırır. `reasoning.summary` ve effort dışındaki alanlar korunur. Bilinen, boş olmayan hedeflerin effort çözümü değişmez. strict modundaki bilinmeyen hedefler ve normal native Chat bilinmeyen bildirimleri çağıranın denetimlerini korur. Varsayılan değer ekleme mevcut effort değerini değiştirmez; yetenek normalizasyonu desteklenmeyen denetimleri kaldırabilir.
 
 ## Şifrelenmiş v2 alt ajan görevleri
 
@@ -373,6 +367,7 @@ saklanır:
 | `strategy` | Hayır | `"failover"` | İzin verilen değerler: `"failover"`, `"round-robin"`, `"random"`, `"least-used"`, `"reset-window"`. |
 | `stickyLimit` | Hayır | `1` | Yalnızca `round-robin` için geçerlidir; seçim başına 1 ile 100 arasında başarılı istek tam sayısı. |
 | `defaultEffort` | Hayır | `null` | `low`, `medium`, `high`, `xhigh`, `max` veya `ultra`; yalnızca arayan çabayı atladığında ve hedef desteği bildirdiğinde uygulanır. |
+| `reasoningEffortMode` | Hayır | `"strict"` | `strict` veya `adaptive`; karma yetenek kesişimini ve hedefe özel normalizasyonu seçer. |
 | `alias` | Hayır | yok | İsteğe bağlı kırpılmış genel model kimliği; yukarıdaki takma ad kurallarını kullanın. Boş bir değer takma ad yok olarak saklanır. |
 | `nativeAlias` | Hayır | `false` | Şu anda desteklenen yalın bir yerel `alias`'ın yönlendirme ve katalog önceliği almasına açıkça izin verin. Asla takma addan çıkarılmaz. |
 | `displayName` | Hayır | yok | Sınırlı salt görüntüleme katalog etiketi. `nativeAlias` true olduğunda gerekli ve boş değildir. |

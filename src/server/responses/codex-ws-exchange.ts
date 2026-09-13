@@ -8,7 +8,8 @@ import type { CodexWsSession } from "./codex-ws-session";
 import type { ProviderFetchOptions, TransportObservation } from "./fetch-helpers";
 import { UPGRADE_DEADLINE_MS, CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES,
   MAX_CODEX_WS_QUEUE_BYTES, markCodexWsResponse, normalizeResponsesWsRelayEvent, closedBeforeTerminalMessage,
-  codexWsFailureDetail, codexWsPreResponseFailure, type CodexWsFailureStage } from "./codex-ws-wire";
+  codexWsFailureDetail, codexWsPreResponseFailure, markCodexWsStage, codexWsOcxVersion,
+  type CodexWsFailureStage, type CodexWsStageRecord } from "./codex-ws-wire";
 
 interface ExchangeOptions {
   session: CodexWsSession;
@@ -20,6 +21,8 @@ interface ExchangeOptions {
   beforeDispatch?: (headers: Headers) => void;
   observeTransport?: ProviderFetchOptions["observeTransport"];
   onTransport?: (transport: "http" | "websocket") => void;
+  /** Bun version string the caller gated on; stamped onto the stage record. */
+  bunVersion?: string;
 }
 
 const HTTP_HEADER_TOKEN = /^[!#$%&'*+.^_`|~0-9a-z-]+$/i;
@@ -87,7 +90,7 @@ function wrappedRejectionResponse(payload: Record<string, unknown>, prelude: Hea
 
 /** The sole SSE exchange state machine for both one-shot and retained sockets. */
 export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
-  const { session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport } = options;
+  const { session, url, init, prepared, sseFallback, onQuota, beforeDispatch, onTransport, bunVersion } = options;
   const { frameText, headers } = prepared;
   const observe = (event: TransportObservation): void => {
     try { options.observeTransport?.(event); } catch { /* optional diagnostics */ }
@@ -113,6 +116,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     let pongs = 0;
     let sentAt: number | null = null;
     let firstFrameAt: number | null = null;
+    // Numeric close code for the durable stage record; the reason string stays
+    // out of it on purpose (#4191 content-free contract).
+    let closeCode: number | null = null;
     let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
     const encoder = new TextEncoder();
     const metadata = url === CODEX_RESPONSES_HTTP_URL ? new CodexWsMetadata(onQuota) : null;
@@ -125,6 +131,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     // interval so a peer that answers pings can never trip the silence bound while alive.
     let silenceTimer: ReturnType<typeof setTimeout> | undefined;
     let pingTimer: ReturnType<typeof setTimeout> | undefined;
+    // The resolved 200, retained so a later body failure can replace its
+    // success-shaped stage record with the failure-shaped one (#4191).
+    let committedResponse: Response | null = null;
     const stream = new ReadableStream<Uint8Array>({
       start(c) { controller = c; },
       cancel() {
@@ -168,6 +177,28 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       pongs,
     });
 
+    /**
+     * The durable twin of failureStage (#4191). `requestBytes` is an explicit
+     * parameter so the committed-success path can pass null instead of paying
+     * the UTF-8 walk of a megabyte replay frame; failure callers pass
+     * `failureStage().requestBytes`, which measures exactly once.
+     */
+    const stageRecord = (requestBytes: number | null): CodexWsStageRecord => ({
+      requestBytes,
+      sent,
+      upstreamFrames,
+      controlFrames,
+      relayedEvents,
+      firstFrameMs: sentAt !== null && firstFrameAt !== null ? Math.max(0, firstFrameAt - sentAt) : null,
+      elapsedMs: sentAt !== null ? Math.max(0, Date.now() - sentAt) : null,
+      pings,
+      pongs,
+      closeCode,
+      reused: session.reused,
+      ocxVersion: codexWsOcxVersion(),
+      bunVersion: bunVersion ?? "unknown",
+    });
+
     const commitResponse = () => {
       if (responseCommitted) return;
       responseCommitted = true;
@@ -178,6 +209,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const response = new Response(stream, { status: 200, headers: responseHeaders });
       metadata?.commit();
       markCodexWsResponse(response, Boolean(metadata && onQuota));
+      markCodexWsStage(response, stageRecord(null));
+      committedResponse = response;
       observe({ kind: "response", transport: "websocket", response });
       resolve(response);
     };
@@ -202,9 +235,10 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         try { controller?.close(); } catch { /* unused stream already closed */ }
         session.dispose();
         const message = error instanceof Error ? error.message : String(error);
-        const response = codexWsPreResponseFailure(status, message, prelude);
-        observe({ kind: "response", transport: "websocket", response });
-        resolve(response);
+        const failureResponse = codexWsPreResponseFailure(status, message, prelude);
+        markCodexWsStage(failureResponse, stageRecord(Buffer.byteLength(frameText, "utf8")));
+        observe({ kind: "response", transport: "websocket", response: failureResponse });
+        resolve(failureResponse);
         return;
       }
       // A response is already flowing (or this transport has no metadata channel and
@@ -214,6 +248,11 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       cleanup();
       try { controller?.error(typeof error === "string" ? new Error(error) : error); } catch { /* stream already done */ }
       session.dispose();
+      // A body failure replaces the success-shaped record commitResponse wrote:
+      // this settle is a failure, and the frame size is evidence again.
+      if (committedResponse) {
+        markCodexWsStage(committedResponse, stageRecord(Buffer.byteLength(frameText, "utf8")));
+      }
     };
 
     /** (Re)start the silence bound; every inbound frame or pong is proof of life. */
@@ -457,6 +496,13 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         terminal = true;
         cleanup();
         try { controller.close(); } catch { /* already closed */ }
+        // Refresh the success record with the final counters: the commit-time
+        // snapshot predates every relayed event, and the record is more useful
+        // when it says what the exchange actually delivered. Still no byte
+        // count — the happy path never pays it.
+        if (committedResponse) {
+          markCodexWsStage(committedResponse, stageRecord(null));
+        }
         session.release(completedId);
       }
     };
@@ -465,6 +511,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       const close = event as { code?: number; reason?: unknown } | null;
       observe({ kind: "close", connectionId: session.connectionId, code: close?.code,
         reason: sanitizeDiagnosticError(close?.reason) });
+      const code = (event as { code?: unknown } | null)?.code;
+      if (typeof code === "number") closeCode = code;
       if (!opened) {
         cleanup();
         if (settledPreOpen) return;
