@@ -1842,6 +1842,8 @@ export interface HandleResponsesOptions {
    * which is why it refused the whole env_key flow instead of serving it.
    */
   admission?: DataPlaneAdmission;
+  /** Presence-only API-key-header veto retained across Responses WebSocket reframing. */
+  agentTaskRecoveryApiKeyHeaderPresent?: boolean;
   /** Called at most once after the complete client body is read and accepted for dispatch. */
   onRequestBodyRead?: () => void;
   forceEmptyResponseId?: boolean;
@@ -2885,7 +2887,14 @@ export async function handleComboResponses(
   // imageInput is disabled (and so targets see the full replayed input).
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
   const body = expandPreviousResponseInput(rawBody, inboundClientThreadId,
-    isThreadSpawnRequest(req.headers) ? agentTaskRecoveryReplayScope(req, config) : undefined);
+    isThreadSpawnRequest(req.headers)
+      ? agentTaskRecoveryReplayScope(
+        req,
+        config,
+        options.admission,
+        options.agentTaskRecoveryApiKeyHeaderPresent,
+      )
+      : undefined);
   recordReconstructedContext(logCtx, body, previousResponseReplayPrefixLength(body));
   const scopeMismatch = previousResponseScopeMismatch(body);
   if (scopeMismatch) {
@@ -2987,7 +2996,11 @@ export async function handleComboResponses(
         req,
         (body as { input?: unknown } | undefined)?.input,
         config,
-        { parentThreadId: inboundClientThreadId },
+        {
+          parentThreadId: inboundClientThreadId,
+          resolvedAdmission: options.admission,
+          apiKeyHeaderPresent: options.agentTaskRecoveryApiKeyHeaderPresent,
+        },
       );
       return false;
     }
@@ -3008,6 +3021,8 @@ export async function handleComboResponses(
         {
           parentThreadId: inboundClientThreadId,
           abortSignal: options.abortSignal,
+          resolvedAdmission: options.admission,
+          apiKeyHeaderPresent: options.agentTaskRecoveryApiKeyHeaderPresent,
           traceId: recoveryTraceId,
         },
       );
@@ -3035,7 +3050,11 @@ export async function handleComboResponses(
         req,
         (body as { input?: unknown } | undefined)?.input,
         config,
-        { parentThreadId: inboundClientThreadId },
+        {
+          parentThreadId: inboundClientThreadId,
+          resolvedAdmission: options.admission,
+          apiKeyHeaderPresent: options.agentTaskRecoveryApiKeyHeaderPresent,
+        },
       );
       return false;
     }
@@ -3090,7 +3109,11 @@ export async function handleComboResponses(
         req,
         (body as { input?: unknown } | undefined)?.input,
         config,
-        { parentThreadId: inboundClientThreadId },
+        {
+          parentThreadId: inboundClientThreadId,
+          resolvedAdmission: options.admission,
+          apiKeyHeaderPresent: options.agentTaskRecoveryApiKeyHeaderPresent,
+        },
       );
       return options.abortSignal?.aborted
         ? clientCancelledResponse()
@@ -3681,7 +3704,12 @@ async function handleResponsesInner(
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
   const cursorClientThreadId = codexPoolAffinityKey(req.headers);
   const ephemeralReplayScope = agentTaskRecovery && isThreadSpawnRequest(req.headers)
-    ? agentTaskRecoveryReplayScope(req, config) : undefined;
+    ? agentTaskRecoveryReplayScope(
+      req,
+      config,
+      options.admission,
+      options.agentTaskRecoveryApiKeyHeaderPresent,
+    ) : undefined;
   const originalBody = body;
   if (options.comboReplaySnapshot) {
     copyPreviousResponseReplayProvenance(options.comboReplaySnapshot.sourceBody, body);
@@ -4080,6 +4108,8 @@ async function handleResponsesInner(
       {
         parentThreadId: inboundClientThreadId,
         abortSignal: options.abortSignal,
+        resolvedAdmission: options.admission,
+        apiKeyHeaderPresent: options.agentTaskRecoveryApiKeyHeaderPresent,
         traceId: historyRecoveryTraceId,
       },
     )
@@ -4167,6 +4197,8 @@ async function handleResponsesInner(
         {
           parentThreadId,
           abortSignal: options.abortSignal,
+          resolvedAdmission: options.admission,
+          apiKeyHeaderPresent: options.agentTaskRecoveryApiKeyHeaderPresent,
           traceId: agentTaskRecoveryTraceId,
         },
       );

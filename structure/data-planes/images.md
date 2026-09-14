@@ -16,6 +16,7 @@ Codex's local `image_gen.imagegen` tool makes a second Images request after the 
 These are standalone Images API routes, not the hosted Responses `image_generation` tool.
 
 The shared Responses path follows the [bounded multipart recovery contract](../subagents.md#multipart-encrypted-task-recovery); credential admission and retry policy remain unchanged.
+Encrypted-task recovery uses the listener-resolved loopback admission carried by `src/server/index.ts`; a separately authenticated public bind cannot make its dedicated loopback companion look remote inside `src/server/responses/core.ts`.
 
 `src/server/images.ts` uses the existing ChatGPT/OpenAI fallback unless `images.provider` explicitly
 selects a custom API-key `openai-responses` provider. Explicit selection fails closed when the

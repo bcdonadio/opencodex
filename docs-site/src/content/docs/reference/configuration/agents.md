@@ -265,7 +265,9 @@ recovery model and account; a requested tier does not guarantee the backend's ac
 
 Admission and retention are deliberately narrow:
 
-- recovery is available only while the proxy is bound to loopback;
+- recovery is available only for a request admitted on a loopback listener. This includes the
+  dedicated loopback companion of a separately authenticated public bind; requests admitted on
+  that public listener remain ineligible;
 - only a native Codex caller with a matching ChatGPT bearer/account pair is eligible. This is the
   credential shape used by the canonical `openai` provider with `authMode: "forward"`; recovery uses
   only the pair on the incoming request and never substitutes API-key authentication, another

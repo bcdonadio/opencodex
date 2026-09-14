@@ -15,6 +15,7 @@ Grounded in the open-sourced official client (xai-org/grok-build); unit + eviden
 `devlog/_fin/260716_grok_build_hardening/`.
 
 The shared Responses path follows the [bounded multipart recovery contract](../subagents.md#multipart-encrypted-task-recovery); credential admission and retry policy remain unchanged.
+Encrypted-task recovery uses the listener-resolved loopback admission carried by `src/server/index.ts`; a separately authenticated public bind cannot make its dedicated loopback companion look remote inside `src/server/responses/core.ts`.
 
 - **Reasoning folding:** the Responses parser folds `reasoning` items into the FOLLOWING
   assistant turn (`pendingReasoning` in `src/responses/parser.ts`) so the Grok chat wire carries

@@ -33,3 +33,7 @@ plus exact separators, without joining a second full JSON array. `src/lib/admiss
 truncates diagnostic text at UTF-8 code-point boundaries without allocating arrays per character;
 byte sizing retains TextEncoder's coercion behavior for legacy non-string runtime callers.
 These optimizations do not add request queues, retry policies, or RSS-based admission gates.
+
+Encrypted collaboration recovery keeps listener admission and typed cache results outside the byte
+accounting shortcuts: only a successful string assignment reaches `Buffer.byteLength`, and a
+dedicated loopback companion carries its resolved loopback admission into `src/server/responses/core.ts`.

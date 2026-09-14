@@ -109,6 +109,28 @@ describe("WS endpoint re-framer (120/132)", () => {
     expect(first.connectionId).not.toBe(second.connectionId);
     expect(first.requestSequenceOnConnection).toBe(0);
   });
+
+  test.each(["x-api-key", "x-opencodex-api-key"])(
+    "retains only the presence of forbidden recovery header %s",
+    headerName => {
+      const clientHeaders = new Headers({
+        authorization: "Bearer native-token",
+        "chatgpt-account-id": "acct-ws",
+        [headerName]: "private-proxy-credential",
+      });
+      const data = buildResponsesWsData(
+        selectForwardHeaders(clientHeaders),
+        { kind: "loopback", source: "loopback" },
+        undefined,
+        undefined,
+        clientHeaders,
+      ) as WsData & { agentTaskRecoveryApiKeyHeaderPresent?: boolean };
+
+      expect(data.agentTaskRecoveryApiKeyHeaderPresent).toBe(true);
+      expect(data.headers?.get(headerName)).toBeNull();
+      expect(JSON.stringify(data)).not.toContain("private-proxy-credential");
+    },
+  );
   test("server config declares explicit websocket idle timeout policy", () => {
     const source = readFileSync(new URL("../../src/server/index.ts", import.meta.url), "utf8");
     expect(source).toContain("const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;");

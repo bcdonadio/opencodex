@@ -3159,6 +3159,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;
             const response = await handleResponses(req, config, logCtx, {
               ...(wsAdmission ? { admission: wsAdmission } : {}),
+              agentTaskRecoveryApiKeyHeaderPresent: ws.data.agentTaskRecoveryApiKeyHeaderPresent,
               forceEmptyResponseId: true,
               inboundTransport: "websocket",
               abortSignal: turnAbort.signal,

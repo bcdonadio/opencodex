@@ -164,8 +164,9 @@ you control the caller.
 An experimental, disabled-by-default `agentTaskRecovery` option can recover encrypted `NEW_TASK`
 and `MESSAGE` payloads in this native-to-routed shape through a raw Responses passthrough to the fixed ChatGPT `/responses` endpoint using
 the incoming credential shape used by the canonical `openai` provider with `authMode: "forward"`.
-Recovery is available only while the proxy is bound to loopback. It never substitutes API-key
-authentication, another provider credential, or another Codex account. Only `authorization`, matching
+Recovery is available only for a request admitted on a loopback listener, including the dedicated
+loopback companion of a separately authenticated public bind. The public listener remains
+ineligible. Recovery never substitutes API-key authentication, another provider credential, or another Codex account. Only `authorization`, matching
 `chatgpt-account-id`, and optional `openai-beta`/`user-agent` metadata are forwarded. The inbound
 `originator` is ignored rather than forwarded; this recovery-only request generates `originator: codex_cli_rs`
 locally. `content-type` and `accept` are generated locally, and no other caller headers

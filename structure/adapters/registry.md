@@ -77,6 +77,7 @@ Do not add a second switch/list of adapter factories in request routing. Focused
 This decision does not change routed `apply_patch` behavior, Cursor structured-edit conversion, Azure/MiMo request construction, or provider wire selection. Those behaviors remain owned by their existing modules and focused tests. The registry exposes the universe and semantic relationships; the next stack layer consumes that metadata for generic conformance.
 
 The shared Responses path follows the [bounded multipart recovery contract](../subagents.md#multipart-encrypted-task-recovery); credential admission and retry policy remain unchanged.
+Encrypted-task recovery uses the listener-resolved loopback admission carried by `src/server/index.ts`; a separately authenticated public bind cannot make its dedicated loopback companion look remote inside `src/server/responses/core.ts`.
 
 ## Moonshot `$ref`-with-siblings normalization
 

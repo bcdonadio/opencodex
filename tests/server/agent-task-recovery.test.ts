@@ -410,19 +410,17 @@ describe("agent task recovery (opt-in, default off)", () => {
   });
 
   test("logs the exact stage that prevents encrypted task recovery", async () => {
-    const noSpawnHeaders = codexHeaders();
-    noSpawnHeaders.delete("x-openai-subagent");
     globalThis.fetch = (async () => {
       throw new Error("a rejected recovery path must not reach any upstream");
     }) as typeof fetch;
     const skipped = await captureAgentTaskRecoveryDiagnostics(async () => {
-      const response = await post(routedConfig(), "xai/grok-4.5", encryptedInput(), noSpawnHeaders);
+      const response = await post(routedConfig(null), "xai/grok-4.5", encryptedInput(), codexHeaders());
       expect(response.status).toBe(400);
     });
     expect(skipped.events).toContainEqual(expect.objectContaining({
       stage: "gate",
       outcome: "skipped",
-      reason: "not_thread_spawn",
+      reason: "disabled",
     }));
 
     resetAgentTaskRecoveryState();
@@ -1938,6 +1936,84 @@ describe("mid-thread encrypted agent task recovery (#4089)", () => {
     expect(fetches).toBe(0);
     expect(raw).not.toContain(FERNET_TASK);
   });
+
+  test("a loopback-listener admission recovers under a separately authenticated public bind", async () => {
+    const config = routedConfig();
+    config.hostname = "127.0.0.2";
+    const urls: string[] = [];
+    let providerBody = "";
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes("chatgpt.com")) {
+        return new Response(recoverySse("Review the frozen candidate."));
+      }
+      providerBody = typeof init?.body === "string" ? init.body : "";
+      return providerResponse();
+    }) as typeof fetch;
+    const req = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...Object.fromEntries(codexHeaders()) },
+      body: JSON.stringify({ model: "xai/grok-4.5", input: encryptedInput(), stream: false }),
+    });
+
+    const response = await handleResponses(req, config, { model: "", provider: "" }, {
+      admission: { kind: "loopback", source: "loopback" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain("chatgpt.com/backend-api/codex");
+    expect(urls[1]).toContain("api.x.ai");
+    expect(providerBody).toContain("Review the frozen candidate.");
+    expect(providerBody).not.toContain(FERNET_TASK);
+  });
+
+  test.each([
+    ["x-api-key", false],
+    ["x-api-key", true],
+    ["x-opencodex-api-key", false],
+    ["x-opencodex-api-key", true],
+  ] as const)(
+    "a WebSocket replay keeps the %s recovery veto after header filtering (cached=%s)",
+    async (_headerName, cached) => {
+      const config = routedConfig();
+      config.hostname = "127.0.0.2";
+      let fetches = 0;
+      const request = () => new Request("http://localhost/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...Object.fromEntries(codexHeaders()) },
+        body: JSON.stringify({ model: "xai/grok-4.5", input: encryptedInput(), stream: false }),
+      });
+      if (cached) {
+        globalThis.fetch = (async input => {
+          fetches += 1;
+          return String(input).includes("chatgpt.com")
+            ? new Response(recoverySse("Cached private assignment."))
+            : providerResponse();
+        }) as typeof fetch;
+        expect((await handleResponses(request(), config, { model: "", provider: "" }, {
+          admission: { kind: "loopback", source: "loopback" },
+        })).status).toBe(200);
+        fetches = 0;
+      }
+      globalThis.fetch = (async () => {
+        fetches += 1;
+        throw new Error("a forbidden WebSocket recovery must not reach any upstream");
+      }) as typeof fetch;
+
+      const response = await handleResponses(request(), config, { model: "", provider: "" }, {
+        admission: { kind: "loopback", source: "loopback" },
+        agentTaskRecoveryApiKeyHeaderPresent: true,
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: "unreadable_encrypted_agent_task", recovery_reason: "admission_denied" },
+      });
+      expect(fetches).toBe(0);
+    },
+  );
 });
 
 

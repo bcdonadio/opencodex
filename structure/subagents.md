@@ -143,6 +143,13 @@ unambiguous ordered sequence. One fixed-endpoint request forwards separate parts
 replacement compares the complete original item snapshot before splicing the run. Recovery output
 is model-transcribed plaintext, not cryptographic fidelity proof, and no internal outage retry is added.
 
+Admission follows the Responses listener that actually accepted the request. A request resolved as
+loopback may recover through a dedicated loopback companion even when the shared public bind requires
+authentication; the public listener cannot claim that admission, and the native bearer, matching
+account id, proxy-secret, and API-key-header checks still run before cache access. Uncached history
+uses the typed recovery result and stores only its successful string assignment, so a failed result
+cannot enter the plaintext cache as an object.
+
 `src/server/responses/encrypted-payload.ts` uses bounded concatenation only to recognize otherwise
 unreadable split-token shapes. The sanitizer preserves just those fragment objects and continues
 normalizing independent plaintext slots. Detection never authorizes reconstruction or recovery;

@@ -516,7 +516,7 @@ use the `[ocx:<adapter>:<event>]` prefix, go to the proxy terminal, and are buff
 `ocx debug provider logs` / `ocx debug provider logs -f`. Usage JSONL tails with
 `ocx debug usage logs [-f]`. Separate from provider buffered logs above.
 
-The shared Responses path follows the [bounded multipart recovery contract](subagents.md#multipart-encrypted-task-recovery); credential admission and retry policy remain unchanged.
+The shared Responses path follows the [bounded multipart recovery contract](subagents.md#multipart-encrypted-task-recovery); credential admission and retry policy remain unchanged. Encrypted-task recovery uses the listener-resolved loopback admission carried by `src/server/index.ts`; a separately authenticated public bind cannot make its dedicated loopback companion look remote inside `src/server/responses/core.ts`.
 
 ## Remote credentials and bounded sessions
 

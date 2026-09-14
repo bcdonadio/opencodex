@@ -57,6 +57,8 @@ export interface WsData {
    * attribution.
    */
   admission?: DataPlaneAdmission;
+  /** Presence-only recovery veto captured before the generic forward-header allowlist runs. */
+  agentTaskRecoveryApiKeyHeaderPresent?: boolean;
   authContext?: CodexAuthContext; // last resolved account decision for observability/registry cleanup
   cancel?: () => void; // cancels the in-flight stream reader/fetch
   turnId?: number; // monotonically increasing per socket; prevents stale frames after replacement turns
@@ -134,6 +136,8 @@ export function buildResponsesWsData(
     ...(clientHeaders ? { clientIdentitySnapshot: snapshotClientIdentity(clientHeaders) } : {}),
     headers,
     admission,
+    agentTaskRecoveryApiKeyHeaderPresent: !!clientHeaders
+      && (clientHeaders.has("x-api-key") || clientHeaders.has("x-opencodex-api-key")),
     connectionId: `ws_${crypto.randomUUID()}`,
     requestSequenceOnConnection: 0,
     ...(admissionLease ? { admissionLease } : {}),

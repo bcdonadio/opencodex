@@ -42,6 +42,7 @@ root pruning cannot erase attachment provenance; the same text participates in t
 Native Composer/MCP behavior and text-only historical replay remain unchanged.
 
 The shared Responses path follows the [bounded multipart recovery contract](../subagents.md#multipart-encrypted-task-recovery); credential admission and retry policy remain unchanged.
+Encrypted-task recovery uses the listener-resolved loopback admission carried by `src/server/index.ts`; a separately authenticated public bind cannot make its dedicated loopback companion look remote inside `src/server/responses/core.ts`.
 
 ## Media iteration retention
 
