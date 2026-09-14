@@ -312,7 +312,7 @@ Codex에서 model이 빠졌거나 catalog 순서/가시성이 이상해 보이�
    이 규칙은 라이브 발견 실패 시 폴백 동작을 바꾸지 않습니다.
 4. **Cursor `GetUsableModels`** - Cursor adapter는 `/models`가 아니라 protobuf `GetUsableModels` RPC로 model을 찾습니다. 그래서 Cursor 쪽 변경이 다른 provider와 무관하게 어떤 id가 보이는지 바꿀 수 있습니다.
 5. **캐시와 `ocx sync`** - live catalog는 약 5분(`modelCacheTtlMs`, 기본값 `300000`) 동안 캐시됩니다. `ocx sync`를 실행하면 새로 가져와서 catalog를 즉시 다시 쓸 수 있습니다.
-6. **실행 중인 Codex `app-server`** - 오래 살아 있는 Codex `app-server`(Desktop / CLI background host)가 이전 목록을 메모리에 쥐고 있으면 디스크 catalog를 다시 쓰는 것만으로는 부족합니다. `ocx sync`와 `ocx sync-cache`는 그런 process를 감지하면 경고합니다. `ocx sync --restart-codex`로 다시 시작하거나(아니면 일치하는 `app-server` process를 직접 중지한 뒤), Codex가 다시 만들게 해서 새 목록이 보이게 하세요.
+6. **실행 중인 Codex `app-server`** - 오래 살아 있는 Codex `app-server`(Desktop / CLI background host)가 이전 목록을 메모리에 쥐고 있으면 디스크 catalog를 다시 쓰는 것만으로는 부족합니다. `ocx sync`와 `ocx sync-cache`는 그런 process를 감지하면 경고합니다. `ocx sync --restart-codex`는 그 process를 재시작하고 macOS·Linux·Windows에서 Codex 데스크톱 앱을 완전히 종료한 뒤 다시 띄워 선택기가 카탈로그를 다시 읽게 합니다. 데스크톱 앱을 그대로 두려면 `--restart-app-server-only`를 쓰거나 일치하는 `app-server` process를 직접 중지하세요.
 
 :::caution[다른 로컬 writer]
 catalog write(`opencodex-catalog.json`, `config.toml`)는 opencodex 내부에서만 원자적입니다. 이것은 두 개의 opencodex 소유 writer가 경합할 때 반쯤만 써진 파일을 막아줄 뿐입니다. 다른 로컬 process, file watcher, sync agent가 opencodex가 쓴 뒤에 catalog visibility나 순서를 다시 쓸 가능성은 막지 못합니다. Codex는 별도의 `models_cache.json`을 유지하고 독립적으로 갱신할 수 있으므로, 이 과정에서 `opencodex-catalog.json`을 다시 쓰지 않고도 보이는 목록이 바뀔 수 있습니다. proxy가 실행 중인데 model이 예상치 않게 바뀌면, 경쟁 writer를 중지하거나 재설정한 뒤 `ocx sync`를 실행하세요. 이것은 외부 writer 위험이지, 확인된 opencodex 결함이 아닙니다.
@@ -376,6 +376,6 @@ opencodex가 managed [background service](/reference/cli/#ocx-service)로 실행
 
 ## 페이지 분할 기록 보호에 따른 거부
 
-영향받는 기록 저장소가 페이지 분할을 지원하면 프로바이더 전환이 `history_paginated_requires_native_writer`로 거부될 수 있습니다. OpenCodex는 Codex 밖에서 순번을 지정하는 대신 현재 설정, 프로필, 카탈로그, 대화 원본과 복원 근거를 보존합니다. 변환 가능한 저장소의 `legacy` 행도 포함됩니다. 외부 프로바이더 보존처럼 전환을 하지 않는 경로는 계속 사용할 수 있습니다.
+영향받는 기록 저장소가 페이지 분할을 지원하면 프로바이더 전환이 `history_paginated_requires_native_writer`를 반환할 수 있습니다. 이 이유로는 Codex 설정, 참조 프로필, 모델 카탈로그를 더 이상 거부하지 않습니다. `ocx sync`와 `ocx start`는 해당 파일과 `model_catalog_json`을 계속 쓰므로 Codex 모델 선택기에는 OpenCodex가 라우팅하는 모델이 모두 그대로 보입니다. 대화 기록의 프로바이더 재지정을 건너뛰는 것은 이 이유뿐이며, 페이지 분할 순번은 Codex 자체의 네이티브 기록 작성자가 할당하고 재시도해도 달라지지 않기 때문입니다. 읽을 수 없는 상태 데이터베이스, 식별자가 바뀐 대화 원본, 실행하지 못한 사전 검사처럼 다른 기록 사전 검사 이유는 나중에 성공할 수 있으므로 전환 전체를 거부하고 되돌립니다. 이 상태에서 OpenCodex는 페이지 분할 대화 원본이나 스레드 행을 수정하지 않습니다. 기존 대화는 이미 붙어 있는 프로바이더를 유지하고 이전되지 않으며, 새 대화는 평소처럼 프록시를 통해 라우팅됩니다. 재지정을 건너뛸 때 홈에 이미 있던 `[model_providers.opencodex]` 테이블은 폐기하지 않고 유지합니다. root-override(loopback) 형식에서도 같아서, 행이 `opencodex`로 표시된 대화는 아직 존재하는 프로바이더 id를 유지합니다. 변환 가능한 저장소의 `legacy` 행도 포함됩니다. CLI는 `Codex resume history: left to Codex's native writer (history_paginated_requires_native_writer)`를 출력합니다. `ocx restore`와 Codex 설정 제거는 여전히 `history_paginated_requires_native_writer`로 거부됩니다. 스레드 행이 아직 참조하는데 `[model_providers.opencodex]` 정의를 걷어내면 그 대화를 해석할 수 없고, 복원 경로에는 호환 프로바이더 테이블을 남겨 둘 방법이 없습니다. 이미 페이지 분할된 홈은 지금은 제품으로 제거할 수 없습니다. 의도한 동작이 아니라 알려진 미해결 작업입니다.
 
-대화가 참조하는 프로바이더 정의를 삭제하거나, `ocx sync`·레거시 복구를 반복하거나, 실행 중인 대화 원본을 고쳐 우회하지 마세요. 현재 파일을 보존하고 복구 전에 해당 대화를 닫은 뒤, 개인 대화 내용을 올리지 말고 정확한 오류와 버전을 보고하세요. 네이티브 기록 작성자와 조정하는 검증된 수정이 필요합니다. 백업이나 스크립트 성공만으로 표시 복구가 증명되지는 않으므로 Codex를 다시 열어 확인하세요.
+대화를 강제로 이전하려고 실행 중인 페이지 분할 대화 원본이나 스레드 행을 고치지 마세요. 복구 전에 해당 대화를 닫은 뒤, 개인 대화 내용을 올리지 말고 정확한 오류와 버전을 보고하세요. 백업이나 스크립트 성공만으로 표시 복구가 증명되지는 않으므로 Codex를 다시 열어 확인하세요.

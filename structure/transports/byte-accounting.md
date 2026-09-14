@@ -34,6 +34,9 @@ truncates diagnostic text at UTF-8 code-point boundaries without allocating arra
 byte sizing retains TextEncoder's coercion behavior for legacy non-string runtime callers.
 These optimizations do not add request queues, retry policies, or RSS-based admission gates.
 
+Translated audio/file admission follows the [final-adapter input contract](../adapters/registry.md#untranslated-input-media); native raw passthrough remains separate.
+Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
+
 Encrypted collaboration recovery keeps listener admission and typed cache results outside the byte
 accounting shortcuts: only a successful string assignment reaches `Buffer.byteLength`, and a
 dedicated loopback companion carries its resolved loopback admission into `src/server/responses/core.ts`.

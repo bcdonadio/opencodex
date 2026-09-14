@@ -40,6 +40,7 @@ import {
   pickAlternateCodexAccount,
   getEffectiveActiveCodexAccountId,
   resolveCodexAccountForThreadDetailed,
+  type CodexAffinityDecision,
 } from "./routing";
 import {
   entitledCodexAccountIdsForModel,
@@ -141,6 +142,8 @@ export type CodexAuthContext =
       probeLeaseId?: string;
       /** Native model quota group selected for this request, when known. */
       quotaScope?: CodexQuotaScope;
+      /** What happened to this thread's binding on this request (#4546). */
+      affinityDecision?: CodexAffinityDecision;
       /** Scope that owns `probeLeaseId`, when it is a scoped recovery probe. */
       probeQuotaScope?: CodexQuotaScope;
     }
@@ -865,6 +868,9 @@ export async function resolveCodexAuthContext(
   const affinityKey = fixedAccountId === undefined && !requestScopedMainCredential
     ? codexPoolAffinityKey(headers)
     : undefined;
+  // Why this request is on this account, carried to the request log so a move reads as an event
+  // instead of something inferred from account labels across lines (#4546).
+  let affinityDecision: CodexAffinityDecision | undefined;
   // Retained startup recovery makes the physical main identity ineligible. Routing
   // can still preserve service by selecting a healthy configured pool account. A
   // request-owned bearer likewise cannot inspect or reconcile file-main state.
@@ -953,6 +959,7 @@ export async function resolveCodexAuthContext(
         );
     if (resolution.status === "expired") throw new CodexThreadAffinityExpiredError(resolution.accountId);
     const selected = resolution.status === "selected" ? resolution.accountId : null;
+    affinityDecision = "affinity" in resolution ? resolution.affinity : undefined;
     if (!selected) {
       // A retry that excluded a failed Pool account may still use the validated caller-owned
       // main credential. Treating every exclusion as if main itself had failed strands a healthy
@@ -1149,6 +1156,7 @@ export async function resolveCodexAuthContext(
       ...(quotaScope ? { quotaScope } : {}),
       ...(probeLeaseId ? { probeLeaseId } : {}),
       ...(probeQuotaScope ? { probeQuotaScope } : {}),
+      ...(affinityDecision ? { affinityDecision } : {}),
     };
   } catch (cause) {
     if (probeLeaseId && probeQuotaScope) releaseCodexQuotaScopeProbeLease(accountId, probeQuotaScope, probeLeaseId);
