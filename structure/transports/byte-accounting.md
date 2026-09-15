@@ -1,5 +1,8 @@
 # Byte Accounting
 
+Responses body-reader limits and lifetime handling follow the
+[core module ownership](responses.md#core-module-ownership). This surface retains its existing behavior.
+
 How opencodex measures request and stream bytes without allocating copies solely to count
 them. These contracts are shared by request parsing, SSE rewriting, the provider adapters and
 the translator budget, which is why so many documents link here rather than restating them.

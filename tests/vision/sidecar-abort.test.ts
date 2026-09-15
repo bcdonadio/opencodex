@@ -609,10 +609,12 @@ describe("sidecar abort propagation", () => {
     );
 
     expect(resolved?.authContext).toMatchObject({
-      kind: "main-pool",
-      accountId: MAIN_CODEX_ACCOUNT_ID,
-      credentialSource: "caller",
+      kind: "main",
+      accountId: null,
+      selectedMain: true,
     });
+    expect(resolved?.authContext).not.toHaveProperty("writerGeneration");
+    expect(resolved?.authContext).not.toHaveProperty("mainQuotaWriter");
     expect(resolved?.headers.get("authorization")).toBe("Bearer caller-keyring-token");
     expect(resolved?.headers.get("chatgpt-account-id")).toBe("caller-keyring-account");
     expect(resolved?.recordOutcome).toBeUndefined();

@@ -1,5 +1,8 @@
 # xAI Grok Provider
 
+xAI uses the same shared credential and delivery policies through the Responses
+[core module ownership](../transports/responses.md#core-module-ownership). This surface retains its existing behavior.
+
 The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
 is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged.
 
@@ -94,7 +97,7 @@ privately to final dispatch; preliminary route selection does not inject Go-only
 
 Devin CLI credential path composition in `src/oauth/devin/cli-import.ts` follows the selected platform: Windows uses Win32 APPDATA paths, other platforms use POSIX XDG-data paths. The explicit absolute override remains verbatim; credential parsing and login behavior are unchanged.
 
-Provider-scoped catalog hints remain isolated by provider in `src/providers/registry.ts`. The
+Provider-scoped catalog hints remain isolated by provider in `src/providers/registry/entries-core.ts`. The
 OpenCode Go `deepseek-v4.1-flash` 1,048,576-token context hint does not change xAI model metadata or
 transport behavior.
 The first-party DeepSeek `deepseek-flash` native `text`/`image` declaration is likewise scoped to

@@ -45,11 +45,12 @@ export function codexAccountLogLabel(account: CodexAccount): string {
     : fallbackCodexAccountLogLabel(account.id);
 }
 
-/** Effective durable label for a resolved Codex Pool account. */
+/** Effective observation label; a caller's selected-main label grants no Pool ownership. */
 export function codexAuthContextLogLabel(
   authCtx: CodexAuthContext,
   config: Pick<OcxConfig, "codexAccounts">,
 ): "main" | `p${string}` | undefined {
+  if (authCtx.kind === "main" && authCtx.selectedMain === true) return "main";
   if (authCtx.kind !== "pool" && authCtx.kind !== "main-pool") return undefined;
   if (authCtx.accountId === MAIN_CODEX_ACCOUNT_ID) return "main";
   const account = (config.codexAccounts ?? []).find(candidate => candidate.id === authCtx.accountId);

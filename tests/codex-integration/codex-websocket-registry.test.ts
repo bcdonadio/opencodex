@@ -72,6 +72,15 @@ describe("codex websocket registry", () => {
     expect(getTrackedCodexWebSocketCountForAccount("__main__")).toBe(0);
   });
 
+  test("selected caller main is not owned or invalidated by the main Pool account", () => {
+    const caller = mockWs({ authContext: { kind: "main", accountId: null, selectedMain: true } });
+    registerCodexWebSocket(caller.ws);
+    expect(getTrackedCodexWebSocketCountForAccount("__main__")).toBe(0);
+    expect(invalidateCodexWebSocketsForAccount("__main__")).toBe(0);
+    expect(caller.closed).toEqual([]);
+    unregisterCodexWebSocket(caller.ws);
+  });
+
   test("confirmed native-main transition cancels and closes tracked Responses WebSocket work", () => {
     let cancelled = 0;
     const mainPool = mockWs({

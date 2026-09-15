@@ -3,7 +3,6 @@ import {
   CodexPoolAuthenticationError,
   headersForCodexAuthContext,
   hasCallerCodexBearer,
-  isCallerBackedMainPoolContext,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
   releaseCodexAuthContextProbeLease,
@@ -120,10 +119,12 @@ export function captureExplicitOpenAiCallerAuth(incomingHeaders: Headers, config
 function directSidecarHeaders(
   incomingHeaders: Headers,
   config: CodexAuthPolicyConfig,
+  authContext: CodexAuthContext,
+  modelId?: string,
   admission?: Pick<DataPlaneAdmission, "source">,
 ): Headers | undefined {
   if (!explicitSidecarAuth(incomingHeaders)) return undefined;
-  const selected = headersForCodexAuthContext(incomingHeaders, { kind: "main", accountId: null }, config, undefined, admission);
+  const selected = headersForCodexAuthContext(incomingHeaders, authContext, config, modelId, admission);
   return selected;
 }
 
@@ -200,13 +201,16 @@ export async function resolveFirstUsableOpenAiSidecar(
     }
     if (candidate.accountMode === "direct") {
       if (!callerBearerMayBeForwarded || !hasCallerCodexBearer(incomingHeaders)) continue;
-      const headers = directSidecarHeaders(incomingHeaders, policy, options.admission);
-      if (!headers) continue;
+      if (!explicitSidecarAuth(incomingHeaders)) continue;
       const authContext = await resolveCodexAuthContext(incomingHeaders, config, "direct", {
         codexAuthPolicy: policy,
         admission: options.admission,
         modelId: options.modelId,
+        signal: options.signal,
       });
+      options.signal?.throwIfAborted();
+      const headers = directSidecarHeaders(incomingHeaders, policy, authContext, options.modelId, options.admission);
+      if (!headers) continue;
       return {
         ...candidate,
         authContext,
@@ -225,7 +229,7 @@ export async function resolveFirstUsableOpenAiSidecar(
     let selectedHeaders: Headers;
     try {
       options.signal?.throwIfAborted();
-      selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, policy, undefined, options.admission);
+      selectedHeaders = headersForCodexAuthContext(incomingHeaders, authContext, policy, options.modelId, options.admission);
     } catch (error) {
       releaseCodexAuthContextProbeLease(authContext);
       throw error;
@@ -239,15 +243,17 @@ export async function resolveFirstUsableOpenAiSidecar(
       authContext,
       headers: selectedHeaders,
       ...((authContext.kind === "pool" || authContext.kind === "main-pool")
-        && !isCallerBackedMainPoolContext(authContext)
         ? {
           recordOutcome: (outcome: CodexUpstreamOutcome) => recordCodexUpstreamOutcome(
             config,
             authContext.accountId,
             outcome,
             {
+              modelId: options.modelId,
               threadId: authContext.affinityKey,
+              fixedAccount: authContext.fixedAccount,
               probeLeaseId: authContext.probeLeaseId,
+              probeQuotaScope: authContext.probeQuotaScope,
               writerGeneration: authContext.writerGeneration,
               // Same fence as the exact-account recorder above (#2892 gap 4).
               ...(authContext.kind === "pool" ? { credentialGeneration: authContext.generation } : {}),

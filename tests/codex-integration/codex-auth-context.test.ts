@@ -19,8 +19,10 @@ import {
   cooldownErrorResponse,
   headersForCodexAuthContext,
   materializeCodexUpstreamAuth,
+  materializeCodexUpstreamAuthAsync,
   CodexMainSubstitutionUnavailableError,
   isCodexAuthContextUsable,
+  codexPoolAffinityKey,
   resolveCodexAuthContext,
   shouldMarkAccountNeedsReauthForCodexAuthFailure,
   stripCodexRuntimeProviderFields,
@@ -438,9 +440,9 @@ describe("Codex auth context", () => {
         requestScopedMainCredential: true,
         beginCodexAccountSelection: codexAccountSelectionForTurn(turn!),
       })).resolves.toMatchObject({
-        kind: "main-pool",
-        accountId: MAIN_CODEX_ACCOUNT_ID,
-        credentialSource: "caller",
+        kind: "main",
+        accountId: null,
+        selectedMain: true,
       });
       expect(cfg.activeCodexAccountPinned).toBe(MAIN_CODEX_ACCOUNT_ID);
     } finally {
@@ -922,7 +924,7 @@ describe("Codex auth context", () => {
     });
   });
 
-  test("the canonical parent-thread affinity stays authoritative over Desktop fallback headers", async () => {
+  test("a parent-bearing Desktop request keys as its own thread, not as its parent (#4546 wp8)", async () => {
     const cfg = config();
     cfg.autoSwitchThreshold = 0;
     saveCodexAccountCredential("pool-a", {
@@ -938,11 +940,24 @@ describe("Codex auth context", () => {
     });
 
     const resolved = await resolveCodexAuthContext(headers, cfg, "pool");
-    expect(resolved).toMatchObject({
-      kind: "pool",
-      accountId: "pool-a",
-      affinityKey: "canonical-parent-thread",
-    });
+    expect(resolved).toMatchObject({ kind: "pool", accountId: "pool-a" });
+    if (resolved.kind !== "pool") throw new Error("expected pool context");
+    // The parent used to BE the key, so every child of one parent shared a single binding
+    // entry and none of them could hold one of their own. A child now keys as its own
+    // conversation; the parent qualifies placement, not identity.
+    expect(resolved.affinityKey?.startsWith("app:")).toBe(true);
+    expect(resolved.affinityKey).not.toContain("canonical-parent-thread");
+    expect(resolved.affinityKey).not.toContain("desktop-session-private");
+    expect(resolved.affinityKey).not.toContain("desktop-thread-private");
+    // Stable across turns that drop the parent header: the key is the session/thread pair.
+    expect(resolved.affinityKey).toBe(codexPoolAffinityKey(new Headers({
+      "session-id": "desktop-session-private",
+      "thread-id": "desktop-thread-private",
+    })));
+    // And distinct from the parent's own lane, which is what a parent-only request rides.
+    expect(resolved.affinityKey).not.toBe(codexPoolAffinityKey(new Headers({
+      "x-codex-parent-thread-id": "canonical-parent-thread",
+    })));
   });
 
   test("an oversized parent-thread id falls back to the bounded Desktop pair", async () => {
@@ -1249,12 +1264,17 @@ describe("Codex auth context", () => {
     });
 
     expect(ctx).toMatchObject({
-      kind: "main-pool",
-      accountId: MAIN_CODEX_ACCOUNT_ID,
-      credentialSource: "caller",
+      kind: "main",
+      accountId: null,
+      selectedMain: true,
     });
     expect(ctx).not.toHaveProperty("accessToken");
     expect(ctx).not.toHaveProperty("chatgptAccountId");
+    expect(ctx).not.toHaveProperty("writerGeneration");
+    expect(ctx).not.toHaveProperty("mainQuotaWriter");
+    expect(ctx).not.toHaveProperty("affinityKey");
+    expect(ctx).not.toHaveProperty("probeLeaseId");
+    expect(ctx).not.toHaveProperty("quotaScope");
     expect(storedMainReads).toBe(0);
     expect(materializeCodexUpstreamAuth(inbound, ctx)).toEqual(inbound);
     expect(cfg.activeCodexAccountId).toBe(MAIN_CODEX_ACCOUNT_ID);
@@ -1272,9 +1292,20 @@ describe("Codex auth context", () => {
     const ctx = await resolveCodexAuthContext(inbound, cfg, "pool", {
       requestScopedMainCredential: true,
     });
-    expect(ctx).toMatchObject({ credentialSource: "caller" });
+    expect(ctx).toMatchObject({ kind: "main", accountId: null, selectedMain: true });
     expect(() => materializeCodexUpstreamAuth(inbound, ctx, { substituteMainCredential: true }))
       .toThrow(CodexMainSubstitutionUnavailableError);
+    let storedMainRefreshes = 0;
+    await expect(materializeCodexUpstreamAuthAsync(inbound, ctx, {
+      substituteMainCredential: true,
+      nativeMainRefreshDependencies: {
+        refreshToken: async () => {
+          storedMainRefreshes += 1;
+          throw new Error("caller-owned main cannot refresh stored credentials");
+        },
+      },
+    })).rejects.toBeInstanceOf(CodexMainSubstitutionUnavailableError);
+    expect(storedMainRefreshes).toBe(0);
   });
 
   test("a manually pinned stored Pool account still outranks a request-scoped main bearer", async () => {
@@ -1340,9 +1371,9 @@ describe("Codex auth context", () => {
     });
 
     expect(ctx).toMatchObject({
-      kind: "main-pool",
-      accountId: MAIN_CODEX_ACCOUNT_ID,
-      credentialSource: "caller",
+      kind: "main",
+      accountId: null,
+      selectedMain: true,
     });
     expect(callerEntitlementChecks).toBe(1);
     expect(cfg.activeCodexAccountId).toBe(MAIN_CODEX_ACCOUNT_ID);
@@ -1551,9 +1582,9 @@ describe("Codex auth context", () => {
       callerEntitled: true,
     });
     expect(context).toMatchObject({
-      kind: "main-pool",
-      accountId: MAIN_CODEX_ACCOUNT_ID,
-      credentialSource: "caller",
+      kind: "main",
+      accountId: null,
+      selectedMain: true,
     });
     expect(directEntitlementChecks).toBe(1);
     expect(cfg.activeCodexAccountId).toBe(MAIN_CODEX_ACCOUNT_ID);

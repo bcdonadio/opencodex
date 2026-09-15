@@ -2,12 +2,20 @@ import { describe, expect, test } from "bun:test";
 import {
   CODEX_ACCOUNT_LOG_LABEL_RE,
   codexAccountLogLabel,
+  codexAuthContextLogLabel,
   createCodexAccountLogLabel,
   fallbackCodexAccountLogLabel,
   withCodexAccountLogLabel,
 } from "../../src/codex/account-label";
 
 describe("codex account privacy labels", () => {
+  test("selected caller main has an observation label without a Pool account id", () => {
+    const context = { kind: "main" as const, accountId: null, selectedMain: true as const };
+    expect(codexAuthContextLogLabel(context, { codexAccounts: [] })).toBe("main");
+    expect(context.accountId).toBeNull();
+    expect(codexAuthContextLogLabel({ kind: "main", accountId: null }, { codexAccounts: [] })).toBeUndefined();
+  });
+
   test("generates non-PII log labels", () => {
     expect(createCodexAccountLogLabel()).toMatch(CODEX_ACCOUNT_LOG_LABEL_RE);
   });
