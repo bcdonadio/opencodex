@@ -21,6 +21,11 @@ plus `openai-apikey/<model>` for the configured API key. Pool includes main plus
 Direct uses only the caller/main bearer. The routes do not fall back to one another. Shipped v1
 configs migrate to marker 2 and preserve `config.json.pre-openai-tiers-v2.bak` for manual restore.
 
+When a request leaves the canonical ChatGPT route for another Responses provider, OpenCodex removes
+the ChatGPT-only top-level `access_programs` field before forwarding it. Canonical ChatGPT requests
+keep the field, and the client's raw request is left unchanged. Direct Meta Muse also normalizes
+Codex web-search declarations for both the default and Contributor Muse Spark 1.3 models.
+
 Within Pool mode, a request carrying a validated native Codex login can use that login when the
 selected stored account is cooling down and no eligible stored alternative or recovery probe is
 available. This also covers a new request blocked before sending, following the same caller

@@ -448,7 +448,11 @@ operator-supplied header wins case-insensitively. Renamed providers are covered 
 fixed key-auth destination still matches the registry; custom and lookalike URLs receive nothing.
 Muse Spark's Responses sanitizer also drops the provider-rejected `search_content_types` and
 `indexed_web_access` fields from plain `web_search` tools while preserving preview tools and
-unrelated models.
+unrelated models. Direct Meta also applies this guard to the default `muse-spark-1.3`;
+Zen/Go retain their Contributor-only model scope. The same noncanonical boundary drops the ChatGPT-only top-level
+`access_programs` parameter before forwarding to public Responses destinations. Canonical
+ChatGPT forwarding preserves it when present, and every rewrite works on a detached body so the
+caller-owned raw request remains unchanged.
 
 Direct Meta Muse / Meta Model Responses (`https://api.meta.ai/v1`) also rejects function tool
 names longer than 64 characters or containing characters outside `[a-zA-Z0-9_-]`. After namespace

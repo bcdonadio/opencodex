@@ -7,6 +7,9 @@ Native Codex Spark-specific request exceptions are absent. General Lite and name
 remain shared [Responses compatibility](../transports/responses.md#responses-httpsse), including
 other providers whose models happen to share a name fragment.
 
+That shared boundary also removes ChatGPT-only top-level `access_programs` from noncanonical
+Responses requests and preserves it for canonical ChatGPT forwarding.
+
 ## OpenCode Go chronological instructions
 
 For the registry-recognized OpenCode Go Chat destination and exact model

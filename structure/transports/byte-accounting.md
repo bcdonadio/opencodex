@@ -7,6 +7,9 @@ How opencodex measures request and stream bytes without allocating copies solely
 them. These contracts are shared by request parsing, SSE rewriting, the provider adapters and
 the translator budget, which is why so many documents link here rather than restating them. Response-attached WebSocket telemetry follows the [stage record identity contract](responses.md#passthrough-sse-stream-shapes-314). Cursor's localized native-shell names follow the [routing-commentary guard contract](../providers/cursor.md#cursor-native-exec).
 
+Responses destination sanitization remains owned by [Responses Transport](responses.md#responses-httpsse),
+including removal of ChatGPT-only top-level `access_programs` on noncanonical routes.
+
 ## Request-copy accounting
 
 `src/server/request-decompress.ts` observes the UTF-8 sizes of decoded text and reserialized JSON

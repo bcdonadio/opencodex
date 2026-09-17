@@ -120,6 +120,13 @@ export function stripInternalChatMessageMetadataPassthrough(body: unknown): unkn
   return changed ? { ...body, input } : body;
 }
 
+/** ChatGPT account access-program selection is not part of the public Responses API. */
+export function stripChatGptAccessPrograms(body: unknown): unknown {
+  if (!isPlainObject(body) || !Object.hasOwn(body, "access_programs")) return body;
+  const { access_programs: _accessPrograms, ...rest } = body;
+  return rest;
+}
+
 /**
  * When `store` is false, the upstream API does not persist response items. Any item ID
  * forwarded in `input` is then interpreted as a reference to a stored item that does not

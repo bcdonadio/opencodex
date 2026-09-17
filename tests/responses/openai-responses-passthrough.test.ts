@@ -289,7 +289,7 @@ describe("native routed code-mode result visibility", () => {
     expect(wire.previous_response_id).toBe("prior-xai-response");
     expect(wire).not.toHaveProperty("instructions");
     expect(wire.input[0]).toEqual({
-      role: "system", content: `Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}`,
+      role: "system", content: `Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}\n\n${CODE_MODE_HOST_CONTRACT_SENTENCE}`,
     });
     expect(wire.input[1]).toMatchObject({
       type: "custom_tool_call_output", call_id: "call_probe", output: "tool-result-marker",
@@ -4887,4 +4887,33 @@ test("canonical Responses hint suppression is opt-in at the request boundary", a
       expect(text).toContain("response.completed");
     }
   } finally { globalThis.fetch = savedFetch; }
+});
+
+
+describe("ChatGPT access programs destination boundary", () => {
+  test.each([
+    { baseUrl: "https://api.meta.ai/v1", authMode: "oauth" as const, model: "muse-spark-1.3", preserve: false },
+    { baseUrl: "https://api.meta.ai/v1", authMode: "oauth" as const, model: "muse-spark-1.3-contributor", preserve: false },
+    { baseUrl: "https://api.openai.com/v1", authMode: "key" as const, model: "gpt-5.5", preserve: false },
+    { baseUrl: "https://responses.example.test/v1", authMode: "forward" as const, model: "model", preserve: false },
+    { baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" as const, model: "gpt-5.5", preserve: true },
+  ])("routes access_programs for $baseUrl / $model", ({ baseUrl, authMode, model, preserve }) => {
+    const rawBody = {
+      model,
+      input: "hello",
+      access_programs: { cyber: "standard" },
+      metadata: { example: "preserved" },
+    };
+    const before = structuredClone(rawBody);
+    const request = createResponsesPassthroughAdapter({
+      adapter: "openai-responses", baseUrl, authMode,
+    }).buildRequest({
+      modelId: model, context: { messages: [] }, stream: true, options: {}, _rawBody: rawBody,
+    }, { headers: new Headers() });
+    const body = JSON.parse(request.body);
+    if (preserve) expect(body.access_programs).toEqual({ cyber: "standard" });
+    else expect(body).not.toHaveProperty("access_programs");
+    if (authMode !== "forward") expect(body.metadata).toEqual({ example: "preserved" });
+    expect(rawBody).toEqual(before);
+  });
 });

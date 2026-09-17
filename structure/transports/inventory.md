@@ -11,6 +11,10 @@ changes translated message placement only; endpoint selection and transport stay
 
 Shared parsing and streaming follow the [request-copy](byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](responses.md#passthrough-sse-stream-shapes-314).
 
+The [Responses transport](responses.md#responses-httpsse) owns destination-specific sanitization;
+noncanonical routes remove ChatGPT-only top-level `access_programs` while canonical ChatGPT
+forwarding preserves it.
+
 [Anthropic seed image metadata](../runtime.md#capability-aware-image-admission) supplies missing capability evidence; transport selection and image wire handling remain unchanged.
 
 ## Transport inventory

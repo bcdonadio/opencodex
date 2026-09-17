@@ -267,3 +267,27 @@ describe("#2617/#3378 Muse Spark web_search compatibility", () => {
     expect(Object.hasOwn(tool, "indexed_web_access")).toBe(false);
   });
 });
+
+
+describe("default Muse Spark direct Meta web_search", () => {
+  test.each([META_PROVIDER, META_PATH_PROVIDER])("sanitizes the default model on direct Meta", provider => {
+    const rawBody = {
+      tools: [webSearchTool(), { ...webSearchTool(), type: "web_search_preview" }],
+      input: [{ type: "additional_tools", tools: [webSearchTool()] }],
+    };
+    const before = structuredClone(rawBody);
+    const body = buildForProvider(provider, "muse-spark-1.3", rawBody);
+    const expected = { type: "web_search", search_context_size: "medium" };
+    expect(toolsOf(body)[0]).toEqual(expected);
+    expect((body.input as Array<{ tools: unknown[] }>)[0]!.tools[0]).toEqual(expected);
+    expect(toolsOf(body)[1]).toEqual({ ...webSearchTool(), type: "web_search_preview" });
+    expect(rawBody).toEqual(before);
+  });
+
+  test.each([ZEN_PROVIDER, ZEN_GO_PROVIDER, { ...META_PROVIDER, baseUrl: "https://api.meta.ai.example/v1" }])(
+    "keeps the default-model fields outside direct Meta", provider => {
+      const body = buildForProvider(provider, "muse-spark-1.3", { tools: [webSearchTool()] });
+      expect(toolsOf(body)[0]).toEqual(webSearchTool());
+    },
+  );
+});

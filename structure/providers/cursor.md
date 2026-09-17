@@ -3,6 +3,8 @@
 The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
 is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged.
 
+Shared Responses destination sanitization is documented by the [Responses transport](../transports/responses.md#responses-httpsse); noncanonical routes remove ChatGPT-only top-level `access_programs`.
+
 Codex-native retirement does not retire a Cursor-owned model name. Cursor transport and
 namespace handling retain their provider contract; the bounded native scope lives in
 [the shared catalog](../catalog.md#shared-catalog).

@@ -6,6 +6,10 @@ Compatibility callers retain the public Responses ingress described by the
 The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
 is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged. Cursor's localized native-shell names follow the [routing-commentary guard contract](../providers/cursor.md#cursor-native-exec).
 
+The shared [Responses transport](../transports/responses.md#responses-httpsse) removes the
+ChatGPT-only top-level `access_programs` field on noncanonical destinations while leaving the
+caller-owned raw request unchanged.
+
 ## Standalone file transcription
 
 `src/server/audio-transcriptions.ts` owns `POST /v1/audio/transcriptions`, independently of

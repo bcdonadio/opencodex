@@ -8,6 +8,8 @@ is scoped to canonical ChatGPT Responses forwarding; other source-area behavior 
 
 Shared parsing and streaming follow the [request-copy](../transports/byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](../transports/byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](../transports/responses.md#passthrough-sse-stream-shapes-314).
 
+The adapter's destination-specific field sanitation follows the [Responses transport contract](../transports/responses.md#responses-httpsse): noncanonical Responses routes drop ChatGPT-only top-level `access_programs`, while canonical forwarding preserves it.
+
 ## Decision
 
 Runtime adapter construction has one authority: `src/adapters/registry.ts`.

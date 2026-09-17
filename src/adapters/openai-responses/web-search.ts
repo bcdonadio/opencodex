@@ -103,7 +103,7 @@ export function stripMuseSparkUnsupportedWebSearchFields(
 ): unknown {
   if (!isPlainObject(body)) return body;
   if (typeof modelId !== "string") return body;
-  if (!MUSE_SPARK_WEB_SEARCH_STRICT_MODELS.has(modelId.trim().toLowerCase())) return body;
+  const normalizedModel = modelId.trim().toLowerCase();
   let destination: string;
   try {
     const url = new URL(responseUrl);
@@ -113,6 +113,11 @@ export function stripMuseSparkUnsupportedWebSearchFields(
     return body;
   }
   if (!MUSE_SPARK_WEB_SEARCH_STRICT_RESPONSE_URLS.has(destination)) return body;
+  // Direct Meta rejects the same fields on the default 1.3 model too. Keep this
+  // exception destination-specific: Zen/Go's contract covers Contributor only.
+  const directMetaDefault = destination === "https://api.meta.ai/v1/responses"
+    && normalizedModel === "muse-spark-1.3";
+  if (!directMetaDefault && !MUSE_SPARK_WEB_SEARCH_STRICT_MODELS.has(normalizedModel)) return body;
 
   const rewriteTools = (tools: unknown[]): { tools: unknown[]; changed: boolean } => {
     let changed = false;
