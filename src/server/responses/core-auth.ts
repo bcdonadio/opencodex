@@ -167,6 +167,7 @@ export async function resolveResponsesCodexAuth(
   route: RouteResult,
   options: HandleResponsesOptions,
   credentialDomainWasRewritten = false,
+  retainAccountForUploadedFiles = false,
 ): Promise<ResponsesAuthResolution> {
   try {
     let authInputHeaders = codexRouteCredentialDomainHeaders(
@@ -266,6 +267,7 @@ export async function resolveResponsesCodexAuth(
         isDirectCallerEntitledToCodexModel: options.isDirectCallerEntitledToCodexModel,
         signal: options.abortSignal,
         nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
+        retainAccountForUploadedFiles,
       });
       options.onCodexAuthContextResolved?.(authCtx);
     } else {

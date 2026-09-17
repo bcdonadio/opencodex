@@ -27,7 +27,7 @@ export async function deliverAdapterResponse(
     | "rememberKiroDeliveredFinalAnswer"
     | "responseStateOptions"
   >,
-  transportState: Pick<ResponsesTransport, "activeAdapter">,
+  transportState: Pick<ResponsesTransport, "activeAdapter" | "bindKeyUsageFromBridge">,
   sidecarState: Pick<ResponsesSidecarAuth, "routedCompaction">,
   responseEffects: Pick<
     ResponsesEffects,
@@ -100,6 +100,7 @@ export async function deliverAdapterResponse(
         stallTimeoutSec: config.stallTimeoutSec,
         hideThinkingSummary: parsed.options.hideThinkingSummary,
         declaredToolNames,
+        enforceDeclaredToolNames: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
       toolParameterSchemas,
         ...(options.onFirstOutput ? { onFirstOutput: options.onFirstOutput } : {}),
         ...(routedCompaction ? { compaction: true } : {}),
@@ -107,11 +108,7 @@ export async function deliverAdapterResponse(
         ...(logCtx.surface === "grok" ? { heartbeatStyle: "comment" as const } : {}),
         onUsage: usage => {
           // Raw adapter usage, pre wire-normalization (see the runTurn branch above).
-          logCtx.usageFromBridge = true;
-          if (usage) {
-            logCtx.usage = usage;
-            if (logCtx.activeAttempt) logCtx.activeAttempt.usage = usage;
-          }
+          transportState.bindKeyUsageFromBridge(usage);
         },
         onCompletedResponse: (response: Record<string, unknown>, providerState?: OcxProviderContinuationState) => {
           recordCompactionOutput(logCtx, response);
@@ -180,17 +177,14 @@ export async function deliverAdapterResponse(
       hideThinkingSummary: parsed.options.hideThinkingSummary,
       toolNsMap,
       declaredToolNames,
+      enforceDeclaredToolNames: options.inboundWire !== "chat" && options.inboundWire !== "anthropic",
       toolParameterSchemas,
       freeformToolNames,
       toolSearchToolNames,
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
-        logCtx.usageFromBridge = true;
-        if (usage) {
-          logCtx.usage = usage;
-          if (logCtx.activeAttempt) logCtx.activeAttempt.usage = usage;
-        }
+        transportState.bindKeyUsageFromBridge(usage);
       },
     });
     recordCompactionOutput(logCtx, json);

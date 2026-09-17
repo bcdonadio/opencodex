@@ -772,7 +772,7 @@ JSON mode: `payload`.
 
 ### `ocx system codex-restart`
 
-Restart the Codex app-server.
+Restart the Codex desktop app and app-servers.
 
 | Method | Route |
 |---|---|
@@ -780,7 +780,7 @@ Restart the Codex app-server.
 
 | Flag | Value | Meaning |
 |---|---|---|
-| `--yes` | boolean | Required: restarts the operator's running Codex app-server. |
+| `--yes` | boolean | Required: fully quits and relaunches the operator's Codex desktop app and restarts its app-servers. |
 | `--json` | boolean | Emit the restart result as JSON. |
 
 JSON mode: `payload`.

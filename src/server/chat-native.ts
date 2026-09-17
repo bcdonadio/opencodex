@@ -26,8 +26,12 @@ import {
   applyUpstreamRecoveryInit,
   fetchWithResetRetry,
   fetchWithTransientRetry,
+  isNonReplayableResponse,
+  isReplayRefusalCode,
+  isReplayRefusalResponse,
   prepareSameTarget429Wait,
   type UpstreamSendRecovery,
+  UPSTREAM_RESET_REPLAY_REFUSED_CODE,
 } from "../lib/upstream-retry";
 import {
   isTranslatorBudgetExceededError,
@@ -52,8 +56,10 @@ import { linkAbortSignal } from "./responses";
 import {
   addFinalRequestLog,
   beginRequestAttempt,
-  noteAttemptSend,
   observeRequestTransport,
+  noteProviderAttemptSend,
+  recordKeyAttemptFailure,
+  recordKeyWireAttemptUsage,
   recordFirstOutput,
   recordAttemptCredentialSource,
   sealRequestAttemptIdentity,
@@ -350,18 +356,23 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
                 const encoding = new Headers(init.headers).get("accept-encoding");
                 if (!headers.has("accept-encoding") && encoding) headers.set("accept-encoding", encoding);
                 if (init.signal?.aborted) throw init.signal.reason;
-                noteAttemptSend(attempt, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
+                noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
                 const customFetch = (activeProvider as OcxProviderTransport).fetch;
                 onHttpDispatch();
                 const wireInit = applyUpstreamRecoveryInit({
                   ...init, method: request.method, headers, body: request.body,
                 }, transportRecovery);
-                if (!customFetch) return execute(request.url, wireInit);
+                if (!customFetch) {
+                  const executed = await execute(request.url, wireInit);
+                  if (!executed.ok) await recordKeyAttemptFailure(logCtx, executed, init.signal ?? upstream.signal);
+                  return executed;
+                }
                 const observe = transportObserver(logCtx);
                 observe({ kind: "send", transport: "http", body: wireInit.body,
                   target: diagnosticTarget(request.url, wireInit) });
                 const response = await customFetch(request.url, wireInit);
                 observe({ kind: "response", transport: "http", response });
+                if (!response.ok) await recordKeyAttemptFailure(logCtx, response, init.signal ?? upstream.signal);
                 return response;
               },
             }),
@@ -390,6 +401,11 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     let retries = 0;
     while (
       response.status === 429
+      // A 429 this proxy synthesized for a refused reset replay is not a provider rate
+      // limit: waiting and re-sending here is exactly the duplicate inference the refusal
+      // exists to stop. It kept the same shape under the old 502 only because 502 never
+      // matched this branch.
+      && !isNonReplayableResponse(response)
       && retryPolicy
       && retries < retryPolicy.attempts
       && transientSendAvailable()
@@ -403,7 +419,9 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
       if (upstream.signal.aborted) throw upstream.signal.reason;
       response = await send(activeRequest, "rate-limit-429");
     }
-    while (response.status === 429 && hasKeyPoolFailover(activeProvider)) {
+    // Same reason as above, plus a second one: rotating here would write a cooldown against
+    // a key that rate-limited nothing, and that false signal outlives the request.
+    while (response.status === 429 && !isNonReplayableResponse(response) && hasKeyPoolFailover(activeProvider)) {
       const rotated = rotateProviderTransportOn429(config, route.providerName, activeProvider, {
         retryAfter: response.headers.get("retry-after"),
         now: Date.now(),
@@ -489,6 +507,12 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     if (isCyberPolicyCode(upstreamCode) || classified.code === CYBER_POLICY_ERROR_CODE) {
       classified.code = CYBER_POLICY_ERROR_CODE;
       classified.type = cyberPolicyErrorType(upstreamType);
+    } else if (isReplayRefusalResponse(response) || isReplayRefusalCode(upstreamCode)) {
+      // 429 classifies as a rate limit and a rate limit already carries a code, so the branch
+      // below -- which only fills an EMPTY code -- could never restore this one. Without it the
+      // client is told the provider throttled the turn, when what happened is that this proxy
+      // declined to send it a second time.
+      classified.code = UPSTREAM_RESET_REPLAY_REFUSED_CODE;
     } else if (upstreamCode === "model_not_found") {
       classified.code = "model_not_found";
       classified.type = "invalid_request_error";
@@ -496,7 +520,10 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
       classified.code = upstreamCode;
     }
     const status = isCyberPolicyCode(classified.code) ? 400 : response.status;
-    const retryAfter = isCyberPolicyCode(classified.code)
+    // A refusal this proxy made has no wait to report. Synthesizing one here would hand the
+    // client the default two-second retry for a rate limit that never happened, which is the
+    // duplicate send the refusal exists to prevent.
+    const retryAfter = isCyberPolicyCode(classified.code) || isReplayRefusalCode(classified.code)
       ? undefined
       : resolveClientRetryAfter({
         status: response.status,
@@ -524,8 +551,10 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
       stallTimeoutSec: config.stallTimeoutSec,
       onFirstOutput: logIds ? () => recordFirstOutput(logCtx, logIds.start) : undefined,
       onUsage: usage => {
-        logCtx.usage = usage;
-        attempt.usage = usage;
+        if (!recordKeyWireAttemptUsage(logCtx, usage)) {
+          logCtx.usage = usage;
+          attempt.usage = usage;
+        }
       },
       onTerminal: (status: number, message?: string) => {
         terminalStatus = status;
@@ -615,8 +644,10 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
   if (!completion) return fail(502, "upstream response contained no choices", "upstream_error");
   const usage = usageFromChat(completion.usage);
   if (usage) {
-    logCtx.usage = usage;
-    attempt.usage = usage;
+    if (!recordKeyWireAttemptUsage(logCtx, usage)) {
+      logCtx.usage = usage;
+      attempt.usage = usage;
+    }
   }
   if (logIds) recordFirstOutput(logCtx, logIds.start);
   try {
