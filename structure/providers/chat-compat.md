@@ -363,6 +363,6 @@ preserves preceding answer text, never promotes vendor prose into execution auth
 and leaves discussed or quoted literals and code examples untouched. Qoder's explicit
 refusal of original images is unchanged.
 
-Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
+Canonical Responses identity sanitation removes top-level `user` and `safety_identifier` only at the strict ChatGPT Codex destination; narrowly scoped pre-output combo recovery follows [request-local target compatibility](../runtime.md#request-local-target-compatibility), and other adapter contracts remain unchanged.
 
 Upstream API-key usage follows the [physical-attempt account attribution contract](../gui-and-management-api.md#upstream-key-account-attribution), independently of subscription quota observations.

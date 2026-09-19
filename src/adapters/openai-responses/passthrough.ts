@@ -37,7 +37,7 @@ import { stripCanonicalForwardPromptCacheOptions, stripDeprecatedPromptCacheRete
 import { isPlainObject } from "./internal";
 import { normalizeToolSchemas, promoteClientLoadedTools, stripUnsupportedHostedTools } from "./tool-schema";
 import { annotateEmptyResponsesToolOutputs, backfillWebSearchQueries, normalizeResponsesToolResultAdjacency, repairOrphanedInputItems, repairOversizedReplayCallIds, repairUnidentifiedToolOutputItems } from "./tool-output-recovery";
-import { applyTierDecisionToResponsesBody, normalizeCanonicalForwardContinuationEnvelope, normalizeCanonicalForwardPromptEnvelope, stripCanonicalForwardSamplingParams, stripPreviousResponseId, stripStatefulResponsesParams, stripUnsupportedForwardParams } from "./canonical-forward";
+import { applyTierDecisionToResponsesBody, normalizeCanonicalForwardContinuationEnvelope, normalizeCanonicalForwardPromptEnvelope, stripCanonicalForwardSafetyIdentifier, stripCanonicalForwardSamplingParams, stripPreviousResponseId, stripStatefulResponsesParams, stripUnsupportedForwardParams } from "./canonical-forward";
 import { normalizeImageGenClientTools, preferConfiguredHostedTools } from "./image-gen";
 import { stripMuseSparkUnsupportedWebSearchFields, stripOpenAiOnlyWebSearchFields } from "./web-search";
 
@@ -306,6 +306,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         // Only the canonical ChatGPT backend rejects the retired field; a self-hosted or
         // third-party forward gateway may still accept it, so this must not be widened.
         if (isCanonicalOpenAiForwardProvider(provider)) {
+          outBody = stripCanonicalForwardSafetyIdentifier(outBody);
           outBody = stripCanonicalForwardSamplingParams(outBody);
           outBody = stripDeprecatedPromptCacheRetention(outBody, parsed.modelId);
           outBody = stripCanonicalForwardPromptCacheOptions(outBody);

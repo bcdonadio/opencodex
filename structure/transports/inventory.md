@@ -154,6 +154,6 @@ Provider-scoped approval reviewer settings are projected by the [catalog owner](
 Renamed fixed-key providers receive [missing reasoning metadata](../catalog.md#renamed-destination-reasoning-metadata) during derivation; explicit per-model entries and provider defaults retain precedence.
 
 Translated audio/file admission follows the [final-adapter input contract](../adapters/registry.md#untranslated-input-media); native raw passthrough remains separate.
-Canonical Responses identity sanitation and narrowly scoped pre-output combo recovery follow [request-local target compatibility](../runtime.md#request-local-target-compatibility); other adapter contracts remain unchanged.
+Canonical Responses identity sanitation removes top-level `user` and `safety_identifier` only at the strict ChatGPT Codex destination; narrowly scoped pre-output combo recovery follows [request-local target compatibility](../runtime.md#request-local-target-compatibility), and other adapter contracts remain unchanged.
 
 Shared response-log retention and native SSE inspection pacing follow the [bounded inspection contract](byte-accounting.md#response-log-inspection); other subsystem behavior remains unchanged.

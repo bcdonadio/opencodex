@@ -105,6 +105,13 @@ export function stripCanonicalForwardSamplingParams(body: unknown): unknown {
   return next;
 }
 
+/** The public Responses API accepts this identity hint, but the ChatGPT backend does not. */
+export function stripCanonicalForwardSafetyIdentifier(body: unknown): unknown {
+  if (!isPlainObject(body) || !Object.prototype.hasOwnProperty.call(body, "safety_identifier")) return body;
+  const { safety_identifier: _safetyIdentifier, ...rest } = body;
+  return rest;
+}
+
 /** Return the lossless text represented by one system message, or null when it is multimodal. */
 function canonicalForwardSystemText(item: Record<string, unknown>): string | null {
   const content = item.content;

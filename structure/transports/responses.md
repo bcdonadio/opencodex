@@ -16,6 +16,10 @@ both key and forward modes. A configured provider header with that name wins cas
 when the caller omits it, the adapter invents no client identity. This does not widen the canonical
 forward credential/metadata allowlist or copy any other caller header.
 
+Canonical ChatGPT Codex forwarding removes the public top-level `user` and `safety_identifier`
+identity hints because that destination rejects them before inference. Public API-key and
+noncanonical Responses destinations preserve both fields.
+
 Retired Codex Spark has no model-specific tool or Responses Lite override; general Lite handling and
 namespace scrubbing remain shared compatibility behavior. Codex quota/reset evidence follows the
 [shared/Reserve policy](../providers/openai-tiers.md#public-provider-contract), including suppression of retired model-derived evidence before shared recovery.
