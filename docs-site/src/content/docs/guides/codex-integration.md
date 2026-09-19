@@ -20,6 +20,10 @@ The proxy exposes one bare `openai` Codex-login route with Pool(default) and Dir
 plus `openai-apikey/<model>` for the configured API key. Pool includes main plus added accounts;
 Direct uses only the caller/main bearer. The routes do not fall back to one another. Shipped v1
 configs migrate to marker 2 and preserve `config.json.pre-openai-tiers-v2.bak` for manual restore.
+Authenticated native model discovery also carries validated access-program metadata into Codex's
+model list. Account-qualified rows use that account's metadata, while a Pool bare row advertises
+only programs shared by all eligible accounts. Unconfirmed rosters or missing metadata suppress
+publication; account-gated models consider only accounts that report the model.
 
 When a request leaves the canonical ChatGPT route for another Responses provider, OpenCodex removes
 the ChatGPT-only top-level `access_programs` field before forwarding it. Canonical ChatGPT requests

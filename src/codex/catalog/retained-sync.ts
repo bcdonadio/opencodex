@@ -48,6 +48,7 @@ import {
   upstreamNativeEntry,
 } from "./metadata";
 import { trustedAccountBoundNativeCatalogSlug } from "./account-models";
+import { applyAccountModelMetadata } from "./account-model-metadata";
 import { bundledCatalogCacheState, loadBundledCodexCatalog } from "./bundled";
 import { isMultiAgentV2Enabled } from "../features";
 import { clampCatalogModelsToCodexSupport } from "./effort";
@@ -544,6 +545,12 @@ function writeRetainedCatalogSync({
   // Last mutation before serialization; see `enforceCatalogSlugUniqueness` for why the ordering
   // against the effort clamp is load-bearing rather than cosmetic.
   catalog.models = enforceCatalogSlugUniqueness(catalog.models, true);
+  applyAccountModelMetadata(
+    catalog.models,
+    modelEntitlements,
+    accountTargets,
+    bareEligibleAccountIds,
+  );
 
   const added = goEntries.length + accountBoundEntries.length;
   const content = `${JSON.stringify(catalog, null, 2)}\n`;

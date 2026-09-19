@@ -102,6 +102,14 @@ least one confirmed eligible account reports it; a selector-qualified row is emi
 mapped account reports it. A failed or malformed discovery is not positive evidence and therefore
 hides the gated row until a later refresh. The same snapshot gates Pool selection, so the catalog
 and runtime cannot disagree by advertising through one account and dispatching through another.
+The snapshot retains only validated `model_specialty` and `available_access_programs` values from
+usable authenticated rows. Selector-qualified native rows receive their account's values; a bare
+native row receives only values common to all eligible accounts. An unconfirmed roster or missing
+metadata suppresses publication; account-gated models consider only accounts that report the model.
+Fresh omission clears stale values. Routed, API-key, combo, custom, and unconfirmed rows never
+inherit account metadata.
+The retained catalog writer and the live `GET /v1/models?client_version=...` producer apply this
+same projection, so app-server discovery does not depend on a prior disk sync.
 
 `client_version` arrives on the inbound request and is part of that cache identity, so
 `src/codex/model-entitlements.ts` bounds the work as well as the state: stored versions per account, concurrent

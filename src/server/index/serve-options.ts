@@ -51,6 +51,7 @@ import {
   resolveCodexModelEntitlements,
 } from "../../codex/model-entitlements";
 import { CatalogGatherBusyError } from "../../codex/catalog/provider-fetch";
+import { applyAccountModelMetadata } from "../../codex/catalog/account-model-metadata";
 import {
   registerCodexWebSocket,
   tryReserveCodexWebSocket,
@@ -1005,6 +1006,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
             config.keepNativeChatGptOnV1 === true,
             config.modelPickerOrder,
           );
+          applyAccountModelMetadata(entries, modelEntitlements, accountTargets, bareEligibleAccountIds);
           return jsonResponse({
             models: applyNativeVisibility(
               entries,

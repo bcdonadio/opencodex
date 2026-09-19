@@ -397,16 +397,26 @@ interface CachedAccountModels {
   readonly clientVersion: string;
   readonly expiresAt: number;
   readonly models: ReadonlySet<string>;
+  readonly metadataByModel: ReadonlyMap<string, CodexAccountModelMetadata>;
   readonly confirmed: boolean;
   readonly provenance?: CodexModelEntitlementProvenance;
 }
 
 export interface CodexModelEntitlementSnapshot {
   readonly modelsByAccount: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Validated, non-sensitive fields from each authenticated account roster. */
+  readonly metadataByAccount?: ReadonlyMap<string, ReadonlyMap<string, CodexAccountModelMetadata>>;
   readonly clientVersionByAccount: ReadonlyMap<string, string>;
   readonly confirmedAccountIds: ReadonlySet<string>;
   readonly credentialIdentities: ReadonlyMap<string, string>;
 }
+
+export interface CodexAccountModelMetadata {
+  model_specialty?: "cyber";
+  available_access_programs?: { readonly cyber: readonly CodexCyberAccessProgram[] };
+}
+
+export type CodexCyberAccessProgram = "standard" | "daybreak_blue" | "daybreak_red";
 
 export type CodexModelEntitlementState = "granted" | "denied" | "unknown";
 
@@ -605,17 +615,45 @@ async function accountCredentialSnapshot(
   }
 }
 
-function parseAccountModels(text: string): ReadonlySet<string> | null {
+const CODEX_CYBER_ACCESS_PROGRAMS = new Set<CodexCyberAccessProgram>([
+  "standard", "daybreak_blue", "daybreak_red",
+]);
+
+function parseAccountModels(text: string): {
+  models: ReadonlySet<string>;
+  metadataByModel: ReadonlyMap<string, CodexAccountModelMetadata>;
+} | null {
   try {
     const payload = JSON.parse(text) as { models?: unknown };
     if (!Array.isArray(payload.models)) return null;
+    const metadataByModel = new Map<string, CodexAccountModelMetadata>();
     const models = payload.models.flatMap(entry => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
-      const row = entry as { slug?: unknown; supported_in_api?: unknown; visibility?: unknown };
+      const row = entry as {
+        slug?: unknown;
+        supported_in_api?: unknown;
+        visibility?: unknown;
+        model_specialty?: unknown;
+        available_access_programs?: unknown;
+      };
       if (typeof row.slug !== "string" || row.supported_in_api !== true || row.visibility === "hide") return [];
+      const metadata: CodexAccountModelMetadata = {};
+      if (row.model_specialty === "cyber") metadata.model_specialty = "cyber";
+      if (row.available_access_programs && typeof row.available_access_programs === "object"
+        && !Array.isArray(row.available_access_programs)) {
+        const cyber = (row.available_access_programs as { cyber?: unknown }).cyber;
+        if (Array.isArray(cyber)) {
+          metadata.available_access_programs = {
+            cyber: cyber.filter((value): value is CodexCyberAccessProgram => (
+              typeof value === "string" && CODEX_CYBER_ACCESS_PROGRAMS.has(value as CodexCyberAccessProgram)
+            )),
+          };
+        }
+      }
+      if (Object.keys(metadata).length > 0) metadataByModel.set(row.slug, metadata);
       return [row.slug];
     });
-    return new Set(models);
+    return { models: new Set(models), metadataByModel };
   } catch {
     return null;
   }
@@ -632,6 +670,7 @@ function unconfirmedAccountModels(
     clientVersion,
     expiresAt: now + MODEL_ROSTER_FAILURE_TTL_MS,
     models: new Set(),
+    metadataByModel: new Map(),
     confirmed: false,
     provenance,
   };
@@ -674,8 +713,8 @@ async function fetchAccountModels(
     if (!body.displaySafe || body.truncated) {
       return unconfirmedAccountModels(credential, clientVersion, now, { kind: "unparseable" });
     }
-    const models = parseAccountModels(body.text);
-    if (models === null) {
+    const parsed = parseAccountModels(body.text);
+    if (parsed === null) {
       return unconfirmedAccountModels(credential, clientVersion, now, { kind: "unparseable" });
     }
     // A roster is a confirmation only when it lists something usable. `models` is a Set, and an
@@ -685,7 +724,7 @@ async function fetchAccountModels(
     // account asked under too old a client version answers with no gated rows, and treating
     // that as authoritative is exactly how 2.36.0 denied sol/terra/luna to accounts that own
     // them (#3022). No usable rows means unconfirmed, on the 15s failure TTL, asked again.
-    const usable = models.size > 0;
+    const usable = parsed.models.size > 0;
     if (!usable) {
       return unconfirmedAccountModels(credential, clientVersion, now, { kind: "parsed-empty" });
     }
@@ -698,7 +737,7 @@ async function fetchAccountModels(
       // upstream ever raises its true requirement above the measured constant, that constant is
       // the only thing standing between an entitled account and a five-minute cached denial.
       .some(([modelId, minimum]) => (
-        !models.has(modelId) && compareClientVersions(clientVersion, minimum) < 0
+        !parsed.models.has(modelId) && compareClientVersions(clientVersion, minimum) < 0
       ));
     return {
       credentialIdentity: credential.credentialIdentity,
@@ -706,7 +745,8 @@ async function fetchAccountModels(
       expiresAt: now + (!hasUnknownGatedAbsence
         ? MODEL_ROSTER_TTL_MS
         : MODEL_ROSTER_FAILURE_TTL_MS),
-      models,
+      models: parsed.models,
+      metadataByModel: parsed.metadataByModel,
       confirmed: true,
     };
   } catch (error) {
@@ -768,6 +808,7 @@ async function modelsForCredential(
       clientVersion,
       expiresAt: now,
       models: new Set(),
+      metadataByModel: new Map(),
       confirmed: false,
     };
   }
@@ -783,6 +824,7 @@ async function modelsForCredential(
       clientVersion,
       expiresAt: now,
       models: new Set(),
+      metadataByModel: new Map(),
       confirmed: false,
     };
   }
@@ -1121,6 +1163,9 @@ export async function resolveCodexModelEntitlements(
   })));
   return {
     modelsByAccount: new Map(results.map(({ credential, result }) => [credential.accountId, result.models])),
+    metadataByAccount: new Map(results.map(({ credential, result }) => (
+      [credential.accountId, result.metadataByModel]
+    ))),
     clientVersionByAccount: new Map(results.map(({ credential, result }) => (
       [credential.accountId, result.clientVersion]
     ))),
@@ -1450,6 +1495,7 @@ export function seedCodexModelEntitlementsForTests(
     clientVersion,
     expiresAt: now + MODEL_ROSTER_TTL_MS,
     models: new Set(models),
+    metadataByModel: new Map(),
     confirmed: true,
   });
 }
