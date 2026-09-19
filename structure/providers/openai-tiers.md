@@ -589,6 +589,16 @@ model settings, and noncanonical `openai` rows never receive that recovery path.
 terminal 403 codes as `needsReauth`; generic permission failures remain non-terminal, and a
 successful main usage refresh clears the runtime mark.
 
+### Reduced-refusal entitlement denial
+
+`src/codex/` recognizes the upstream HTTP 403 envelope as an entitlement denial only when its
+structured error has `type: "invalid_request_error"`, an absent or `null` `code`, and the exact
+message `Reduced refusals aren't available on Astra for most Daybreak customers. You can continue
+using Astra with standard safeguards or switch to a model that supports Daybreak Blue.` This
+classification preserves the 403 and response body, does not retry another account, and does not
+quarantine or expire the otherwise valid credential. Every other 403 keeps the existing credential
+handling and account-selection rules.
+
 Canonical forwarding alone can apply the optional client-output safety-buffering hint filter;
 API-key and custom forward destinations preserve their metadata. See [Responses transport](../transports/responses.md).
 

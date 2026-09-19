@@ -350,3 +350,6 @@ Codex pool settings and their consumers follow the [reset-first ordering contrac
 Upstream API-key usage follows the [physical-attempt account attribution contract](gui-and-management-api.md#upstream-key-account-attribution), independently of subscription quota observations.
 
 Stored Direct substitution follows the [credential identity contract](providers/openai-tiers.md#sidecars-management-and-ui): both synchronous and asynchronous materializers discard the caller account header before applying the stored credential; ordinary native Direct passthrough is unchanged.
+
+An exact reduced-refusal HTTP 403 does not quarantine or expire a valid stored credential; see
+[OpenAI tier entitlement handling](providers/openai-tiers.md#reduced-refusal-entitlement-denial).

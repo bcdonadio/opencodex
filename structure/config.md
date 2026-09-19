@@ -465,3 +465,6 @@ exclusive `--socks5-off`. The start owner persists only an explicitly requested
 change; the off flag refuses to erase a non-SOCKS proxy. Invalid-address errors
 never echo user-supplied credentials, and status messages redact proxy URLs.
 The parser regression cases live in `tests/cli/start-args.test.ts`.
+
+The exact reduced-refusal HTTP 403 is an entitlement denial rather than an expired credential; see
+[OpenAI tier entitlement handling](providers/openai-tiers.md#reduced-refusal-entitlement-denial).

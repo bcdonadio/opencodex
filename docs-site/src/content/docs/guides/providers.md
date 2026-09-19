@@ -31,6 +31,11 @@ Auth page can restore it: absent rows are created from the canonical preset, dis
 rows are re-enabled without replacing saved mode or model settings, and noncanonical `openai`
 rows are not offered that recovery path.
 
+If Astra returns HTTP 403 with the message that reduced refusals are unavailable for most Daybreak
+customers, this is a model-option entitlement denial, not an expired token. The proxy preserves the
+upstream error and does not retry another account; signing in again does not grant the feature. Use
+standard Astra safeguards or select a model that supports Daybreak Blue.
+
 Luna Reserve compatibility is a ChatGPT account capability on the canonical OpenAI forward path,
 not an OpenAI API-key entitlement. Its manual stored-main selector requires effective local authless
 Desktop mode and current credential-bound upstream permission; a catalog entry alone does not

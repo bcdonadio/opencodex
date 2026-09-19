@@ -17,6 +17,10 @@ function jsonPayload(status: number, payload: Record<string, unknown>): Response
 }
 
 describe("Codex pre-stream quota rejection classification", () => {
+  const astraReducedRefusalsMessage =
+    "Reduced refusals aren't available on Astra for most Daybreak customers. "
+    + "You can continue using Astra with standard safeguards or switch to a model that supports Daybreak Blue.";
+
   test("a 403 naming a workspace denial carries structured denial evidence (#1789)", async () => {
     // The credential is valid; the account simply cannot reach this workspace. Without this
     // evidence routing quarantines the account for reauth, which cannot fix a workspace grant.
@@ -69,6 +73,42 @@ describe("Codex pre-stream quota rejection classification", () => {
       detail: { code: 403 },
     }));
     expect(invalidDetail.denial).toBeUndefined();
+  });
+
+  test.each([{}, { code: null }])("the exact Astra denial preserves the response with code fields %j", async (codeFields) => {
+    const body = JSON.stringify({ ...codeFields, error: { ...codeFields, type: "invalid_request_error", message: astraReducedRefusalsMessage }, detail: codeFields });
+    const response = new Response(body, { status: 403 });
+    await expect(classifyCodexPreStreamRejection(response)).resolves.toEqual({
+      kind: "permission-error",
+      status: 403,
+      alternateRetryEligible: false,
+      resetCreditEligible: false,
+      denial: "entitlement",
+    });
+    expect(await shouldRetryCodexPoolAccountQuota(response)).toBe(false);
+    expect(await shouldRetryCodexPoolAccountTransient(response)).toBe(false);
+    expect(await response.text()).toBe(body);
+  });
+
+  test.each([
+    ["different type", { error: { type: "authentication_error", message: astraReducedRefusalsMessage } }],
+    ["near-match message", { error: { type: "invalid_request_error", message: `${astraReducedRefusalsMessage} ` } }],
+    ["root code", { code: "invalid_api_key", error: { type: "invalid_request_error", message: astraReducedRefusalsMessage } }],
+    ["nested code", { error: { type: "invalid_request_error", code: "invalid_api_key", message: astraReducedRefusalsMessage } }],
+    ["detail code", { error: { type: "invalid_request_error", message: astraReducedRefusalsMessage }, detail: { code: 403 } }],
+  ])("the Astra denial does not override %s evidence", async (_label, payload) => {
+    const result = await classifyCodexPreStreamRejection(jsonPayload(403, payload));
+    expect(result).toMatchObject({ kind: "permission-error", alternateRetryEligible: false });
+    expect(result.denial).toBeUndefined();
+  });
+
+  test("the Astra denial under 401 remains an authentication error", async () => {
+    const result = await classifyCodexPreStreamRejection(jsonRejection(401, {
+      type: "invalid_request_error",
+      message: astraReducedRefusalsMessage,
+    }));
+    expect(result).toMatchObject({ kind: "authentication-error", alternateRetryEligible: false });
+    expect(result.denial).toBeUndefined();
   });
 
   test.each([

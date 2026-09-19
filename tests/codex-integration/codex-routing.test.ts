@@ -730,14 +730,14 @@ describe("codex routing", () => {
     expect(classifyCodexUpstreamOutcome(401, "workspace")).toBe("credential");
   });
 
-  test("a workspace denial keeps the credential and does not sweep affinity (#1789)", () => {
+  test.each(["workspace", "entitlement"] as const)("a %s denial keeps the credential and does not sweep affinity", (denial) => {
     const config = makeConfig();
     updateAccountQuota("a", 10);
     updateAccountQuota("b", 20);
     // Bind a thread to the account so we can prove its affinity is NOT swept.
     expect(resolveCodexAccountForThread("workspace-affinity", config)).toBe("a");
 
-    recordCodexUpstreamOutcome(config, "a", 403, { denial: "workspace" });
+    recordCodexUpstreamOutcome(config, "a", 403, { denial });
 
     // The credential is valid: no reauth prompt.
     expect(isAccountNeedsReauth("a")).toBe(false);

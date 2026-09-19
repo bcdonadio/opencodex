@@ -88,7 +88,31 @@ const ENTITLEMENT_DENIAL_CODES: ReadonlySet<string> = new Set([
   "entitlement_missing",
 ]);
 
-/** Read a structured denial code out of a 403 body. Fails closed to undefined. */
+const ASTRA_REDUCED_REFUSALS_DENIAL =
+  "Reduced refusals aren't available on Astra for most Daybreak customers. "
+  + "You can continue using Astra with standard safeguards or switch to a model that supports Daybreak Blue.";
+
+// This known request-option refusal has no structured code. It remains a terminal
+// 403; only credential-health bookkeeping differs. Never infer this from a generic
+// permission error or let its text override a credential-specific code.
+function isExactAstraReducedRefusalsDenial(payload: unknown): boolean {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const root = payload as Record<string, unknown>;
+  for (const container of [root, root.error, root.detail]) {
+    if (container === null || typeof container !== "object" || Array.isArray(container)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(container, "code");
+    if (descriptor && (!("value" in descriptor) || descriptor.value !== null)) return false;
+  }
+  const errorDescriptor = Object.getOwnPropertyDescriptor(root, "error");
+  if (!errorDescriptor || !("value" in errorDescriptor)) return false;
+  const error = errorDescriptor.value;
+  if (error === null || typeof error !== "object" || Array.isArray(error)) return false;
+  const record = error as Record<string, unknown>;
+  return ownStringField(record, "type") === "invalid_request_error"
+    && ownStringField(record, "message") === ASTRA_REDUCED_REFUSALS_DENIAL;
+}
+
+/** Read structured denial evidence or the exact known option refusal. Fails closed. */
 async function denialFromResponse(
   response: Response,
   signal?: AbortSignal,
@@ -99,9 +123,12 @@ async function denialFromResponse(
     if (isUnsafeJsonDocument(body.text)) return undefined;
     const payload = JSON.parse(body.text) as unknown;
     const code = structuredDenialCode(payload);
-    if (code === undefined) return undefined;
-    if (WORKSPACE_DENIAL_CODES.has(code)) return "workspace";
-    if (ENTITLEMENT_DENIAL_CODES.has(code)) return "entitlement";
+    if (code !== undefined) {
+      if (WORKSPACE_DENIAL_CODES.has(code)) return "workspace";
+      if (ENTITLEMENT_DENIAL_CODES.has(code)) return "entitlement";
+      return undefined;
+    }
+    if (isExactAstraReducedRefusalsDenial(payload)) return "entitlement";
     return undefined;
   } catch {
     // Same fail-closed rule as the exhaustion classifier: an unreadable body must not
