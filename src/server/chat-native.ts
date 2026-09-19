@@ -51,7 +51,7 @@ import { enrichOpenCodeZenFreeTierMessage } from "../providers/opencode-zen-rate
 import type { OcxProviderTransport } from "../providers/xai-transport";
 import type { RouteResult } from "../router";
 import type { OcxConfig, OcxProviderConfig } from "../types";
-import { diagnosticTarget, fetchWithHeaderTimeout, providerFetch, safeHostLabel } from "./responses/fetch-helpers";
+import { diagnosticTarget, fetchWithHeaderTimeout, providerFetch, safeHostLabel, sendWithConnectionPolicy } from "./responses/fetch-helpers";
 import { linkAbortSignal } from "./responses";
 import {
   addFinalRequestLog,
@@ -370,7 +370,7 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
                 const observe = transportObserver(logCtx);
                 observe({ kind: "send", transport: "http", body: wireInit.body,
                   target: diagnosticTarget(request.url, wireInit) });
-                const response = await customFetch(request.url, wireInit);
+                const response = await sendWithConnectionPolicy(customFetch, request.url, wireInit);
                 observe({ kind: "response", transport: "http", response });
                 if (!response.ok) await recordKeyAttemptFailure(logCtx, response, init.signal ?? upstream.signal);
                 return response;

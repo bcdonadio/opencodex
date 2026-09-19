@@ -1,7 +1,17 @@
 # xAI Grok Provider
 
+Native result continuations and function-result injection follow [the mode-specific result and control contract](../transports/streaming-health.md#experimental-native-function-result-injection); this surface does not infer upstream support or alter its defaults.
+
+Native steering follows [the shared WebSocket contract](../transports/streaming-health.md#experimental-native-mid-turn-steering); this surface's defaults remain unchanged.
+
 xAI uses the same shared credential and delivery policies through the Responses
 [core module ownership](../transports/responses.md#core-module-ownership). This surface retains its existing behavior.
+
+One Responses capability is seeded for xAI alone: `requiresPairedResponsesToolResults`, which
+answers a replayed tool call whose output never arrived. It is deliberately not the same flag as
+`requiresAdjacentResponsesToolResults`, which xAI also carries and shares with the Kimi presets.
+The contract for both, and the reason they do not collapse into one, is specified in
+[chat-compat](./chat-compat.md); it is not restated here.
 
 The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
 is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged.
@@ -14,6 +24,10 @@ Shared parsing and streaming follow the [request-copy](../transports/byte-accoun
 
 ## xAI Grok hardening (official Grok Build contract parity)
 
+Grok's Responses path shares `src/responses/apply-patch-envelope.ts` for freeform restoration.
+The declared `input` field remains authoritative; alternate-field and outer-fence recovery is
+limited to unambiguous bare `exec` and `apply_patch` calls and does not rewrite foreign grammars.
+
 Grounded in the open-sourced official client (xai-org/grok-build); unit + evidence:
 `devlog/_fin/260716_grok_build_hardening/`.
 
@@ -22,7 +36,7 @@ Encrypted-task recovery uses the listener-resolved loopback admission carried by
 
 - **Reasoning folding:** the Responses parser folds `reasoning` items into the FOLLOWING
   assistant turn (`pendingReasoning` in `src/responses/parser.ts`) so the Grok chat wire carries
-  ONE assistant message with `reasoning_content` — exact-prefix cache stability. Unsigned
+  ONE assistant message with `reasoning_content` ??exact-prefix cache stability. Unsigned
   siblings newline-join; `ocxr1`-signed siblings stay separate parts (Anthropic replay keeps
   each signature on its own text); boundaries (user/tool-result/agent) clear pending state;
   call items fold pending reasoning into the same turn.
@@ -34,11 +48,16 @@ Encrypted-task recovery uses the listener-resolved loopback admission carried by
   on a per-provider FIXED loopback port, so every response it sends closes its connection. A
   retired flow that kept a pooled socket would capture the NEXT login's callback and reject it
   as a state mismatch; see `src/oauth/callback-server.ts`.
+  Provider token-body budgets are separate from this shared callback lifetime. The
+  [OrcaRouter bounded key-exchange contract](../transports/inventory.md#bounded-response-ingestion-and-orcarouter-login)
+  is owned by its login consumer and does not impose that budget on Grok token grants.
 - **Two-lock refresh transaction:** per-provider+account intent lock held across the IdP
   exchange plus a short global store-write lock + async mutation funnel around every
   `auth.json` load-merge-persist (`src/oauth/store.ts`); generation-guarded persist
-  (`expectedGeneration` → superseded adoption), conditional `needsReauth`, bounded jittered
+  (`expectedGeneration` ??superseded adoption), conditional `needsReauth`, bounded jittered
   retry for transient token-endpoint failures.
+  Newly created legacy-store recovery copies follow the [backup ownership contract](../config.md#restore);
+  an ownership-registration failure (a `false` return or thrown error) warns without discarding downgrade recovery.
 - **Reactive 401 replay:** both the adapter recovery loop and native Responses passthrough branch
   force-refresh once (singleflight, generation-checked) and replay OAuth-backed xAI requests
   exactly once with a re-resolved transport; API-key/BYOK paths are excluded
@@ -67,7 +86,7 @@ malformed, gapped, oversized, contradictory, failed, or incomplete streams stay 
 - **Transport:** Binary gRPC-Web over HTTP/1.1 or HTTP/2 with 5-byte frame envelope (`0x00` data / `0x80` trailers) and protobuf wire format. Plain JSON is rejected with empty responses upstream.
 - **Authentication:** `Authorization: Bearer <xai OIDC access token>` + `X-XAI-Token-Auth: xai-grok-cli`. No cookies required.
 - **Safety & Idempotency:** Managed via `src/grok/reset-coupon-ledger.ts` using UUIDv4 operation tracking before upstream dispatch to prevent duplicate consumption during network flakes.
-- **Surfaces:** `ocx account grok-reset-coupons` in the terminal, and the dashboard at Providers > xAI Grok > Accounts, where each OAuth row carries a ticket badge with its remaining count and opens a redemption dialog (`gui/src/hooks/useGrokResetCoupons.ts`, `gui/src/components/provider-workspace/GrokResetCoupons.tsx`). The dashboard reads one `GET /api/grok/reset-coupons` per account with at most three in flight, always sends an explicit `tokenId` and a client-minted `operationId`, and treats redemption truth as the settled `code` rather than HTTP 200 — a replayed *failure* returns 200 with `replayed: true`. After a request times out it issues no further consume call, because a redemption whose ledger record is still `open` re-executes.
+- **Surfaces:** `ocx account grok-reset-coupons` in the terminal, and the dashboard at Providers > xAI Grok > Accounts, where each OAuth row carries a ticket badge with its remaining count and opens a redemption dialog (`gui/src/hooks/useGrokResetCoupons.ts`, `gui/src/components/provider-workspace/GrokResetCoupons.tsx`). The dashboard reads one `GET /api/grok/reset-coupons` per account with at most three in flight, always sends an explicit `tokenId` and a client-minted `operationId`, and treats redemption truth as the settled `code` rather than HTTP 200 ??a replayed *failure* returns 200 with `replayed: true`. After a request times out it issues no further consume call, because a redemption whose ledger record is still `open` re-executes.
 
 Usage consumers preserve positive incomplete-history metadata as specified in [usage accounting](../gui-and-management-api.md#usage-accounting); readable totals are not represented as a complete ledger. Upstream API-key usage follows the [physical-attempt account attribution contract](../gui-and-management-api.md#upstream-key-account-attribution), independently of subscription quota observations.
 
@@ -106,6 +125,11 @@ The first-party DeepSeek `deepseek-flash` native `text`/`image` declaration is l
 the DeepSeek provider and does not alter xAI metadata or transport behavior; explicit capability
 overrides remain authoritative. First-party `deepseek-chat`, `deepseek-reasoner`, and
 `deepseek-v4-flash` remain sidecar-backed by default. Zen routes are unchanged and unprobed here.
+The Crusoe fixed-key registry row, discovery predicate, effort ladder, and input-modality map are
+also provider-scoped and do not alter xAI model metadata, OAuth routing, or wire behavior.
+
+The Opper pool seeds in `src/providers/registry/entries-extended.ts` are also provider-scoped and
+do not alter xAI discovery, model metadata, or transport behavior.
 
 Native Chat applies qualifying effort ceilings independently of model pins; pin selection precedes the cap and only pins or cap rewrites enter wire mapping. The [catalog effort contract](../catalog.md#ultra-reasoning-level) records the V1/compaction exemptions and caller-preservation boundary.
 
@@ -127,7 +151,7 @@ grok-composer-2.5-fast each echoed `priority` upstream. The registry entry class
 that set in `modelSupportsServiceTier` and declares `chatServiceTier: true`, so the OAuth lane
 resolves Fast-eligible per model: `--fast` synthetic rows publish, `fastMode` can force the
 tier, and a caller-sent tier forwards (the Codex fast-toggle path). grok-4.20-multi-agent-0309
-is deliberately excluded — the gateway answers `service_tier: "default"` when sent
+is deliberately excluded ??the gateway answers `service_tier: "default"` when sent
 `priority`, so it keeps `forwardCallerServiceTier: false` and publishes no fast row.
 Classification reaches saved configs through the fill-only enrich backfill
 (`src/providers/derive.ts`); an explicit config value always wins, and a config saved while
@@ -146,3 +170,11 @@ Live sideband admission and its bounded upstream handshake follow the [runtime c
 Translated audio/file admission follows the [final-adapter input contract](../adapters/registry.md#untranslated-input-media); native raw passthrough remains separate.
 
 Shared response-log retention and native SSE inspection pacing follow the [bounded inspection contract](../transports/byte-accounting.md#response-log-inspection); other subsystem behavior remains unchanged.
+
+Native steering retains fixed phase deadlines and reconciled replay output; see the [steering stability contract](../transports/streaming-health.md#steering-deadlines-and-replay-completeness).
+
+Native steering generation overrides, explicit public-API eligibility and the consent-gated wire probe follow the [shared control contract](../transports/streaming-health.md#steering-settings-public-api-and-diagnostic-probe); this owner does not change routing or execute diagnostic tools.
+
+Shared startup provider-id migration preserves the account binding between configuration and OAuth credentials; see the [runtime contract](../runtime.md).
+
+Dashboard Fast-row persistence and client refresh follow the [Fast selector rows setting contract](../gui-and-management-api.md#fast-selector-rows-setting).

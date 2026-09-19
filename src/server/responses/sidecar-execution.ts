@@ -187,6 +187,8 @@ export async function executeResponsesSidecars(
         route.providerName,
         transportState.genericFailoverAccountId,
         retryAfter,
+        Date.now(),
+        route.modelId,
       );
       if (!nextAccountId) {
         hop.permit?.release();

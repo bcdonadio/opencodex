@@ -203,7 +203,7 @@ function buildResponseJSONWithBudget(
   ): string => {
     const helper = resolveCodeModeHelperName(codeModeHelperName, toolName, args, namespace, options?.declaredToolNames);
     return helper
-      ? compileCodeModeHelperInput(args, helper)
+      ? compileCodeModeHelperInput(args, helper, codeModeHelperName ?? toolName)
       : repairFreeformToolInput(args, toolName, namespace);
   };
   const parseArgsObj = (args: string): Record<string, unknown> => {
@@ -527,7 +527,7 @@ function buildResponseJSONWithBudget(
         compactionEncryptedContent = e.compactionEncryptedContent;
         sawTerminal = true;
         endTurn = e.endTurn;
-        cleanDone = e.stopReason === undefined;
+        cleanDone = !isTruncatedStopReason(e.stopReason);
         rawStopReason = e.stopReason;
         if (e.providerState) options?.onProviderState?.(e.providerState);
         // Match streaming: max_tokens and content_filter both terminate as incomplete.

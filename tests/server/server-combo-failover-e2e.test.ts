@@ -38,6 +38,7 @@ import { startServer } from "../../src/server";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { heldResponse } from "../helpers/held-response";
 import {
   clearResponseStateForTests,
   flushResponseState,
@@ -2243,6 +2244,59 @@ describe("server combo failover 030 activation matrix", () => {
     expect([aHits, bHits, cHits]).toEqual([1, 1, 1]);
   });
 
+  test("single-target combo with waitForCooldownMs waits and retries on failure", async () => {
+    let hits = 0;
+    const upstream = serve(() => {
+      hits += 1;
+      return hits === 1
+        ? Response.json({ error: { message: "service unavailable" } }, { status: 503 })
+        : chatSuccess("single target recovered", "m1");
+    });
+    const providers = {
+      a: provider("openai-chat", baseUrl(upstream), "key-a"),
+    };
+    const cooldown = { cooldownMs: 50, waitForCooldownMs: 500 };
+    const response = await post(comboConfig(providers, [
+      { provider: "a", model: "m1" },
+    ], cooldown));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("single target recovered");
+    expect(hits).toBe(2);
+  });
+
+  test("single-target combo with waitForCooldownMs stops after one retry when upstream fails continuously", async () => {
+    let hits = 0;
+    const upstream = serve(() => {
+      hits += 1;
+      return Response.json({ error: { message: "service unavailable" } }, { status: 503 });
+    });
+    const providers = {
+      a: provider("openai-chat", baseUrl(upstream), "key-a"),
+    };
+    const cooldown = { cooldownMs: 50, waitForCooldownMs: 500 };
+    const response = await post(comboConfig(providers, [
+      { provider: "a", model: "m1" },
+    ], cooldown));
+    expect(response.status).toBe(503);
+    expect(hits).toBe(2);
+  });
+
+  test("single-target combo with unset waitForCooldownMs fails immediately on 503", async () => {
+    let hits = 0;
+    const upstream = serve(() => {
+      hits += 1;
+      return Response.json({ error: { message: "service unavailable" } }, { status: 503 });
+    });
+    const providers = {
+      a: provider("openai-chat", baseUrl(upstream), "key-a"),
+    };
+    const response = await post(comboConfig(providers, [
+      { provider: "a", model: "m1" },
+    ], { cooldownMs: 50 }));
+    expect(response.status).toBe(503);
+    expect(hits).toBe(1);
+  });
+
   test("a past Retry-After date remains immediate through response consumption", async () => {
     const now = Date.parse("2026-07-18T00:00:00.000Z");
     const failure = await consumeComboFailure(Response.json({ error: { message: "rate limited" } }, {
@@ -3434,14 +3488,10 @@ describe("server combo failover 030 activation matrix", () => {
 
   test("connect cancellation wins with 499, no backup, warning, or cooldown", async () => {
     let bHits = 0;
-    const aStarted = deferred();
-    const a = serve(() => {
-      aStarted.resolve();
-      return new Promise<Response>(() => {});
-    });
+    const a = heldResponse(serve);
     const b = serve(() => { bHits += 1; return chatSuccess("must not run"); });
     const config = comboConfig({
-      a: provider("openai-chat", baseUrl(a), "key-a"),
+      a: provider("openai-chat", baseUrl(a.server), "key-a"),
       b: provider("openai-chat", baseUrl(b), "key-b"),
     });
     const abort = new AbortController();
@@ -3450,9 +3500,9 @@ describe("server combo failover 030 activation matrix", () => {
     console.warn = (...args: unknown[]) => { warnings.push(args); };
     try {
       const pending = postLogged(config, {}, { abortSignal: abort.signal });
-      await aStarted.promise;
+      await within(a.started, 10_000);
       abort.abort(new DOMException("client closed", "AbortError"));
-      const response = await pending;
+      const response = await within(pending, 10_000);
       expect(response.status).toBe(499);
       expect(await response.json()).toMatchObject({ error: { code: "client_cancelled" } });
       await expectCancelledAttemptReceipt(config, { provider: "a", model: "m1", adapter: "openai-chat" });
@@ -3460,6 +3510,8 @@ describe("server combo failover 030 activation matrix", () => {
       expect(warnings.some(row => String(row[0]).includes("[combo]"))).toBe(false);
       expect(isComboTargetInCooldown("free", { provider: "a", model: "m1" })).toBe(false);
     } finally {
+      abort.abort();
+      a.release();
       console.warn = originalWarn;
     }
   });
