@@ -44,7 +44,8 @@ import {
   resetEphemeralReplayForTests,
   resolveEphemeralReplay,
 } from "./state/ephemeral-replay";
-export { markBodyNonPersistable, rememberResponseState } from "./state/ephemeral-replay";
+export { isBodyNonPersistable, markBodyNonPersistable } from "./state/body-policy";
+export { rememberResponseState } from "./state/ephemeral-replay";
 
 const MAX_STORED_RESPONSES = 1_000;
 /**

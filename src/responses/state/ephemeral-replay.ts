@@ -1,6 +1,7 @@
 import { enforceAppOwnedMemoryBudget } from "../../lib/app-owned-memory";
 import type { OcxProviderContinuationState } from "../../types";
 import type { ResidentInput, ResidentResponseState } from "../state";
+import { isBodyNonPersistable, markBodyNonPersistable } from "./body-policy";
 
 const EPHEMERAL_RESPONSE_TTL_MS = 15 * 60 * 1_000;
 const MAX_EPHEMERAL_RESPONSES = 128;
@@ -42,7 +43,6 @@ export interface EphemeralReplayStore {
 
 let store: EphemeralReplayStore | null = null;
 const ephemeralStates = new Map<string, EphemeralResponseState>();
-const nonPersistableBodies = new WeakSet<object>();
 let ephemeralBodyExpiry = new WeakMap<object, number>();
 let ephemeralResponseBytes = 0;
 let ephemeralExpiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -109,11 +109,6 @@ export function resolveEphemeralReplay(
   };
 }
 
-/** Bar this exact request body from the durable continuation cache. */
-export function markBodyNonPersistable(body: unknown): void {
-  if (body && typeof body === "object") nonPersistableBodies.add(body as object);
-}
-
 export function markEphemeralReplayBody(body: object, expiresAt: number): void {
   markBodyNonPersistable(body);
   ephemeralBodyExpiry.set(body, expiresAt);
@@ -178,7 +173,7 @@ export function rememberResponseState(
 ): void {
   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
   const request = requestBody as Record<string, unknown>;
-  if (nonPersistableBodies.has(request)) {
+  if (isBodyNonPersistable(request)) {
     if (opts?.ephemeral) {
       rememberEphemeralResponseState(request, response, opts.clientThreadId, opts.ephemeralScope);
     }
