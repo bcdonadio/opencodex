@@ -842,6 +842,7 @@ export async function preparePassthroughExchange(
               onTransport: transport => observeRequestTransport(logCtx, transport),
               nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                 && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+                ? options.nativeControl : undefined,
               dispatchOverride: oauthDispatch(request),
               providerName: route.providerName,
               modelId: route.modelId,
@@ -943,6 +944,7 @@ export async function preparePassthroughExchange(
                 onTransport: transport => observeRequestTransport(logCtx, transport),
               nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                 && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+                ? options.nativeControl : undefined,
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
@@ -1053,6 +1055,7 @@ export async function preparePassthroughExchange(
               onTransport: transport => observeRequestTransport(logCtx, transport),
               nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                 && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+                ? options.nativeControl : undefined,
               dispatchOverride: oauthDispatch(request),
               providerName: route.providerName,
               modelId: route.modelId,
@@ -1180,6 +1183,7 @@ export async function preparePassthroughExchange(
                 onTransport: transport => observeRequestTransport(logCtx, transport),
               nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                 && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+                ? options.nativeControl : undefined,
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
@@ -1313,6 +1317,7 @@ export async function preparePassthroughExchange(
                 onTransport: transport => observeRequestTransport(logCtx, transport),
               nativeControl: nativeResponseControlEligible(route.provider, options.nativeControl) && options.inboundTransport === "websocket" && !options.comboAttempt
                 && responseEffects.plaintextV2AgentMessageToolNames.size === 0
+                ? options.nativeControl : undefined,
               dispatchOverride: oauthDispatch(request),
                 providerName: route.providerName,
                 modelId: route.modelId,
