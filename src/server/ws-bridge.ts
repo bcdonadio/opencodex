@@ -267,6 +267,22 @@ function sendProtocolError(ws: ServerWebSocket<WsData>, status: number, message:
   sendJsonFrame(ws, buildWsErrorFrame(status, protocolError(message)));
 }
 
+/**
+ * Report an upstream-pump failure to the client. Errors that carry a structured
+ * code (for example the undeclared-tool guard's undeclared_tool_call) keep it so
+ * clients see the same rejection identity as the SSE path; everything else stays
+ * a generic protocol error.
+ */
+function sendUpstreamError(ws: ServerWebSocket<WsData>, status: number, err: unknown): void {
+  const code = err != null && typeof (err as { code?: unknown }).code === "string"
+    ? (err as { code: string }).code
+    : undefined;
+  const message = err instanceof Error ? err.message : String(err);
+  sendJsonFrame(ws, buildWsErrorFrame(status, code
+    ? { type: "upstream_error", code, message }
+    : protocolError(message)));
+}
+
 export async function pumpResponsesSseToWebSocket(
   ws: ServerWebSocket<WsData>,
   sseStream: ReadableStream<Uint8Array>,
@@ -365,7 +381,7 @@ export async function pumpResponsesSseToWebSocket(
       && ws.readyState === OPEN
       && !(err instanceof WsSendDroppedError)) {
       try {
-        sendProtocolError(ws, 502, err instanceof Error ? err.message : String(err));
+        sendUpstreamError(ws, 502, err);
         observeDelivery(options.onFrameSent, "error");
         reportTerminal("incomplete");
       } catch (sendErr) {

@@ -6,14 +6,20 @@ import {
   COLD_SPAWN_WARMUP_HOOK_BUDGET_MS,
   moduleGraphSpecifiers,
   resetColdSpawnWarmupForTests,
+  spawnModuleGraphWarmupChild,
   warmColdSpawn,
   warmModuleGraph,
 } from "../helpers/cold-spawn-warmup";
 import { repoPath, repoRoot } from "../helpers/repo-root";
-import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "../helpers/test-budget";
+import {
+  analyzeWarmupRegistration,
+  dispositionComplaints,
+  type WarmupDisposition,
+} from "../helpers/warmup-registration";
 
 /**
- * Two things are checked here, and they answer different questions.
+ * Three things are checked here, and they answer different questions.
  *
  * The scan answers "did anyone add another one". A test that hands `INTERNAL_DEADLINE_MS` to a child
  * process timeout is measuring that child's cold module-graph load inside the assertion, which is
@@ -22,6 +28,17 @@ import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
  * appear below with a disposition, so the next one is classified when it lands rather than after it
  * fails on a Windows shard.
  *
+ * The dispositions answer "is the file recorded as warmed still warmed". That used to be a
+ * substring test for the helper's path, which #5060 showed accepts an unused import, a comment or a
+ * string literal as proof — each of them survives deleting the beforeAll call that did the work, so
+ * the measured child pays the cold load again with a green guard in front of it.
+ * tests/helpers/warmup-registration.ts replaces the substring with a judge that recognises four
+ * shapes exactly and refuses every other construct by name; its own regression set is
+ * tests/ci-workflows/warmup-registration.test.ts. A refused shape is not a blocked file: a
+ * disposition records the construct in `unmodeled` and the refusal itself stays under test. The
+ * judge reads shape, not execution — the execution oracle is the [cold-spawn-warmup] completion
+ * line the helper prints on every hosted run.
+ *
  * The unit tests answer "does the warm-up still warm the right thing". A warm-up that names its
  * modules by hand decays silently, so `moduleGraphSpecifiers` derives them from the child's own
  * source instead. These cases pin the properties that makes that derivation trustworthy: it follows
@@ -29,7 +46,7 @@ import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
  * it fails closed when it finds nothing.
  */
 
-type Disposition = Readonly<{ warmed: boolean; why: string }>;
+type Disposition = WarmupDisposition;
 
 /**
  * Every test file that bounds a spawned child with `INTERNAL_DEADLINE_MS`.
@@ -61,6 +78,14 @@ const DISPOSITIONS: Readonly<Record<string, Disposition>> = {
   "tests/codex-integration/main-quota-provenance.test.ts": {
     warmed: true,
     why: "the first resetAt iteration loads src/codex/quota.ts and src/codex/main-account-cache.ts",
+  },
+  "tests/codex-integration/codex-shim-ensure-failure.test.ts": {
+    warmed: false,
+    why:
+      "Its children are two throwaway /bin/sh scripts standing in for ensure and for the real Codex "
+      + "launcher, so the cold cost is shell and process startup rather than a repository module "
+      + "graph, and an import scan has nothing to warm. The generated shim never loads a repository "
+      + "module in the child: the point of the file is what the shell does with an exit status.",
   },
   "tests/codex-integration/codex-shim.test.ts": {
     warmed: false,
@@ -99,24 +124,30 @@ function filesBoundingASpawnWithTheDeadline(): string[] {
     .sort();
 }
 
+function judgeWarmup(path: string) {
+  const file = repoPath(path);
+  return analyzeWarmupRegistration(file, readFileSync(file, "utf8"));
+}
+
 describe("cold-spawn warm-up coverage", () => {
   test("every file that times a spawned child against the deadline has a disposition", () => {
     expect(filesBoundingASpawnWithTheDeadline()).toEqual(Object.keys(DISPOSITIONS).sort());
   });
 
-  test("a file recorded as warmed consumes the shared warm-up", () => {
-    const missing = Object.entries(DISPOSITIONS)
-      .filter(([, disposition]) => disposition.warmed)
-      .filter(([path]) => !readFileSync(repoPath(path), "utf8").includes("helpers/cold-spawn-warmup"))
-      .map(([path]) => path);
-    expect(missing).toEqual([]);
+  test("every disposition still describes the file it is recorded against", () => {
+    // Warmed means one of the four accepted shapes is here and nothing on the binding path was
+    // refused; unwarmed means the file does not reach the helper at all, which is asked of the
+    // whole file rather than of its bindings, because a namespace import or a barrel binds no name
+    // this judge follows and would otherwise read as an absence.
+    const wrong = Object.entries(DISPOSITIONS)
+      .flatMap(([path, disposition]) => dispositionComplaints(path, disposition, judgeWarmup(path)));
+    expect(wrong).toEqual([]);
   });
 
-  test("a file recorded as unwarmed says why, and does not quietly become warmed", () => {
+  test("anything other than a plainly warmed file says why, at length", () => {
     for (const [path, disposition] of Object.entries(DISPOSITIONS)) {
-      if (disposition.warmed) continue;
-      expect(disposition.why.length).toBeGreaterThan(80);
-      expect(readFileSync(repoPath(path), "utf8")).not.toInclude("helpers/cold-spawn-warmup");
+      if (disposition.warmed && disposition.unmodeled === undefined) continue;
+      expect({ path, reason: disposition.why.length > 80 }).toEqual({ path, reason: true });
     }
   });
 });
@@ -233,6 +264,44 @@ describe("warm-up failure policy", () => {
     await expect(warmModuleGraph({ graph: "cold-spawn-warmup-test/unresolvable" }))
       .rejects.toThrow("needs either an entry or a source");
   });
+
+  test("a warm-up child that never exits is killed at the deadline, not awaited forever", async () => {
+    resetColdSpawnWarmupForTests();
+    // Run 35511743422's macos 2/2 leg held this shape for eighteen silent minutes: a child
+    // that could not be observed to exit, waited on through a synchronous spawn whose own
+    // timeout rode the dead event loop. The bound has to live on the parent's live loop —
+    // SIGKILL at the deadline, then settle.
+    const startedAt = performance.now();
+    const result = await spawnModuleGraphWarmupChild(
+      "setInterval(() => undefined, 60_000)",
+      repoRoot(),
+      undefined,
+      1_000,
+    );
+    expect(performance.now() - startedAt).toBeLessThan(INTERNAL_DEADLINE_MS);
+    expect(result.timedOut).toBe(true);
+    expect(result.exitCode).not.toBe(0);
+  });
+
+  test("a descendant holding the child's pipes does not turn exit into a wait for EOF", async () => {
+    resetColdSpawnWarmupForTests();
+    // `close` is what a clean exit earns. A grandchild that keeps the write end open must not
+    // convert it into an unbounded wait, so exit starts a reap grace instead.
+    const script = [
+      'const { spawn } = require("node:child_process");',
+      'spawn(process.execPath, ["--eval", "setTimeout(() => process.exit(0), 8_000)"], { detached: true, stdio: "inherit" }).unref();',
+      'process.stdout.write("ok\\n");',
+      "process.exit(0);",
+    ].join("\n");
+    const startedAt = performance.now();
+    // The parent exits before its short deadline; the descendant keeps the pipe open
+    // past that deadline, so only reap grace should settle the completed child.
+    const result = await spawnModuleGraphWarmupChild(script, repoRoot(), undefined, 1_000);
+    expect(performance.now() - startedAt).toBeLessThan(INTERNAL_DEADLINE_MS);
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.stdout).toContain("ok");
+  }, INTERNAL_DEADLINE_MS);
 
   test("a real module graph loads, and reports what it loaded", async () => {
     resetColdSpawnWarmupForTests();

@@ -65,9 +65,11 @@ import {
   recordKeyAttemptUsage,
 } from "../request-log";
 import type { AttemptRecoveryKind } from "../../usage/log";
+import { bindAttemptDeliveryRecorder } from "../../usage/attempt-delivery";
 import { resolvePassiveRouteSubjectId } from "../passive-route-linker";
 import { recordSelectedRoute, transportObserver } from "../transaction-capture";
 import { recordRouteAuth } from "../transaction-auth-capture";
+import { isEgressTransparentExecutor, markEgressTransparentExecutor } from "../../lib/provider-egress";
 
 /** Owns live credential selection and adapter bindings for one request. */
 export async function prepareResponsesTransport(
@@ -301,15 +303,25 @@ export async function prepareResponsesTransport(
         recordKeyAttemptUsage(logCtx, event.usage);
       }
     };
+    // Counted at the one seam every adapter parse passes, and counted for EVERY event rather
+    // than only usage-bearing ones: the number this pairs with is the frame count the client
+    // transport relayed, and a difference between the two is the loss signal (#3983). Reading
+    // the current attempt through logCtx rather than capturing one keeps the count with the
+    // attempt that is live when the event arrives, across a mid-request attempt rotation.
+    const delivery = bindAttemptDeliveryRecorder(translatorBudget, () => logCtx.activeAttempt);
+    const observeEvent = (event: AdapterEvent, response: object): void => {
+      delivery.noteAdapterEvent();
+      observeUsage(event, response);
+    };
     const parseStream = resolved.parseStream.bind(resolved);
     resolved.parseStream = async function* (...args) {
-      for await (const event of parseStream(...args)) { observeUsage(event, args[0]); yield event; }
+      for await (const event of parseStream(...args)) { observeEvent(event, args[0]); yield event; }
     };
     if (resolved.parseResponse) {
       const parseResponse = resolved.parseResponse.bind(resolved);
       resolved.parseResponse = async (...args) => {
         const events = await parseResponse(...args);
-        events.forEach(event => observeUsage(event, args[0]));
+        events.forEach(event => observeEvent(event, args[0]));
         return events;
       };
     }
@@ -324,7 +336,7 @@ export async function prepareResponsesTransport(
       const runTurn = resolved.runTurn.bind(resolved);
       rawRunTurns.set(resolved, (requestParsed, incoming, emit) => {
         const response = {};
-        return runTurn(requestParsed, incoming, event => { observeUsage(event, response); emit(event); });
+        return runTurn(requestParsed, incoming, event => { observeEvent(event, response); emit(event); });
       });
       resolved.runTurn = (requestParsed, incoming, emit) => runSelectedTurn(resolved, requestParsed, incoming, emit);
     }
@@ -341,7 +353,7 @@ export async function prepareResponsesTransport(
       route.provider = current;
     }
     adapter = activeAdapter = runTurnAdapter = resolveSelectionAdapter(
-      resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+      resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire, route.staticPolicy),
     );
     invalidateSameTargetRequest();
     return adapter;
@@ -396,13 +408,13 @@ export async function prepareResponsesTransport(
   };
   const oauthDispatch = (wireRequest: AdapterRequest, requestParsed = parsed): ProviderFetchOptions["dispatchOverride"] => {
     if (route.provider.authMode === "forward") return undefined;
-    return async (input, init, execute) => {
+    return async (input, init, execute, onHttpDispatch) => {
       let destination = input;
       let dispatchInit = init;
       for (let attempt = 0; attempt < 3; attempt++) {
         if (selectionIsCurrent(requestBindings.get(wireRequest))) {
           const customFetch = (route.provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch;
-          const fetchImpl = customFetch ?? execute;
+          const selectedFetch = customFetch ?? execute;
           const binding = requestBindings.get(wireRequest);
           const snapshot = route.providerName === "anthropic" && anthropicPoolAccountId && binding?.kind === "oauth"
             ? binding.snapshot : undefined;
@@ -412,13 +424,34 @@ export async function prepareResponsesTransport(
             && sentHeaders?.get("authorization") === `Bearer ${snapshot.accessToken}`
             && !sentHeaders?.has("x-api-key");
           // Reselection can choose a provider override instead of the supplied executor.
-          // Observe custom executors here; execute already owns the default observer.
+          // The wrapper runs only after sendWithConnectionPolicy admits egress, so diagnostics
+          // and the transport callback cannot claim a send that policy refused.
           const observe = customFetch ? transportObserver(logCtx) : undefined;
-          observe?.({ kind: "send", transport: "http", body: dispatchInit.body,
-            target: diagnosticTarget(destination, dispatchInit) });
+          let physicalFetch = Object.assign(async (
+            wireInput: Parameters<typeof globalThis.fetch>[0],
+            wireInit?: RequestInit,
+          ) => {
+            onHttpDispatch();
+            observe?.({ kind: "send", transport: "http", body: wireInit?.body,
+              target: diagnosticTarget(wireInput, wireInit) });
+            const response = await selectedFetch(wireInput, wireInit);
+            observe?.({ kind: "response", transport: "http", response });
+            return response;
+          }, { preconnect: selectedFetch.preconnect?.bind(selectedFetch) }) as typeof globalThis.fetch;
+          if (isEgressTransparentExecutor(selectedFetch)) {
+            physicalFetch = markEgressTransparentExecutor(physicalFetch);
+          }
           commitKeyAttemptSend();
-          const response = await sendWithConnectionPolicy(fetchImpl, destination, { ...dispatchInit, redirect: "manual" });
-          observe?.({ kind: "response", transport: "http", response });
+          // The binding travels with the send, so a rebuilt request resolves its provider route
+          // against the destination it is actually going to rather than the one this dispatch
+          // started with. Account reselection can move the upstream host, which would otherwise
+          // apply a host-scoped decision to a different host.
+          const response = await sendWithConnectionPolicy(
+            physicalFetch,
+            destination,
+            { ...dispatchInit, redirect: "manual" },
+            { providerName: route.providerName, provider: route.provider },
+          );
           if (!response.ok) await recordKeyAttemptFailure(logCtx, response, dispatchInit.signal ?? options.abortSignal);
           // Observe each physical response before retries replace it. The binding belongs to
           // this dispatch, so a manual switch cannot file A's headers against B. Header
@@ -434,6 +467,11 @@ export async function prepareResponsesTransport(
           return response;
         }
         const nextAdapter = await refreshDispatchAdapter(requestParsed);
+        // Rebind before rebuilding: the rebuild's bridged-search restore and continuation
+        // restore key on the serving identity, which must be the refreshed route's, not the
+        // credential whose selection just lapsed.
+        bindRouteReasoningReplayScope({ parsed: requestParsed, providerName: route.providerName, provider: route.provider,
+          adapterName: nextAdapter.name, oauthCredentialSnapshot: replayOAuthCredentialSnapshot });
         const rebuilt = await nextAdapter.buildRequest(requestParsed, {
           headers: requestState.selectedForwardHeaders, translatorBudget,
           ...(imageTierBias > 0 ? { imageTierBias } : {}),
@@ -456,8 +494,6 @@ export async function prepareResponsesTransport(
         sameTargetToken = transportToken;
         destination = rebuilt.url;
         dispatchInit = { ...dispatchInit, method: rebuilt.method, headers, body: rebuilt.body };
-        bindRouteReasoningReplayScope({ parsed: requestParsed, providerName: route.providerName, provider: route.provider,
-          adapterName: nextAdapter.name, oauthCredentialSnapshot: replayOAuthCredentialSnapshot });
         // The next iteration validates synchronously and calls fetch in that same turn.
       }
       throw new Error("OAuth account selection changed repeatedly before dispatch");
@@ -628,7 +664,7 @@ export async function prepareResponsesTransport(
       ? resolveCopilotApiBaseUrl(sentOAuthSnapshot?.apiBaseUrl)
       : undefined,
   );
-  let adapterProvider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
+  let adapterProvider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire, route.staticPolicy);
   const stripClaudeMainAuth = options.stripClaudeMainAuthForNoncanonicalForward === true
     && !isCanonicalOpenAiForwardProvider(adapterProvider)
     && ((adapterProvider.adapter === "openai-responses" && adapterProvider.authMode === "forward")

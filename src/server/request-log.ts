@@ -12,6 +12,7 @@ import {
   isCyberPolicyCode,
   isCyberPolicyMessage,
   isRateLimitOrQuotaFailureMessage,
+  isUpstreamResetReplayRefusedMessage,
   upstreamErrorMessageFromPayload,
 } from "../lib/errors";
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
@@ -24,6 +25,7 @@ import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routi
 import type { AdapterRequest } from "../adapters/base";
 import type { RequestSpendSettlement } from "./responses/request-spend";
 import type { AdapterTierMetadata } from "../providers/fastwire";
+import { UPSTREAM_RESET_REPLAY_REFUSED_CODE } from "../lib/upstream-retry";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import {
   appendUsageEntry,
@@ -43,8 +45,10 @@ import {
   isValidReasoningWireValue,
   normalizeUsageAttempts,
   normalizeClaudeCompatibilityUsageLog,
+  normalizeRequestFailureAttribution,
   normalizeRequestSpend,
   readRecentUsageEntries,
+  modelIdentityLogFields, recordObservedServedModel,
   usageForFinalLog,
   usageStatusForFinalLog,
   usageTotalTokens,
@@ -55,10 +59,14 @@ import {
   type PersistedUsageAttempt,
   type PersistedUsageEntry,
   type PersistedClaudeCompatibilityLog,
+  type RequestFailureCause,
+  type RequestFailureStage,
   type UsageStatus,
   type UsageTransport,
 } from "../usage/log";
 import type { RequestExecutionBudget } from "../lib/request-execution-budget";
+import { attributeFinalRequest, attributeSealedAttempt } from "./request-log-failure-attribution";
+import { debugAttemptDeliverySummary } from "../lib/debug";
 import {
   appendUsageDebug,
   isUsageDebugEnabled,
@@ -80,15 +88,37 @@ import {
   sanitizeUpstreamDisplayError,
   type TransactionDiagnosticsV1,
 } from "../diagnostics/transaction";
+import type { RequestMetricsRecorder } from "./request-metrics";
+import type {
+  CacheDiagnosticDraft,
+  CacheDiagnosticFinalFacts,
+  PromptCacheKeySource,
+} from "../usage/cache-diagnostic";
+
+const CACHE_DIAGNOSTIC_HOOK = Symbol.for("opencodex.cache-diagnostic.v1");
+interface CacheDiagnosticHooks {
+  observeInbound(body: unknown, headers: Headers, source: PromptCacheKeySource): CacheDiagnosticDraft;
+  rebind(body: unknown, draft: CacheDiagnosticDraft | undefined): void;
+  finalize(facts: CacheDiagnosticFinalFacts): void;
+}
+function cacheDiagnosticHooks(): CacheDiagnosticHooks | undefined {
+  return (globalThis as Record<symbol, CacheDiagnosticHooks | undefined>)[CACHE_DIAGNOSTIC_HOOK];
+}
 
 export interface RequestLogContext {
   model: string;
   provider: string;
+  /** Optional process-lifetime aggregate sink, injected by the server composition owner. */
+  requestMetricsRecorder?: RequestMetricsRecorder;
+  /** Bounded terminal enum observed while inspecting a buffered response body. */
+  observedTerminalStatus?: ResponsesTerminalStatus;
   /**
    * Identity of the ONE logical request this context serves (#4546). Set from the execution
    * budget minted at ingress; a retry leg, a repair refetch and a combo child share it.
    */
   logicalRequestId?: string;
+  /** Process-local privacy-bounded cache diagnostic; never persisted with request logs. */
+  cacheDiagnosticDraft?: CacheDiagnosticDraft;
   /**
    * Internal live reference to this request's execution budget; omitted from RequestLogEntry and
    * JSONL. Read at final-log time so the row reports the budget's FINAL state rather than a
@@ -156,8 +186,15 @@ export interface RequestLogContext {
   /** Final-attempt tier summary; attempt rows remain the accounting source of truth. */
   tierOutcome?: AttemptTierOutcome;
   resolvedModel?: string;
+  /** Upstream served model, retained beside resolvedModel so an upstream reroute stays visible. */
+  servedModel?: string;
+  /** The exact model id sent upstream; recorded when a route/virtual rewrite makes it differ
+   * from the client-facing `model`, so a served-model mismatch can be judged against the wire. */
+  wireModel?: string;
   /** Internal: client-facing response metadata must not replace the physical routed model. */
   preserveResolvedModelFromRoute?: boolean;
+  /** Internal: client-facing selector written into response.model; never an upstream observation. */
+  responseModelEcho?: string;
   usage?: OcxUsage;
   usageLogInputTokens?: number;
   /**
@@ -167,6 +204,8 @@ export interface RequestLogContext {
    * is reserved up front and settlement corrects it.
    */
   spendOutputCeilingTokens?: number;
+  /** Pre-send input estimate reserved for spend only; unlike usageLogInputTokens it never enters usage. */
+  spendInputEstimateTokens?: number;
   /** Settles this request's durable spend entries from `addFinalRequestLog`. */
   spendTracker?: RequestSpendSettlement;
   attempts?: PersistedUsageAttempt[];
@@ -219,6 +258,24 @@ export interface RequestLogContext {
   claudeCompatibility?: PersistedClaudeCompatibilityLog;
 }
 
+export function observeCacheDiagnosticInbound(
+  logCtx: RequestLogContext,
+  body: unknown,
+  headers: Headers,
+  source: PromptCacheKeySource,
+): void {
+  const draft = cacheDiagnosticHooks()?.observeInbound(body, headers, source);
+  if (draft) logCtx.cacheDiagnosticDraft = draft;
+}
+
+/** Alias a rebuilt form of the request body to the request's diagnostic draft. */
+export function rebindCacheDiagnosticBody(
+  body: unknown,
+  draft: CacheDiagnosticDraft | undefined,
+): void {
+  cacheDiagnosticHooks()?.rebind(body, draft);
+}
+
 export interface RequestLogEntry {
   requestId: string;
   /** The logical request this row belongs to (#4546); absent on rows written without a budget. */
@@ -268,6 +325,10 @@ export interface RequestLogEntry {
   responseServiceTier?: string;
   tierOutcome?: AttemptTierOutcome;
   resolvedModel?: string;
+  /** Model the upstream actually served (openai-model header or response body). */
+  servedModel?: string;
+  /** The exact model id sent upstream when it differs from the client-facing `model`. */
+  wireModel?: string;
   status: number;
   durationMs: number;
   errorCode?: string;
@@ -308,9 +369,17 @@ export interface RequestLogEntry {
   routeDecision?: RouteDecisionTraceV1;
   /** Closed Claude protocol codes; no request or header values. */
   claudeCompatibility?: PersistedClaudeCompatibilityLog;
+  /**
+   * How far this request got and why it failed, in the shared stage and cause vocabulary
+   * (#2366). Derived once at the single finalization seam and carried on the row so the
+   * dashboard, the durable ledger and the exporter read one answer instead of three.
+   */
+  failureStage?: RequestFailureStage;
+  failureCause?: RequestFailureCause;
 }
 
 const requestLog: RequestLogEntry[] = [];
+const requestLogObserversForTests = new Set<(entry: RequestLogEntry) => void>();
 const MAX_LOG_SIZE = 2000;
 const requestLogEntryBytes = new WeakMap<RequestLogEntry, number>();
 let requestLogBytes = 0;
@@ -427,7 +496,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
       : {}),
     ...(entry.responseServiceTier ? { responseServiceTier: entry.responseServiceTier } : {}),
     ...(entry.tierOutcome ? { tierOutcome: entry.tierOutcome } : {}),
-    ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
+    ...modelIdentityLogFields(entry),
     status: entry.status,
     durationMs: entry.durationMs,
     ...(entry.errorCode ? { errorCode: entry.errorCode } : {}),
@@ -450,6 +519,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.conversationStateScrub === "account-change"
       ? { conversationStateScrub: "account-change" }
       : {}),
+    ...normalizeRequestFailureAttribution(entry),
   };
 }
 
@@ -510,6 +580,24 @@ export function hydrateRequestLogsFromDisk(
   }
 }
 
+/**
+ * Rebuild the Logs ring after retention deleted rows from the ledger.
+ *
+ * Without this a compaction is invisible where an operator actually looks: the ring holds up to
+ * 2,000 entries independently of the file, so rows deleted from disk keep serving through
+ * /api/logs until eviction or a restart -- the dashboard showing history the ledger no longer
+ * has. Observers are deliberately not replayed; they exist to watch NEW rows arrive, and
+ * replaying a rehydration through them would announce two thousand arrivals that did not happen.
+ */
+export function rehydrateRequestLogsAfterLedgerReplacement(
+  reader: () => PersistedUsageEntry[] = () => readRecentUsageEntries(MAX_LOG_SIZE),
+): number {
+  requestLog.length = 0;
+  requestLogBytes = 0;
+  requestLogsHydratedFromDisk = false;
+  return hydrateRequestLogsFromDisk(reader);
+}
+
 export function addRequestLog(entry: RequestLogEntry) {
   // Sanitize ONCE, at the ingress, and use that one value for both destinations.
   //
@@ -524,6 +612,7 @@ export function addRequestLog(entry: RequestLogEntry) {
   const localTerminalReason = sanitizeLogMetadataString(entry.localTerminalReason);
   let diagnostics: TransactionDiagnosticsV1 | undefined;
   let persistenceStarted: number | undefined;
+  const modelIdentity = modelIdentityLogFields(entry);
   const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
   try {
     persistenceStarted = diagnosticFinalizedClock(entry.diagnostics);
@@ -551,6 +640,10 @@ export function addRequestLog(entry: RequestLogEntry) {
   else delete retained.upstreamError;
   if (localTerminalReason) retained.localTerminalReason = localTerminalReason;
   else delete retained.localTerminalReason;
+  delete retained.resolvedModel;
+  delete retained.servedModel;
+  delete retained.wireModel;
+  Object.assign(retained, modelIdentity);
   if (diagnostics) retained.diagnostics = diagnostics;
   else delete retained.diagnostics;
   if (!isKnownInboundTransport(retained.inboundTransport)) delete retained.inboundTransport;
@@ -595,6 +688,8 @@ export function addRequestLog(entry: RequestLogEntry) {
         : {}),
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
       ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
+      ...(entry.servedModel ? { servedModel: entry.servedModel } : {}),
+      ...(entry.wireModel ? { wireModel: entry.wireModel } : {}),
       ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
       ...(entry.requestedAlias ? { requestedAlias: entry.requestedAlias } : {}),
       ...(entry.shadowCallRewrittenFrom
@@ -629,6 +724,10 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...persistedAffinityFields(entry),
       ...(isKnownTransportPhase(entry.transportPhase) ? { transportPhase: entry.transportPhase } : {}),
       ...(isKnownTerminalSource(entry.terminalSource) ? { terminalSource: entry.terminalSource } : {}),
+      // Rebuilt explicitly, like every other field here: this function does not spread the
+      // entry, so a pair omitted at this line would reach /api/logs and never reach
+      // usage.jsonl, which is the surface the derived failure projection reads.
+      ...normalizeRequestFailureAttribution(entry),
       ...(entry.routeDecision ? { routeDecision: entry.routeDecision } : {}),
       ...(entry.claudeCompatibility ? { claudeCompatibility: entry.claudeCompatibility } : {}),
       ...(entry.conversationStateScrub === "account-change"
@@ -641,6 +740,15 @@ export function addRequestLog(entry: RequestLogEntry) {
     /* request logging must never fail a user request */
   }
   retainRequestLogEntry(entry);
+  for (const observer of requestLogObserversForTests) {
+    try { observer(entry); } catch { /* test observation must never fail request logging */ }
+  }
+}
+
+/** Test-only finalized-row observation without polling the management projection. */
+export function observeRequestLogsForTests(observer: (entry: RequestLogEntry) => void): () => void {
+  requestLogObserversForTests.add(observer);
+  return () => { requestLogObserversForTests.delete(observer); };
 }
 
 export function nextRequestLogId(_timestamp = Date.now()): string {
@@ -806,7 +914,15 @@ export function requestLogErrorCode(
     }
     return "permission_denied";
   }
-  if (status === 429) return "rate_limit_exceeded";
+  if (status === 429) {
+    // A refused ambiguous reset answers 429 by design (it must not invite a client
+    // retry that could duplicate inference); classify it by its message so the log
+    // distinguishes a proxy refusal from provider throttling.
+    if (upstreamError?.trim() && isUpstreamResetReplayRefusedMessage(upstreamError)) {
+      return UPSTREAM_RESET_REPLAY_REFUSED_CODE;
+    }
+    return "rate_limit_exceeded";
+  }
   if (status === 503) return "server_is_overloaded";
   if (status >= 500) return "upstream_server_error";
   return `http_${status}`;
@@ -867,16 +983,27 @@ export function catalogModelSupportsServiceTier(modelId: string, serviceTier: st
 export function applyResponseLogMetadata(logCtx: RequestLogContext, payload: unknown, diagnosticObserver?: object): void {
   recordProtocolEvent(logCtx, payload, 0, false, false, diagnosticObserver);
   if (!payload || typeof payload !== "object") return;
+  if (logCtx.observedTerminalStatus === undefined) {
+    const eventType = (payload as { type?: unknown }).type;
+    const response = (payload as { response?: unknown }).response;
+    const responseStatus = response && typeof response === "object"
+      ? (response as { status?: unknown }).status
+      : (payload as { status?: unknown }).status;
+    if (eventType === "response.completed") {
+      logCtx.observedTerminalStatus = "completed";
+    } else if (eventType === "response.failed") {
+      logCtx.observedTerminalStatus = "failed";
+    } else if (eventType === "response.incomplete") {
+      logCtx.observedTerminalStatus = "incomplete";
+    } else if (responseStatus === "completed" || responseStatus === "failed" || responseStatus === "incomplete") {
+      logCtx.observedTerminalStatus = responseStatus;
+    }
+  }
   const source = "response" in payload && typeof (payload as { response?: unknown }).response === "object"
     ? (payload as { response?: unknown }).response
     : payload;
   if (!source || typeof source !== "object") return;
-  const model = (source as { model?: unknown }).model;
-  if (
-    !logCtx.preserveResolvedModelFromRoute
-    && typeof model === "string"
-    && model.trim()
-  ) logCtx.resolvedModel = model;
+  recordObservedServedModel(logCtx, (source as { model?: unknown }).model);
   const serviceTier = (source as { service_tier?: unknown }).service_tier;
   if (typeof serviceTier === "string" && serviceTier.trim()) {
     const sanitized = sanitizeLogMetadataString(serviceTier);
@@ -1407,6 +1534,18 @@ export function addFinalRequestLog(
     if (errorCode) logCtx.activeAttempt.errorCode = errorCode;
     else delete logCtx.activeAttempt.errorCode;
   }
+  // Derived and stamped in a sibling module, before the attempt snapshot below. Every input is
+  // a closed value; the open error strings are deliberately not among them.
+  const attribution = attributeFinalRequest({
+    status: effectiveStatus,
+    ...(meta?.terminalStatus ? { terminalStatus: meta.terminalStatus } : {}),
+    ...(closeReason ? { closeReason } : {}),
+    ...(logCtx.transportPhase ? { transportPhase: logCtx.transportPhase } : {}),
+    ...(logCtx.terminalSource ? { terminalSource: logCtx.terminalSource } : {}),
+    outputObserved: logCtx.firstOutputMs !== undefined,
+    locallyAnswered: logCtx.localTerminalReason !== undefined,
+    ...(logCtx.activeAttempt ? { attempt: logCtx.activeAttempt } : {}),
+  });
   // The one seam every request passes exactly once, whatever transport served it and however
   // it ended. The terminal usage belongs to the last send that left; the ledger resolves every
   // earlier send of this request as unresolved spend rather than handing its tokens back.
@@ -1424,6 +1563,10 @@ export function addFinalRequestLog(
     ...(attempt.recoveryWithheld?.length ? { recoveryWithheld: [...attempt.recoveryWithheld] } : {}),
     ...(attempt.usage ? { usage: { ...attempt.usage } } : {}),
     ...(attempt.tierOutcome ? { tierOutcome: { ...attempt.tierOutcome } } : {}),
+    // Detached, like every mutable field beside it: the live summary keeps counting if the
+    // stream is still draining, and a shared reference would let a finalized row change after
+    // it was written.
+    ...(attempt.deliverySummary ? { deliverySummary: { ...attempt.deliverySummary } } : {}),
   }));
   const isCombo = logCtx.comboId !== undefined && (attempts?.length ?? 0) > 0;
   const aggregate = isCombo ? aggregateAttemptUsage(attempts ?? []) : null;
@@ -1435,10 +1578,40 @@ export function addFinalRequestLog(
     ...(attempts?.map(attempt => attempt.upstreamTransport) ?? []),
   ]);
   const spend = requestSpendRecord(logCtx, attempts);
+  const durationMs = Date.now() - start;
+  logCtx.requestMetricsRecorder?.recordFinalRequest({
+    ...(logCtx.inboundProtocol ? { protocol: logCtx.inboundProtocol } : {}),
+    status: effectiveStatus,
+    durationMs,
+    ...(logCtx.firstOutputMs !== undefined ? { firstOutputMs: logCtx.firstOutputMs } : {}),
+    ...(meta?.terminalStatus ? { terminalStatus: meta.terminalStatus } : {}),
+    ...(closeReason ? { closeReason } : {}),
+    ...(attempts !== undefined ? { attempts } : {}),
+    ...(spend ? { spendSends: spend.sends } : {}),
+    ...(attribution.failureCause ? { failureCause: attribution.failureCause } : {}),
+  });
   const cacheProvenance = classifyCacheTelemetryProvenance(loggedUsage, {
     wireParsed: logCtx.usageWireParsed === true,
   });
   const logicalRequestId = logCtx.logicalRequestId ?? logCtx.executionBudget?.logicalRequestId;
+  const normalizedCacheValue = loggedUsage?.cacheReadInputTokens ?? loggedUsage?.cachedInputTokens;
+  cacheDiagnosticHooks()?.finalize({
+    requestId,
+    ...(isLogicalRequestId(logicalRequestId) ? { logicalRequestId } : {}),
+    protocol: logCtx.inboundProtocol ?? "responses",
+    provider: logCtx.provider,
+    model: logCtx.model,
+    ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel) ? { accountLogLabel: logCtx.accountLogLabel } : {}),
+    ...(logCtx.affinity ? { affinityMove: logCtx.affinity } : {}),
+    ...(logCtx.affinityReason ? { affinityReason: logCtx.affinityReason } : {}),
+    // loggedUsage carries the upstream cache counter by reference all the way from the
+    // adapter extraction for the native Responses route, so an undefined read here is a
+    // genuinely absent counter rather than a defaulted one.
+    ...(normalizedCacheValue !== undefined ? { rawCacheCounterValue: normalizedCacheValue } : {}),
+    ...(normalizedCacheValue !== undefined ? { normalizedCacheValue } : {}),
+    cacheProvenance,
+    ...(logCtx.cacheDiagnosticDraft ? { draft: logCtx.cacheDiagnosticDraft } : {}),
+  });
   // Sanitize at the logging layer, not only at the one call site that populates this today.
   // The value originates in an upstream-supplied model id, so an unsanitized newline would
   // let a single field forge a record boundary in any line-oriented log viewer. Doing it here
@@ -1484,9 +1657,9 @@ export function addFinalRequestLog(
     ...((attempts?.at(-1)?.tierOutcome ?? logCtx.tierOutcome)
       ? { tierOutcome: attempts?.at(-1)?.tierOutcome ?? { ...logCtx.tierOutcome! } }
       : {}),
-    ...(logCtx.resolvedModel ? { resolvedModel: logCtx.resolvedModel } : {}),
+    ...modelIdentityLogFields(logCtx),
     status: effectiveStatus,
-    durationMs: Date.now() - start,
+    durationMs,
     ...(logCtx.firstOutputMs !== undefined ? { firstOutputMs: logCtx.firstOutputMs } : {}),
     ...(errorCode ? { errorCode } : {}),
     ...(meta?.terminalStatus ? { terminalStatus: meta.terminalStatus } : {}),
@@ -1510,7 +1683,10 @@ export function addFinalRequestLog(
     ...(logCtx.terminalSource ? { terminalSource: logCtx.terminalSource } : {}),
     ...(logCtx.routeDecision ? { routeDecision: logCtx.routeDecision } : {}),
     ...(claudeCompatibility ? { claudeCompatibility } : {}),
+    ...attribution,
   });
+  // Formatted from the finalized snapshot, so the ring shows exactly what the ledger holds.
+  for (const attempt of attempts ?? []) debugAttemptDeliverySummary(requestId, attempt);
   if (isUsageDebugEnabled()) {
     appendUsageDebug({
       ts: Date.now(),
@@ -1782,8 +1958,14 @@ export function noteProviderAttemptSend(
     finishRequestAttempt(attempt, attempt.status >= 100 ? attempt.status
       : recovery === "key-401" ? 401 : recovery?.includes("429") ? 429 : 502,
     Date.now() - (logCtx.activeAttemptStartedAt ?? Date.now()), attempt.usage);
+    // This attempt is being sealed because a NAMED recovery rejected it, so the recovery kind
+    // is direct evidence here rather than an inference from history. Without this the sealed
+    // attempt would reach the ledger with no attribution at all: the finalization seam below
+    // only ever sees the last attempt of the request.
+    attributeSealedAttempt(attempt, recovery);
     const completed = { ...attempt, recoveryKinds: [...attempt.recoveryKinds],
       ...(attempt.usage ? { usage: { ...attempt.usage } } : {}),
+      ...(attempt.deliverySummary ? { deliverySummary: { ...attempt.deliverySummary } } : {}),
       ...(attempt.tierOutcome ? { tierOutcome: { ...attempt.tierOutcome } } : {}) };
     const attempts = logCtx.attempts ??= [attempt];
     const index = attempts.indexOf(attempt);
@@ -1961,4 +2143,5 @@ export function clearRequestLogsForTests(): void {
   requestLog.length = 0;
   requestLogBytes = 0;
   requestLogsHydratedFromDisk = false;
+  requestLogObserversForTests.clear();
 }

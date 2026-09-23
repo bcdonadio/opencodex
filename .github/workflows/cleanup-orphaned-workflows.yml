@@ -34,20 +34,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup checksum-verified Bun 1.4.2
+      - name: Setup checksum-verified Bun 1.4.0
         shell: bash
         run: |
           set -euo pipefail
           bun_stage="$(mktemp -d "$RUNNER_TEMP/ocx-bun.XXXXXX")"
           curl --fail --silent --show-error --location \
-            'https://registry.npmjs.org/@oven/bun-linux-x64/-/bun-linux-x64-1.4.2.tgz' \
+            'https://registry.npmjs.org/@oven/bun-linux-x64/-/bun-linux-x64-1.4.0.tgz' \
             --output "$bun_stage/bun.tgz"
-          # SHA-512 of @oven/bun-linux-x64@1.4.2, also recorded in bun.lock.
+          # SHA-512 of @oven/bun-linux-x64@1.4.0, also recorded in bun.lock.
           printf '%s  %s\n' \
-            'f7f13f517393a52a3762c57983e161b5377fa93a625a82aec52d7672ab6e600d6cb2ef5f440a0f4278a91601b2724ded58eeb7894771062ca0abe9042c56b09e' \
+            '0eee38cde6ed3d726e8ef30b9ad231110eb290e858b7b2ff43e6081959be632f8f8ff7e93a7abad208302292a9fe918015b6073624eb0372538ee67d3136d922' \
             "$bun_stage/bun.tgz" | sha512sum --check --status
           tar -xzf "$bun_stage/bun.tgz" -C "$bun_stage"
-          test "$("$bun_stage/package/bin/bun" --version)" = '1.4.2'
+          test "$("$bun_stage/package/bin/bun" --version)" = '1.4.0'
           printf '%s\n' "$bun_stage/package/bin" >> "$GITHUB_PATH"
 
       - name: Remove stale workflow histories

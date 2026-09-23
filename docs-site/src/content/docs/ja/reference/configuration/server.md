@@ -19,9 +19,10 @@ description: リスナー、リモート アクセス、アドミッション �
 | `shutdownTimeoutMs?` | `number` | `5000` |アクティブなターンが中止される前の正常な排出期限。 |
 | `websockets?` | `boolean` | `false` | クライアント向け Responses WebSocket パスを広告して許可します。false の場合クライアントは HTTP/SSE を使いますが、対象となる canonical ChatGPT upstream WS 最適化は無効にしません。 |
 | `corsAllowOrigins?` | `string[]` | `[]` | 追加の正確な CORS origin。ループバック origin は常に許可します。`chrome-extension://<extension-id>` など authority ベースのブラウザー拡張 origin に対応し、`*` はワイルドカードではありません。Firefox と Safari は拡張 UUID を（インストール/ブラウザー起動ごとに）再生成するため、origin が変わったらエントリを更新してください。 |
-| `apiKeys?` | `OcxApiKey[]` | `[]` |生成された `ocx_…` 資格情報は、非ループバック バインドでの管理およびデータ プレーン認証によって受け入れられました。ダッシュボードで管理。 |
+| `apiKeys?` | `OcxApiKey[]` | `[]` |生成された `ocx_…` データプレーン准入資格情報（非ループバック バインド向け）。管理 API の認可には使用できません。管理アクセスには [管理 API リファレンス](/ja/reference/management-api/) に記載された独立した資格情報を使用します。ダッシュボードで管理。 |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` |無効 |アーカイブされたセッションのクリーンアップ ポリシーをオプトインします。暗黙的に有効になることはありません。 |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` |排除可能なアプリ所有のログ、キャッシュ、BLOB、および継続ペイロードの MiB の上限。範囲は 64 ～ 4096。 RSSキャップではありません。 |
+| `metricsExport.enabled?` | `boolean` | `false` | 認証済み `GET /api/metrics` でプロセスローカルの集約リクエストメトリクスを有効にします。再起動が必要です。無効時は 404 となり、エクスポーター処理は開始されません。 |
 | `codexAutoStart?` | `boolean` | `true` | Codex を起動する前に、Codex シムで `ocx ensure` を実行させます。 False を指定すると、操作が行われないことが保証されます。 |
 | `codexShimAutoRestore?` | `boolean` | `true` |完了した外部 Codex アップデートによってインストールされたシムが置き換えられた後、インストールされているシムを復元します。環境オプトアウト: `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
 | `syncResumeHistory?` | `boolean` | `true` | Codex App 履歴の互換性を元に戻すことができます。元のメタデータは `ocx stop` / `ocx restore` によってバックアップおよび復元されます。 |
@@ -122,6 +123,12 @@ Codex は、タイトルやコミット メッセージなどのタスクに小�
   }
 }
 ```
+
+### ターゲットが利用できないとき
+
+置き換え先はオペレーターが選んだ唯一の宛先なので、解決できなくなったターゲットは別の宛先に送らず、補助呼び出しを失敗させます。ターゲットのプロバイダーが無効化または削除された場合、あるいはそのコンボが存在しなくなった場合、傍受されたリクエストはアップストリームに何も送る前に `409` とエラーコード `intercept_target_unavailable` を返します。リクエストログにも同じコードが記録されます。リクエストはネイティブの補助モデルへ素通しされず、既定のプロバイダーにもフォールバックしません。どちらも、あなたが選んでいない宛先・認証情報・コストに変わってしまうためです。コンボまたはルーティングプロファイルのターゲットは、引き続き自身のメンバー間でフェイルオーバーします。`provider/model` のような修飾付きターゲットで、プロバイダー部分が設定済みのものを指していない場合も同様に扱われ、設定 API はその保存を拒否します。既定のプロバイダー経由で解決される修飾なしのモデル ID は引き続き有効です。
+
+ターゲットが解決されるプロバイダーを無効化（`disabled: true` を指定した `PATCH /api/providers?name=<provider>`）または削除しても操作は成功し、レスポンスに `dependentShadowIntercept: { model, enabled }` が加わり、ダッシュボードに警告が表示されます。プロバイダーを再度有効にするか別のターゲットを選ぶと、傍受が再開します。
 
 ## サイドカー
 

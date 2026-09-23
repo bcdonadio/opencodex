@@ -40,6 +40,7 @@ import {
   encryptedInput,
   recoverySse,
 } from "../helpers/agent-task-recovery";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 /**
@@ -184,15 +185,22 @@ async function postSpawn(
   const requestHeaders = new Headers(headers);
   requestHeaders.set("content-type", "application/json");
   requestHeaders.set("x-openai-subagent", "collab_spawn");
-  const response = await handleResponses(new Request("http://localhost/v1/responses", {
-    method: "POST",
-    headers: requestHeaders,
-    body: JSON.stringify({ model, input, stream: false }),
-  }), config, logCtx, options);
-  // handleResponses owns its translator budget through the returned body lifecycle. Draining the
-  // body also lets completed Responses schedule their state write before afterEach cancels it.
-  await response.arrayBuffer();
-  return response;
+  // Acquire on this case's installed home so direct dispatch can open the shared spend journal.
+  const releaseSpendHome = acquireOwnedSpendHome();
+  try {
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: requestHeaders,
+      body: JSON.stringify({ model, input, stream: false }),
+    }), config, logCtx, options);
+    // handleResponses owns its translator budget through the returned body lifecycle. Draining the
+    // body also lets completed Responses schedule their state write before afterEach cancels it.
+    await response.arrayBuffer();
+    return response;
+  } finally {
+    // Release before afterEach removes this home to prevent Windows removal failures.
+    releaseSpendHome();
+  }
 }
 
 beforeEach(() => {
@@ -424,17 +432,30 @@ describe("preview and final authentication agree on the native-main read fence",
     expect(authJsonReads).toBe(0);
   });
 
-  test("ownership alone leaves selection-only off in preview and final authentication", async () => {
+  /**
+   * #5019. Ownership used to leave main out of the comparison entirely: the synthetic liveness
+   * answered with the manual-pin predicate, so an UNPINNED request scored main
+   * `main_credential_unavailable`, `getEligiblePoolAccounts` never listed it, and main served only
+   * as the fallback after every stored account had failed. With one stored sibling that degraded
+   * the pool to "stored account until it cannot serve, then main".
+   *
+   * Main is now an ordinary candidate, and the physical file stays deleted for the whole request.
+   * That is the fence assertion: any path that still needed `auth.json` would take an ENOENT here
+   * rather than a quiet fallback, so a 200 served on the caller's own bearer is the proof.
+   *
+   * The recorded failure belongs to `pool-a`, which is the discriminator: a preview that scored
+   * `pool-a` would see it and rewrite the model to the XAI fallback. Leaving the model alone is
+   * only possible if preview scored main, which is what final authentication then does.
+   *
+   * This does not turn on `nativeMainSelectionOnly`. That flag is still derived from the drain
+   * alone, and the request below never claims the physical profile.
+   */
+  test("ownership makes main an ordinary candidate, served from the caller's bearer (#5019)", async () => {
     seedMainDenial();
     calibrateMainReadCounter();
-    // Make the two selection modes observably different. Ordinary selection finds physical main
-    // unreadable and uses pool-a; selection-only would retain main as a synthetic candidate
-    // without opening the missing file.
     unlinkSync(join(testDir, "auth.json"));
     const config = providerConfig({ activeCodexAccountId: MAIN_CODEX_ACCOUNT_ID });
-    // If preview incorrectly treated ownership as selection-only, it would score the request as
-    // native main, observe this account-scoped failure, and route to the XAI fallback.
-    noteSubagentModelFailure(PREFERRED_MODEL, "429", config, MAIN_CODEX_ACCOUNT_ID, NOW);
+    noteSubagentModelFailure(PREFERRED_MODEL, "429", config, "pool-a", NOW);
     const upstreamUrls: string[] = [];
     const upstreamBodies: string[] = [];
     const upstreamAuth: Array<string | null> = [];
@@ -457,12 +478,44 @@ describe("preview and final authentication agree on the native-main read fence",
     );
 
     expect(response.status).toBe(200);
-    expect(finalAuth).toMatchObject({ kind: "pool", accountId: "pool-a" });
+    expect(finalAuth).toMatchObject({ kind: "main", accountId: null });
     expect(upstreamUrls).toHaveLength(1);
     expect(upstreamUrls[0]).toContain("chatgpt.com/backend-api/codex");
     expect(upstreamBodies[0]).toContain(`"model":"${PREFERRED_MODEL}"`);
-    expect(upstreamAuth).toEqual(["Bearer pool-access-token"]);
     expect((logCtx as unknown as Record<string, unknown>).subagentModelFallbackTo).toBeUndefined();
+    // The caller's own bearer is what main is served from. Neither stored credential may appear,
+    // and the denial-cache validator -- the one read this file exists to fence -- never ran.
+    expect(upstreamAuth[0]).not.toBe("Bearer pool-access-token");
+    expect(upstreamAuth[0]).not.toBe("Bearer physical-main-token");
+    expect(denialCacheMainReadStacks()).toEqual([]);
+  });
+
+  /**
+   * The other direction of the same change, and the reason it is a behavior change rather than a
+   * widening. Main now serves this request, so main's own recorded failure is the one subagent
+   * fallback must react to. Before #5019 this failure was invisible to routing, because main was
+   * never scored in the first place.
+   */
+  test("a recorded main failure reaches subagent fallback once main serves the request (#5019)", async () => {
+    seedMainDenial();
+    calibrateMainReadCounter();
+    unlinkSync(join(testDir, "auth.json"));
+    const config = providerConfig({ activeCodexAccountId: MAIN_CODEX_ACCOUNT_ID });
+    noteSubagentModelFailure(PREFERRED_MODEL, "429", config, MAIN_CODEX_ACCOUNT_ID, NOW);
+    globalThis.fetch = (async () => completedResponses(FALLBACK_MODEL)) as typeof fetch;
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+
+    const response = await postSpawn(
+      config,
+      {},
+      codexHeaders("caller-account"),
+      readableInput(),
+      PREFERRED_MODEL,
+      logCtx,
+    );
+
+    expect(response.status).toBe(200);
+    expect((logCtx as unknown as Record<string, unknown>).subagentModelFallbackTo).toBe(FALLBACK_MODEL);
   });
 
   // The two cases below are last on purpose. Both let a request reach native main, and observing

@@ -2,9 +2,10 @@ import { parseQuotaFailureCode } from "../../../src/providers/quota-types";
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import type { AccountLoadState, AccountQuotaReading } from "../components/provider-workspace/types";
 import { createBoundedFetch } from "../bounded-fetch";
+import { confirmAction, requestTextValue } from "../action-dialogs";
+import { credentialAliasRejection, CREDENTIAL_ALIAS_MAX_LENGTH } from "../credential-alias";
 import { accountNeedsReauth } from "../oauth-health-display";
 import { oauthAccountDisplayLabel } from "../provider-workspace/auth";
-import type { RequestAlias } from "./useAliasEditor";
 
 export interface Config {
   port: number;
@@ -103,7 +104,6 @@ export function buildActiveAccountNeedsReauthMap(
 export function useProviderAccountPools(deps: {
   apiBase: string;
   t: (key: string, ...args: unknown[]) => string;
-  requestAlias: RequestAlias;
   config: Config | null;
   oauthStatus: Record<string, OAuthStatus>;
   aliveRef: MutableRefObject<boolean>;
@@ -114,7 +114,7 @@ export function useProviderAccountPools(deps: {
   codexActiveNeedsReauth: boolean;
 }) {
   const {
-    apiBase, t, requestAlias, config, aliveRef, notify,
+    apiBase, t, config, aliveRef, notify,
     fetchConfig, fetchOauth, fetchProviderQuotas, codexActiveNeedsReauth,
   } = deps;
   const [accountSets, setAccountSets] = useState<Record<string, { activeAccountId: string | null; accounts: OAuthAccount[] }>>({});
@@ -429,7 +429,12 @@ export function useProviderAccountPools(deps: {
   };
 
   const removeApiKey = async (provider: string, entry: ApiKeyEntry) => {
-    if (!window.confirm(t("prov.keyRemoveConfirm", { key: entry.label ?? entry.masked }))) return;
+    const consented = await confirmAction({
+      message: t("prov.keyRemoveConfirm", { key: entry.label ?? entry.masked }),
+      confirmLabel: t("common.remove"),
+      tone: "danger",
+    });
+    if (!consented) return;
     const res = await fetch(`${apiBase}/api/providers/keys?name=${encodeURIComponent(provider)}&id=${encodeURIComponent(entry.id)}`, { method: "DELETE" });
     if (res.ok) {
       notify(t("prov.keyRemoved", { key: entry.label ?? entry.masked }), true);
@@ -468,10 +473,11 @@ export function useProviderAccountPools(deps: {
   };
 
   const editCredentialAlias = async (provider: string, type: "oauth" | "api-key", id: string, current?: string) => {
-    const entered = await requestAlias({
-      title: t("prov.editAlias"),
-      label: t("prov.aliasPrompt"),
+    const entered = await requestTextValue({
+      message: t("prov.aliasPrompt"),
       initialValue: current ?? "",
+      maxLength: CREDENTIAL_ALIAS_MAX_LENGTH,
+      validate: value => credentialAliasRejection(value, t),
     });
     if (entered === null) return;
     const alias = entered.trim();
@@ -491,7 +497,12 @@ export function useProviderAccountPools(deps: {
 
   const removeAccount = async (provider: string, account: OAuthAccount) => {
     const label = oauthAccountDisplayLabel(accountSets[provider]?.accounts ?? [account], account, t);
-    if (!window.confirm(t("prov.accountRemoveConfirm", { email: label }))) return;
+    const consented = await confirmAction({
+      message: t("prov.accountRemoveConfirm", { email: label }),
+      confirmLabel: t("common.remove"),
+      tone: "danger",
+    });
+    if (!consented) return;
     try {
       const res = await fetch(`${apiBase}/api/oauth/accounts?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(account.id)}`, { method: "DELETE" });
       if (!res.ok) { notify(t("prov.accountRemoveFail", { email: label }), false); return; }

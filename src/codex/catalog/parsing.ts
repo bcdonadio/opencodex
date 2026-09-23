@@ -194,6 +194,8 @@ export const ROUTED_MODEL_COMPATIBILITY_EXCLUSIONS = new Set([
    * keep appearing with its capabilities broken. Excluding the slug is what actually takes
    * it out of the routed catalog.
    */
+  "deepseek/deepseek-v4-pro",
+  "opencode-go/deepseek-v4-pro",
   "command-code/deepseek-deepseek-v4-pro",
   "commandcode/deepseek-deepseek-v4-pro",
   "orcarouter/deepseek-deepseek-v4-pro",
@@ -803,6 +805,13 @@ export function normalizeRoutedCatalogEntry(
   delete entry.multi_agent_reasoning_effort;
   delete entry.use_responses_lite;
   delete entry.supports_websockets;
+  // Routed rows cloned from native templates must not inherit OpenAI-only experimental context
+  // delivery. Codex reads the flag as "this model accepts experimental context history" and drives
+  // its context-management cadence from it, so a third-party provider that never negotiated it gets
+  // a compact-after-every-step loop instead (observed on a routed DeepSeek row: 1,600+ compactions
+  // in a single thread). Nothing re-applies the field from provider metadata during this step, so
+  // the row leaves this normalization without it.
+  delete entry.supports_experimental_context;
   /*
    * Tier metadata is stripped from routed rows because a row cloned from a native template
    * would otherwise hand a third-party provider OpenAI's tiers.

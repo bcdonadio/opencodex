@@ -51,7 +51,7 @@ export async function prepareResponsesSidecarAuth(
   let openAiSearchSidecar: ResolvedOpenAiForwardSidecar | undefined;
   const visionDescribeTerminal = options.visionDescribeTerminal === true;
   const routedCompaction = parsed._compactionRequest === true
-    && !isCanonicalOpenAiForwardProvider(route.provider);
+    && (!isCanonicalOpenAiForwardProvider(route.provider) || parsed._portableCompaction === true);
   const needsOpenAiVision = !visionDescribeTerminal
     && shouldResolveOpenAiVisionSidecar(config, route.provider, route.modelId, parsed, route.providerName);
   const needsOpenAiSearch = !routedCompaction && !transportState.adapter.runTurn
@@ -149,7 +149,7 @@ export async function prepareResponsesSidecarAuth(
     // Image capability is not positively proven but no sidecar plan is dispatchable: fail closed.
     // Never forward raw image bytes to an unverified upstream.
     stripImagesInPlace(parsed, translatorBudget);
-    if (!needsOpenAiSearch) openAiSidecar?.releaseProbeLease?.();
+    if (!needsOpenAiSearch) openAiVisionSidecar?.releaseProbeLease?.();
   }
 
   return {

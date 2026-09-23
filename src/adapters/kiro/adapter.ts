@@ -251,6 +251,7 @@ export function createKiroAdapter(provider: OcxProviderConfig): ProviderAdapter 
       });
       return {
         response,
+        abortSignal: requestAbortSignal,
         inputTokens: retry.inputTokens,
         contextInputEstimate: retry.contextInputEstimate,
         nameMap: retry.nameMap,

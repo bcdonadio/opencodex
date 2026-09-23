@@ -113,8 +113,12 @@ export function createResponsesSendBudget(
   const noteAdapterPhysicalSend = (
     inputTokens: number | undefined,
     send: { ordinal: number; recovery?: AttemptRecoveryKind },
+    options: { readonly includeFirst?: boolean } = {},
   ): void => {
-    if (send.ordinal <= 1) return;
+    // Ordinal 1 is skipped because the caller normally records it before dispatch. An adapter
+    // that reports every send asks for it to be counted here instead, so that the first send is
+    // logged where it actually happens rather than before admission could still refuse it.
+    if (send.ordinal <= 1 && options.includeFirst !== true) return;
     noteAttemptSend(logCtx.activeAttempt, inputTokens, send.recovery);
   };
   /**
@@ -139,6 +143,16 @@ export function createResponsesSendBudget(
    */
   const sendBudgetExhausted = (cap: number = TRANSIENT_RETRY_MAX_ATTEMPTS): boolean =>
     remainingTransientSendBudget(cap) === 0;
+  /**
+   * Spend one operator-granted replacement for an ambiguous failure of THIS logical request.
+   *
+   * The counter is the execution budget's, so a combo child that derives its own scope draws on
+   * the same grant. A budget that predates it -- a stub, or a caller that passed the narrow
+   * holder -- cannot grant anything, and refusing is the fail-closed answer for a send whose
+   * upstream state is unknown.
+   */
+  const claimAmbiguousResend = (limit: number): boolean =>
+    isRequestExecutionBudget(sendBudget) && sendBudget.claimAmbiguousResend?.(limit) === true;
   /**
    * A credential hop reserves the send its own replay will make, and that replay is a recovery
    * leg. The leg must SPEND the hop's reservation instead of taking a second one: the
@@ -263,6 +277,7 @@ export function createResponsesSendBudget(
     noteAdapterPhysicalSend,
     noteAdapterRecoveryWithheld,
     sendBudgetExhausted,
+    claimAmbiguousResend,
     get pendingHopPermit(): SingleUseDispatchPermit | undefined {
       return pendingHopPermit;
     },
@@ -301,6 +316,7 @@ function adapterDispatchBudgetView(
     get targetTransitions(): number { return budget.targetTransitions; },
     get lastTargetKey(): string | undefined { return budget.lastTargetKey; },
     remainingBaseSends: (cap: number): number => budget.remainingBaseSends(cap),
+    claimAmbiguousResend: (limit: number): boolean => budget.claimAmbiguousResend?.(limit) === true,
     reserveDispatch(intent: DispatchIntent): DispatchDecision {
       // A dispatch whose upstream state is unknown is refused on its own merits. A hop that
       // already paid does not make an unsafe replay safe, so that check stays with the budget.

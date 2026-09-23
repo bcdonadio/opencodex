@@ -255,11 +255,16 @@ uses an unsupported protocol, opencodex skips the WebSocket attempt and uses HTT
 dialing the upstream directly.
 
 These rules belong to the upstream WebSocket transport, independently of the selected provider
-adapter. HTTP fetch-based Responses requests, including SSE fallback, use Bun's HTTP proxy rules
-and do not use `ALL_PROXY`. `config.proxy` fills missing `HTTP_PROXY`/`HTTPS_PROXY` values; the
-resulting scheme-specific value also takes precedence over an existing `ALL_PROXY` for WebSocket.
-For an HTTPS upstream that requires a proxy, set `HTTPS_PROXY` or `config.proxy`; `HTTP_PROXY`
-alone leaves both WSS and its HTTPS fallback without a scheme-matched proxy.
+adapter. HTTP fetch-based Responses requests, including SSE fallback, use the
+[configured outbound fetch](/reference/configuration/server/#server-fields). A server SOCKS5 proxy — set
+with `config.proxy` or inherited from a SOCKS5 `ALL_PROXY` — uses OpenCodex's built-in tunnel when
+`NO_PROXY`/`no_proxy` does not exempt the target. Scheme-specific
+`HTTP_PROXY`/`HTTPS_PROXY` values retain Bun's native HTTP(S) handling, while a non-SOCKS
+`ALL_PROXY` is not a native HTTP fetch route. `config.proxy` fills missing
+`HTTP_PROXY`/`HTTPS_PROXY` values; the resulting scheme-specific value also takes precedence over
+an existing `ALL_PROXY` for WebSocket. For an HTTPS upstream that requires a proxy, set
+`HTTPS_PROXY` or `config.proxy`; `HTTP_PROXY` alone leaves both WSS and its HTTPS fallback without
+a scheme-matched proxy.
 
 Every terminal Responses usage object includes both detail objects, even when the provider did not
 report those details:
@@ -704,3 +709,25 @@ and can read those bytes; a `forward` provider pointed at any other origin is no
 Explicitly trusted `allowEncryptedV2AgentTasks` routes and translated Chat or Anthropic wires are
 unaffected, as are other item types such as reasoning and tool-output blobs, which keep their
 existing decrypt-failure recovery.
+
+### Switching providers in an existing conversation
+
+A replayed reasoning item carries `encrypted_content` that only the provider and credential that
+produced it can read. When opencodex knows the conversation was last served by a different
+provider, it removes that blob before sending and keeps the item's summary. If that provider also
+used a different endpoint or credential, the item's `rs_…` id is removed too, because it names an
+item the new destination cannot look up. When it cannot know,
+for example after a proxy restart, the new destination rejects the blob instead: OpenAI and Azure
+OpenAI answer `400 invalid_encrypted_content`. opencodex then resends the request once without the
+previous provider's reasoning state. The blob goes, and so does the reasoning item's `rs_…` id,
+because that id names an item the previous provider stored and the new destination would answer
+`Item with id 'rs_…' not found`.
+
+This recovery applies to every adapter that speaks the Responses wire, so `openai-responses` and
+`azure-openai` behave the same way. After a successful recovery, later turns of that conversation
+on the same destination drop the foreign state before the first send for the next five minutes,
+without another rejected round trip. The resend counts against the request's normal send budget.
+An ordinary 400 and a 429 are never retried this way, and neither is a 5xx, with one narrow
+exception: a 502 whose body is the exact encrypted tool-output decrypt rejection, sent for a request
+that carries encrypted tool output, gets the same single resend. A second rejection reaches the
+client unchanged. If that happens, start a new conversation on the destination provider.

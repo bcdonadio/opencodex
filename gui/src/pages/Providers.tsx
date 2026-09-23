@@ -21,7 +21,6 @@ import { useProvidersFetch } from "./use-providers-fetch";
 import { ProvidersPageModals } from "./providers-page-modals";
 import { buildAccountLoginStatus, buildAddModalAccountRows } from "./providers-page-utils";
 import type { CodexAccountMutationCompletion } from "../codex-account-mutation";
-import { useAliasEditor } from "../hooks/useAliasEditor";
 import { useProviderModelsNotice } from "./use-provider-models-notice";
 import { navigateHash } from "../hash-routing";
 
@@ -210,7 +209,6 @@ function useAccountSelectionEvents(
 
 export default function Providers({ apiBase }: { apiBase: string }) {
   const t = useT();
-  const { requestAlias, dialog: aliasDialog } = useAliasEditor();
   const configCacheKey = `ocx.providers.config.v1:${apiBase}`;
   const [config, setConfig] = useState<ProvidersConfig | null>(
     () => readSessionListCache<ProvidersConfig>(configCacheKey),
@@ -248,10 +246,10 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const bootstrapKeyRef = useRef<string | null>(null);
   const removeBusyRef = useRef(false);
 
-  const notify = useCallback((msg: string, ok: boolean = true) => {
+  const notify = useCallback((msg: string, ok: boolean = true, tone?: NoticeTone) => {
     setStatus(msg);
     setStatusOk(ok);
-    setStatusTone(ok ? "ok" : "err");
+    setStatusTone(tone ?? (ok ? "ok" : "err"));
     setStatusRevision(revision => revision + 1);
   }, []);
 
@@ -371,7 +369,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
 
   const pools = useProviderAccountPools({
     apiBase, t: t as unknown as Parameters<typeof useProviderAccountPools>[0]["t"],
-    requestAlias,
     config, oauthStatus: oauthStatusWithCodex, aliveRef,
     notify,
     fetchConfig, fetchOauth, fetchProviderQuotas, codexActiveNeedsReauth,
@@ -732,7 +729,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
           void loginOAuth(pending.provider, pending.addAccount, pending.accountId);
         }}
       />
-      {aliasDialog}
     </>
   );
 }

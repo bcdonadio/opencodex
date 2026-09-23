@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction } from "../../src/adapters/openai-responses";
@@ -22,8 +22,16 @@ import {
 import { createTranslatorBudget } from "../../src/lib/translator-budget";
 import type { AdapterEvent, OcxConfig } from "../../src/types";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
+import { acquireOwnedSpendHome } from "../helpers/owned-spend-home";
+import { buildKeyAuthUrl } from "../helpers/passthrough-key-url";
 import { restoreRoutedNamespaceCalls } from "../../src/responses/namespace-tool-compat";
 import { restoreRoutedCustomCalls } from "../../src/responses/custom-tool-compat";
+
+// A case that calls handleResponses directly never takes the writer lease startServer takes, so
+// its dispatch is refused. Dropped in teardown so a throwing case cannot leave the lease behind.
+let releaseSpendHome: (() => void) | undefined;
+const takeSpendHome = (): void => { releaseSpendHome ??= acquireOwnedSpendHome(); };
+afterEach(() => { releaseSpendHome?.(); releaseSpendHome = undefined; });
 
 const createResponsesPassthroughAdapter = (...args: Parameters<typeof createResponsesPassthroughAdapterProduction>) =>
   withTestTranslatorBudget(createResponsesPassthroughAdapterProduction(...args));
@@ -640,6 +648,7 @@ test("noncanonical Responses preserves provider-owned safety-buffering hints", a
         dropCodexSafetyBuffering: true,
         providers: { fixture: providerConfig },
       } as OcxConfig;
+      takeSpendHome();
       const response = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -772,23 +781,6 @@ test("passthrough serialized-body observation releases after the request settles
   expect(budget.snapshot().currentBytes).toBe(0);
   budget.dispose();
 });
-
-function buildKeyAuthUrl(baseUrl: string, responsesPath?: string): string {
-  const adapter = createResponsesPassthroughAdapter({
-    adapter: "openai-responses",
-    baseUrl,
-    authMode: "key" as const,
-    apiKey: "sk-test",
-    ...(responsesPath === undefined ? {} : { responsesPath }),
-  });
-  return adapter.buildRequest({
-    modelId: "test-model",
-    context: { messages: [] },
-    stream: true,
-    options: {},
-    _rawBody: { model: "test-model", input: "ping" },
-  }, { headers: new Headers() }).url;
-}
 
 describe("OpenAI Responses key-auth URL construction", () => {
   test("BUG-R289 preserves legacy /v1/responses URL when responsesPath is absent", () => {
@@ -4364,6 +4356,7 @@ describe("routed namespace and custom-tool identity", () => {
     });
 
     try {
+      takeSpendHome();
       const jsonResponse = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -4384,6 +4377,7 @@ describe("routed namespace and custom-tool identity", () => {
         arguments: "{}",
       });
 
+      takeSpendHome();
       const sseResponse = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -4448,6 +4442,7 @@ describe("routed namespace and custom-tool identity", () => {
     }) as typeof fetch;
 
     try {
+      takeSpendHome();
       const response = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -4794,11 +4789,15 @@ describe("raw usage passthrough on the forward path (#41980 parity, #37138 adjac
     stream,
     input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
   });
-  const call = (stream: boolean) => handleResponses(new Request("http://localhost/v1/responses", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: requestBody(stream),
-  }), config, { model: "", provider: "" });
+  // Inside the arrow: taken beside it, at collection time, the first teardown drops it for good.
+  const call = (stream: boolean) => {
+    takeSpendHome();
+    return handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody(stream),
+    }), config, { model: "", provider: "" });
+  };
 
   test("streamed response.completed with usage extras reaches the client byte-identical", async () => {
     const savedFetch = globalThis.fetch;
@@ -4875,6 +4874,7 @@ test("canonical Responses hint suppression is opt-in at the request boundary", a
       const config = { port: 0, dropCodexSafetyBuffering, providers: { openai: {
         ...provider, codexAccountMode: "direct", upstreamWebsocket: false,
       } } } as OcxConfig;
+      takeSpendHome();
       const response = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST", headers: { "content-type": "application/json", authorization: "Bearer fixture-forward-token" },
         body: JSON.stringify({ model: "openai/gpt-5.6-sol", input: "ping", stream: true }),

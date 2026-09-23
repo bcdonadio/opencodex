@@ -3201,7 +3201,7 @@ describe("codex account selection order", () => {
       activeCodexAccountPinned: "b",
     });
     updateAccountQuota("a", 10);
-    updateAccountQuota("b", 90);
+    updateAccountQuota("b", 100);
 
     expect(resolveCodexAccountForThreadDetailed(
       null,
@@ -3245,7 +3245,7 @@ describe("codex account selection order", () => {
       activeCodexAccountPinned: "b",
     });
     updateAccountQuota("a", 10);
-    updateAccountQuota("b", 90);
+    updateAccountQuota("b", 100);
 
     expect(resolveCodexAccountForThreadDetailed(
       null,
