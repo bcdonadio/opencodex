@@ -1018,8 +1018,6 @@ export const vi: Record<TKey, string> = {
   "logs.detail.clientTransport": "Luồng truyền tải phía máy khách",
   "logs.detail.upstreamTransport": "Luồng truyền tải upstream",
   "logs.detail.account": "Tài khoản",
-  "logs.modelTooltip.model": "model",
-  "logs.modelTooltip.resolvedModel": "model đã giải quyết (resolved model)",
   "logs.modelTooltip.model": "mô hình",
   "logs.modelTooltip.resolvedModel": "mô hình sau khi định tuyến",
   "logs.modelTooltip.servedModel": "mô hình thực tế được cung cấp",
