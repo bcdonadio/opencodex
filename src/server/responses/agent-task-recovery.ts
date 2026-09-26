@@ -255,23 +255,17 @@ function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): 
     ciphertexts.push(part.encrypted_content);
   }
 
-  if (
-    !headerText
-    || !messageType
-    || !sender
-    || encryptedStartIndex < 0
-    || ciphertexts.length === 0
-  ) return null;
-
+  if (!headerText || !messageType || !sender) return reject("routing_header_missing");
+  if (encryptedStartIndex < 0 || ciphertexts.length === 0) return reject("ciphertext_missing");
   const itemRecord = item as { author?: unknown; recipient?: unknown };
-  if (typeof itemRecord.author !== "string" || typeof itemRecord.recipient !== "string") return null;
-  // A FINAL_ANSWER without a Task name line declares no recipient, so the structured
-  // recipient is only cross-checked when a task name is present; admission is the
-  // trust boundary either way.
+  if (typeof itemRecord.author !== "string" || typeof itemRecord.recipient !== "string") {
+    return reject("identity_missing");
+  }
+  // FINAL_ANSWER may omit Task name, but its structured recipient still scopes the cache.
   if (
     itemRecord.author !== sender
     || (taskName !== null && itemRecord.recipient !== taskName)
-  ) return null;
+  ) return reject("identity_mismatch");
 
   const envelope = {
     itemIndex,
