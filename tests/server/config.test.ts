@@ -53,6 +53,7 @@ import { runRetiredCodexModelMigration, RETIRED_MODEL_MIGRATION_CUTOFF } from ".
 import { providerManagementConfigError } from "../../src/server/auth-cors";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 let testDir = "";
+const previousHome = process.env.OPENCODEX_HOME;
 
 /**
  * Windows without Developer Mode or admin cannot create a file symlink (EPERM).
@@ -79,7 +80,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.OPENCODEX_HOME;
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousHome;
   if (testDir && existsSync(testDir)) removeTreeWithRetry(testDir);
   testDir = "";
 });
@@ -1157,6 +1158,7 @@ describe("opencodex config defaults", () => {
       serviceTier: "default",
       timeoutMs: 45_000,
       cacheEntries: 200,
+      retries: 2,
     };
     writeConfig({ ...base, agentTaskRecovery: recovery });
     expect(loadConfig()).toMatchObject({ ...base, agentTaskRecovery: recovery });
@@ -1175,6 +1177,9 @@ describe("opencodex config defaults", () => {
       { enabled: true, timeoutMs: 120_001 },
       { enabled: true, cacheEntries: 0 },
       { enabled: true, cacheEntries: 513 },
+      { enabled: true, retries: -1 },
+      { enabled: true, retries: 3 },
+      { enabled: true, retries: 1.5 },
       { enabled: true, url: "https://attacker.example/responses" },
     ]) {
       writeConfig({ ...base, agentTaskRecovery: invalid });
@@ -2550,7 +2555,6 @@ describe("opencodex config defaults", () => {
         errorSpy.mockRestore();
       }
     });
-
 
     test("diagnostics keep the operator's config instead of reporting defaults", () => {
       // The salvage in loadConfig was not enough on its own. readConfigDiagnostics returned

@@ -292,6 +292,7 @@ export const providerConfigSchema = z.object({
   annotateEmptyToolOutputs: z.boolean().optional(),
   foldDeveloperRoleToSystem: z.boolean().optional(),
   fastWire: fastWireSchema.nullable().optional(),
+  fastEnabled: z.boolean().optional(),
   supportsServiceTier: z.boolean().optional(),
   modelSupportsServiceTier: z.record(z.string().min(1), z.boolean()).optional(),
   modelSuppressSyntheticMax: z.record(z.string().min(1), z.boolean()).optional(),
@@ -311,9 +312,11 @@ export const providerConfigSchema = z.object({
   upstreamHttpVersion: z.enum(UPSTREAM_HTTP_VERSION_VALUES)
     .nullish()
     .transform(value => value ?? undefined),
-  // Opt-in upstream Responses WebSocket for OpenAI-compatible providers (e.g.
-  // aggregators whose WebSocket ingress is measurably faster than SSE). The
-  // canonical ChatGPT backend WS selection is independent of this flag.
+  // Opt-in upstream Responses WebSocket for OpenAI-compatible providers, honored only
+  // for the first-party api.openai.com/v1 upstream; other custom endpoints stay on
+  // bounded HTTP/SSE. On the canonical ChatGPT `openai` provider the same field selects
+  // the transport: omitted keeps the upstream WebSocket on eligible turns, explicit
+  // `false` sends streaming turns over HTTP/SSE, and provider management rejects `true`.
   upstreamWebsocket: z.boolean().optional(),
   directGeminiWireRenames: z.boolean().optional(),
   googleToolSchemaPolicy: z.enum(["compatible", "reject-lossy"]).optional(),
@@ -778,6 +781,7 @@ export const agentTaskRecoverySchema = z.object({
   serviceTier: z.enum(["auto", "default", "flex", "priority"]).optional(),
   timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
   cacheEntries: z.number().int().min(1).max(512).optional(),
+  retries: z.number().int().min(0).max(2).optional(),
 }).strict();
 
 export const runtimeRoleSchema = z.enum(["standalone", "hub", "client"]);
@@ -851,6 +855,13 @@ export const remoteGuiConfigSchema = z.object({
 
 const connectedClientIdSchema = z.enum(["codex", "claude"]);
 const clientTimestampSchema = z.string().datetime({ offset: true });
+const clientTransportSchema = z.enum(["hub", "link"]);
+const linkTransportSchema = z.object({
+  // Same range as isLinkPort in src/link/ports.ts, restated here because the config schema sits on
+  // every install's core path and must not import link code (tests/lab/core-link-boundary.test.ts).
+  tunnelPort: z.number().int().min(1024).max(65535),
+  linkId: z.string().regex(/^lnk_[0-9a-f]{16}$/),
+}).strict();
 const clientOriginSchema = z.string().transform((value, ctx) => {
   const origin = canonicalHttpOrigin(value);
   if (!origin) {
@@ -863,6 +874,8 @@ export const clientConnectionSchema = z.object({
   serverUrl: clientOriginSchema,
   managementUrl: clientOriginSchema,
   managementTransport: z.enum(["direct", "relay"]),
+  transport: clientTransportSchema.optional(),
+  link: linkTransportSchema.optional(),
   selectedClients: z.array(connectedClientIdSchema).min(1).max(2).superRefine((clients, ctx) => {
     if (new Set(clients).size !== clients.length) {
       ctx.addIssue({ code: "custom", message: "must contain unique client ids" });
@@ -889,7 +902,34 @@ export const clientConnectionSchema = z.object({
       ctx.addIssue({ code: "custom", path: ["oldKeyBackupPath"], message: `must equal ${expected}` });
     }
   }).optional(),
-}).strict();
+}).strict().superRefine((connection, ctx) => {
+  const transport = connection.transport ?? "hub";
+  if (transport === "hub" && connection.link !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["link"], message: "link is allowed only when transport is link" });
+    return;
+  }
+  if (transport !== "link") return;
+  if (!connection.link) {
+    ctx.addIssue({ code: "custom", path: ["link"], message: "link is required when transport is link" });
+    return;
+  }
+  if (connection.managementTransport !== "direct") {
+    ctx.addIssue({ code: "custom", path: ["managementTransport"], message: "link transport requires direct management transport" });
+  }
+  if (connection.serverUrl !== connection.managementUrl) {
+    ctx.addIssue({ code: "custom", path: ["managementUrl"], message: "link transport requires serverUrl and managementUrl to match" });
+  }
+  let origin: URL;
+  try {
+    origin = new URL(connection.serverUrl);
+  } catch {
+    return;
+  }
+  if (origin.protocol !== "http:" || origin.hostname !== "127.0.0.1"
+    || origin.port !== String(connection.link.tunnelPort)) {
+    ctx.addIssue({ code: "custom", path: ["serverUrl"], message: "link transport requires http://127.0.0.1:<tunnelPort>" });
+  }
+});
 
 /**
  * Codex pool selection policy section.

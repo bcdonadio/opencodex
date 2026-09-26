@@ -22,6 +22,12 @@ import { validatesRestoredValue } from "./command-code-restored-schema";
  * A text block that opens with `<tool_call>` is therefore held instead of streamed. It is dropped
  * when a native call proves it is a duplicate, or restored on an eligible clean MiMo finish when
  * it names a declared tool with arguments that fit its schema. Other markup is released unchanged.
+ * MiMo can also append the markup after ordinary prose inside one text block; the stream filter
+ * splits such a delta at the marker and holds the markup part the same way (#5698; a marker split
+ * across deltas after prose is still released as text).
+ * A malformed envelope that still opens and closes around a declared function name, but that the
+ * strict parser rejects, is dropped instead of released when the native call for that same function
+ * arrives, and on the clean-finish path, so the echo never reaches the client.
  * Later text waits behind unresolved markup within the same byte bound.
  */
 
@@ -79,6 +85,21 @@ export function parseToolCallMarkup(text: string): ToolCallMarkup | undefined {
 
 function tryJson(value: string): unknown {
   try { return JSON.parse(value); } catch { return undefined; }
+}
+
+/**
+ * The declared function name of an envelope echo the strict parser rejected, or undefined when the
+ * text is anything else: malformed parameter tags, a missing `</function>`, garbage inside the body.
+ * Opening and closing as an envelope with a known function name is enough to keep it off the client
+ * once the native duplicate call for that same name — which carries the canonical execution —
+ * arrives; a native call for another tool says nothing about this envelope.
+ */
+function looseEnvelopeName(text: string, declared: CommandCodeDeclaredTools | undefined): string | undefined {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(TOOL_CALL_MARKER) || !trimmed.endsWith("</tool_call>")) return undefined;
+  if (trimmed.slice(TOOL_CALL_MARKER.length).includes(TOOL_CALL_MARKER)) return undefined;
+  const fn = /<function=([^>\s]+)>/.exec(trimmed);
+  return fn !== null && (declared?.has(fn[1]!) ?? false) ? fn[1]! : undefined;
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {
@@ -251,7 +272,10 @@ const encoder = new TextEncoder();
 export class CommandCodeToolTextFilter {
   private readonly openInputs = new Map<string, string>();
   private readonly blocks = new Map<string, TextBlock>();
-  /** Only nonempty blocks still deciding whether their text is markup need boundary visits. */
+  /**
+   * Only blocks still deciding whether their text is markup (state "probing") need boundary visits;
+   * a held block is deliberately absent, so no interleaved event can interrupt it.
+   */
   private readonly activeProbes = new Map<string, TextBlock>();
   /** Held blocks in arrival order, including ended ones awaiting a verdict. */
   private held: TextBlock[] = [];
@@ -283,6 +307,13 @@ export class CommandCodeToolTextFilter {
     for (const [key, block] of this.activeProbes) {
       this.queueOperations++;
       if (key === exceptKey) continue;
+      // Guard only: a held block is not tracked here (textDelta adds probing blocks and drops them
+      // from the map on the transition to held). It must stay held until settle, in arrival order —
+      // interrupting it on interleaved events (reasoning deltas, other blocks, the native call
+      // itself) cleared complete and malformed envelopes alike and released the echoed call as text.
+      // The queued-byte bound (makeRoom) still caps memory and wait, flushing everything as text if a
+      // held envelope never resolves while the stream keeps producing.
+      if (block.state !== "probing") continue;
       this.activeProbes.delete(key);
       block.interrupted = true;
       block.state = "queued";
@@ -310,8 +341,44 @@ export class CommandCodeToolTextFilter {
       block = { id: key, markupParts: [], probe: "", bytes: 0, state: "probing", ended: false, interrupted: false, candidates: new Set(this.openInputs.keys()) };
       this.blocks.set(key, block);
     }
-    if (block.state === "streaming" && this.head === this.pending.length) {
-      return [...boundaryEvents, { type: "text_delta", text }];
+    // MiMo can append tool-call markup after ordinary prose inside one text block. The probe below
+    // only recognizes a block that opens with the marker, so a marker arriving after prose would
+    // reach the client (captured 2026-09-23 from xiaomi/mimo-v2.6-pro: prose, then
+    // "<tool_call><function=exec>..." echoed by the gateway as one text delta). Split the delta at
+    // the marker: prose keeps its queued or streamed path, the markup starts a fresh probe block
+    // and follows the normal hold-and-restore route. A probing block that has consumed nothing but
+    // whitespace keeps its probe instead, because that probe already holds the marker.
+    if (block.state !== "held") {
+      const markerIndex = text.indexOf(TOOL_CALL_MARKER);
+      const whitespaceLead = markerIndex > 0 && block.state === "probing" && block.probe === ""
+        && text.slice(0, markerIndex).trim() === "";
+      // markerIndex === 0 on a probing block is the ordinary hold path; on any other state the
+      // block is ordinary text and the marker must still start a fresh probe block.
+      if (!whitespaceLead && (markerIndex > 0 || (markerIndex === 0 && block.state !== "probing"))) {
+        const prose = markerIndex > 0 ? text.slice(0, markerIndex) : "";
+        const marked = markerIndex > 0 ? text.slice(markerIndex) : text;
+        let proseEvents: AdapterEvent[] = [];
+        if (prose) {
+          if (block.state === "streaming" && this.head === this.pending.length) {
+            proseEvents = [{ type: "text_delta", text: prose }];
+          } else {
+            if (block.state === "dropped" || block.state === "streaming") {
+              block = { id: key, markupParts: [], probe: "", bytes: 0, state: "queued", ended: false, interrupted: true, candidates: new Set() };
+              this.blocks.set(key, block);
+            }
+            proseEvents = this.queueProseDelta(block, prose);
+            this.probeBlockText(block, prose);
+          }
+        }
+        if (block.state === "queued") block.state = "streaming";
+        this.activeProbes.delete(key);
+        const probeBlock: TextBlock = { id: key, markupParts: [], probe: "", bytes: 0, state: "probing", ended: false, interrupted: false, candidates: new Set(this.openInputs.keys()) };
+        this.blocks.set(key, probeBlock);
+        return [...boundaryEvents, ...proseEvents, ...this.textDelta(id, marked)];
+      }
+      if (markerIndex === -1 && block.state === "streaming" && this.head === this.pending.length) {
+        return [...boundaryEvents, { type: "text_delta", text }];
+      }
     }
     // Once a duplicate is dropped, later text is a new chunk at its own wire position.
     if (block.state === "dropped" || block.state === "streaming") {
@@ -320,7 +387,7 @@ export class CommandCodeToolTextFilter {
     }
     const preceding = this.makeRoom(encoder.encode(text).byteLength);
     this.retain(block, text);
-    if (block.state === "probing" || block.state === "held") this.activeProbes.set(key, block);
+    if (block.state === "probing") this.activeProbes.set(key, block);
     const bytes = encoder.encode(text).byteLength;
     const tail = this.pending.at(-1);
     if (tail?.kind === "chunk" && tail.block === block && this.head < this.pending.length) {
@@ -332,24 +399,8 @@ export class CommandCodeToolTextFilter {
       this.queueOperations++;
     }
     this.queuedBytes += bytes;
-    if (block.state === "probing") {
-      for (const char of text) {
-        if (!block.probe && char.trim() === "") continue;
-        block.probe += char;
-        if (!TOOL_CALL_MARKER.startsWith(block.probe)) {
-          block.state = "queued";
-          block.markupParts = [];
-          break;
-        }
-        if (block.probe === TOOL_CALL_MARKER) {
-          block.state = "held";
-          block.probe = "";
-          this.held.push(block);
-          break;
-        }
-      }
-    }
-    if (block.state !== "probing" && block.state !== "held") this.activeProbes.delete(key);
+    this.probeBlockText(block, text);
+    if (block.state !== "probing") this.activeProbes.delete(key);
     return [...boundaryEvents, ...preceding, ...this.limitPending()];
   }
 
@@ -411,7 +462,8 @@ export class CommandCodeToolTextFilter {
         remaining.push(block);
         continue;
       }
-      const markup = parseToolCallMarkup(block.markupParts.join(""));
+      const text = block.markupParts.join("");
+      const markup = parseToolCallMarkup(text);
       if (markup && markup.name === name && markupMatchesInput(markup, input)) {
         this.drop(block);
         block.state = "dropped";
@@ -420,6 +472,16 @@ export class CommandCodeToolTextFilter {
       }
       block.candidates.delete(id);
       if (block.candidates.size === 0) {
+        // A malformed envelope cannot match a native input, but it is still an envelope: when the
+        // native call is for the function it declares, that call carries the execution, so drop the
+        // echo rather than releasing it as text. A native call for any other tool proves nothing
+        // about this envelope, so it keeps the release-as-text path below.
+        if (markup === undefined && looseEnvelopeName(text, this.declared) === name) {
+          this.drop(block);
+          block.state = "dropped";
+          this.activeProbes.delete(block.id);
+          continue;
+        }
         block.state = "queued";
         block.markupParts = [];
         this.activeProbes.delete(block.id);
@@ -472,6 +534,16 @@ export class CommandCodeToolTextFilter {
           events.push({ type: "tool_call_end" });
           salvaged = true;
           lastTextBlock = undefined;
+        } else if (restore && !block.interrupted && markup === undefined
+          && looseEnvelopeName(block.markupParts.join(""), this.declared) !== undefined) {
+          // A malformed envelope is still an envelope: the native duplicate (observed in every
+          // capture) carries the call, so the echo is dropped rather than rendered as text.
+          // Releasing it would put the raw markup back on screen; restoring it could execute a
+          // second time alongside the native call. The parser must have rejected the text, so an
+          // envelope that parses but does not fit its schema keeps the release-as-text contract.
+          this.drop(block);
+          block.state = "dropped";
+          lastTextBlock = undefined;
         } else {
           block.state = "queued";
           block.markupParts = [];
@@ -499,6 +571,44 @@ export class CommandCodeToolTextFilter {
     reservation.commitRetained();
     if (block.state === "probing" || block.state === "held") block.markupParts.push(text);
     block.bytes += bytes;
+  }
+
+  /** The incremental open-of-block probe: decide whether the block's text is tool-call markup. */
+  private probeBlockText(block: TextBlock, text: string): void {
+    if (block.state !== "probing") return;
+    for (const char of text) {
+      if (!block.probe && char.trim() === "") continue;
+      block.probe += char;
+      if (!TOOL_CALL_MARKER.startsWith(block.probe)) {
+        block.state = "queued";
+        block.markupParts = [];
+        break;
+      }
+      if (block.probe === TOOL_CALL_MARKER) {
+        block.state = "held";
+        block.probe = "";
+        this.held.push(block);
+        break;
+      }
+    }
+  }
+
+  /** Route ordinary prose through the queued wire path (shared by the mid-stream marker split). */
+  private queueProseDelta(block: TextBlock, prose: string): AdapterEvent[] {
+    const preceding = this.makeRoom(encoder.encode(prose).byteLength);
+    this.retain(block, prose);
+    const bytes = encoder.encode(prose).byteLength;
+    const tail = this.pending.at(-1);
+    if (tail?.kind === "chunk" && tail.block === block && this.head < this.pending.length) {
+      tail.parts.push(prose);
+      tail.bytes += bytes;
+      this.queueOperations++;
+    } else {
+      this.pending.push({ kind: "chunk", block, parts: [prose], bytes });
+      this.queueOperations++;
+    }
+    this.queuedBytes += bytes;
+    return preceding;
   }
 
   private drop(block: TextBlock): void {

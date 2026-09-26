@@ -226,29 +226,33 @@ after changing the setting.
 
 ## Encrypted v2 task recovery
 
-`agentTaskRecovery` is an experimental compatibility path for encrypted v2 collaboration messages
-that reach a routed provider: a native ChatGPT parent spawning a routed child, or a live thread
-switched from native ChatGPT to a routed model whose history replays a backend-encrypted agent
-message on later turns ([#4089](https://github.com/lidge-jun/opencodex/issues/4089)).
-It is disabled by default. When explicitly enabled
-and the final routed child input contains an otherwise unreadable Fernet `NEW_TASK` or `MESSAGE`
-payload, opencodex uses a raw Responses passthrough request
-to the fixed `https://chatgpt.com/backend-api/codex/responses` endpoint with forward-mode
-authentication. By default, the recovery model uses low reasoning effort, requests priority service, and returns
-the plaintext payload through a forced
-function call; opencodex
-then converts only that collaboration item to a standard user message before routed-provider dispatch.
-The routed recovery message strips transport routing metadata and contains exactly one
-payload-only user text value.
+`agentTaskRecovery` is an experimental compatibility path for backend-encrypted v2 tasks that reach
+a routed provider. Two request shapes qualify: a native ChatGPT parent spawning a routed v2 child,
+and a live thread switched from a native ChatGPT model to a routed one, whose history replays a
+backend-minted encrypted agent message on every later turn
+([#4089](https://github.com/lidge-jun/opencodex/issues/4089)). It is disabled by default. When
+explicitly enabled and the final routed task contains an otherwise unreadable Fernet payload,
+opencodex uses a raw Responses passthrough request to the fixed
+`https://chatgpt.com/backend-api/codex/responses` endpoint with forward-mode authentication.
+By default, the recovery model uses low reasoning effort and requests priority service. ChatGPT
+returns the plaintext assignment through a forced function call; opencodex then converts only that
+collaboration item to a standard user message before routed-provider dispatch. The routed message
+strips transport routing metadata and contains exactly one payload-only user text value. Direct routed
+recovery, cached history replay, and the unreadable-task detector recognise all four codex-rs
+agent-message types: `NEW_TASK`, `MESSAGE`, `FOLLOWUP_TASK`, and `FINAL_ANSWER`. Combo recovery
+remains limited to spawned-child turns. A `FINAL_ANSWER` envelope may omit its `Task name` line.
+Recovery then has no header address to compare with the item's recipient, so that single cross-check
+does not run; the sender comparison and the cache scope, which still binds the structured recipient,
+are unchanged.
+
 On a later tool-result continuation and only after the final route selects a non-native provider,
 earlier encrypted collaboration items are rehydrated from matching cache entries and exact cache
 misses use the same authenticated fixed endpoint. The complete history is staged and none is
 forwarded unless every item succeeds; a native ChatGPT route retains the original encrypted
-collaboration schema.
-Historical recovery uses at most four concurrent workers, queues behind the process-wide recovery
-cap, and fails closed before dispatch above 128 envelopes, 8 MiB of aggregate ciphertext, or the
-two-minute whole-history deadline. Recovered historical plaintext is independently capped at
-8 MiB before input mutation or provider dispatch.
+collaboration schema. Historical recovery uses at most four concurrent workers, queues behind the
+process-wide recovery cap, and fails closed before dispatch above 128 envelopes, 8 MiB of aggregate
+ciphertext, or the two-minute whole-history deadline. Recovered historical plaintext is
+independently capped at 8 MiB before input mutation or provider dispatch.
 
 This is not local decryption and does not fix the Codex wire protocol. It depends on undocumented
 ChatGPT backend behavior and may stop working after a backend change. The recovered payload is
@@ -301,8 +305,11 @@ Admission and retention are deliberately narrow:
 Recovery accepts one consecutive run of up to 32 complete Fernet-shaped encrypted parts, with
 at most 2 MiB of combined ciphertext. Parts retain their order and boundaries in one authenticated
 request. Cache identity includes the sequence; the original input is revalidated before assignment
-replacement. HTTP failures retain the existing bounded diagnostic reason and do not trigger an
-internal retry.
+replacement. HTTP failures retain the existing bounded diagnostic reason. They do not trigger an
+internal retry unless `retries` is set: with a value from 1 to 2, opencodex re-sends the same
+admitted request only on a transient upstream status (500/502/503/504/52x) or a transport
+failure, after a short jittered backoff, and still inside the same credential, deadline, and
+shared flight. Terminal statuses and invalid recovery output never retry.
 
 Split tokens are not reconstructed for recovery. A bounded run whose exact concatenation has
 Fernet structure stays classified as ciphertext through plaintext-slot normalization. If the task
@@ -333,7 +340,8 @@ model output rather than authenticated plaintext.
     "reasoningEffort": "low",
     "serviceTier": "priority",
     "timeoutMs": 120000,
-    "cacheEntries": 200
+    "cacheEntries": 200,
+    "retries": 0
   }
 }
 ```

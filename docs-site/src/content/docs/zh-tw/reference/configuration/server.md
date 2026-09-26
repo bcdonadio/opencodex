@@ -25,7 +25,7 @@ description: 監聽器、遠端存取、許可金鑰、逾時、儲存、sidecar
 | `codexAutoStart?` | `boolean` | `true` | 讓 Codex shim 在啟動 Codex 前執行 `ocx ensure`。False 使 ensure 為 no-op。 |
 | `codexShimAutoRestore?` | `boolean` | `true` | 在完成的外部 Codex 更新取代已安裝的 shim 後還原它。環境退出：`OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`。 |
 | `syncResumeHistory?` | `boolean` | `true` | 可逆的 Codex App 歷史相容性。原始中繼資料由 `ocx stop` / `ocx restore` 備份並還原。 |
-| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | 將識別的 Codex helper/shadow call 重定向到所選模型，並保留為請求設定的 reasoning effort。預設來源前綴為 `gpt-5.6-luna`；0.144.x 及更舊的客戶端使用 `gpt-5.4-mini`，可透過 `sourceModels` 恢復。 |
+| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | 將識別的 Codex helper/shadow call 重定向到所選模型，並保留為請求設定的 reasoning effort。預設來源前綴為 `gpt-6-luna`, `gpt-5.6-luna`；0.144.x 及更舊的客戶端使用 `gpt-5.4-mini`，可透過 `sourceModels` 恢復。 |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | 可用時開啟 | 網頁搜尋 sidecar 選項。 |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | 可用時開啟 | 圖片描述 sidecar 選項。 |
 | `images?` | `OcxImagesConfig` | 自動 OpenAI 選擇 | Codex `image_gen` 的獨立 Images 中繼選項。 |
@@ -148,12 +148,14 @@ ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 
 Codex 使用小型 helper 模型處理如標題與 commit 訊息等任務。啟用 `shadowCallIntercept` 以將識別的來源模型前綴重定向到另一個已設定的模型。替換後仍會保留為請求設定的 reasoning effort。僅在客戶端使用不同的 helper id 時設定 `sourceModels`。
 
+攔截依模型判定：裸模型 ID 符合 `sourceModels` 的請求（包括一般的 `request_kind: "turn"` 請求）都可以被重定向。由 `x-openai-subagent: collab_spawn` 或 `x-codex-turn-metadata` JSON 標頭中的 `subagent_kind: "thread_spawn"` 標記為已產生子代理的請求不受攔截，因此明確產生的子代理會保留其模型。
+
 ```json
 {
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"]
+    "sourceModels": ["gpt-6-luna", "gpt-5.6-luna"]
   }
 }
 ```
@@ -179,7 +181,7 @@ Codex 使用小型 helper 模型處理如標題與 commit 訊息等任務。啟�
 
 | 欄位 | 型別 | 預設值 | 意義 |
 | --- | --- | --- | --- |
-| `enabled?` | `boolean` | 可用時開啟 | 主開關。 |
+| `enabled?` | `boolean` | 可用時開啟 | 主開關。為 `false` 時，OpenCodex 停止攔截 `web_search`，且 Codex 整合會把 `web_search = "disabled"` 寫入 `~/.codex/config.toml`。 |
 | `backend?` | `"openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"` | `openai` | 明確設定優先；省略時一律使用 `openai`。`anthropic` 與 `xai` 僅在明確設定時執行；`gemini` 與 `exa` 在 executor 推出前仍為保留值。 |
 | `model?` | `string` | 視 backend 而定 | OpenAI 為 `gpt-5.6-luna`、Anthropic 為 `claude-sonnet-5`、xAI 為 `grok-4.6`。舊版明確 `gpt-5.4-mini` 在啟動時遷移。 |
 | `exaApiKey?` | `string` | 無 | `exa` backend 的操作員金鑰。僅可寫入：管理讀取永遠不會傳回已儲存的值。 |

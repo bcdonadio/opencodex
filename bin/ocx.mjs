@@ -36,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { isRealBunBinary } from "../src/lib/bun-binary-validator.mjs";
 import { npmInvocation } from "../src/update/npm-invocation.mjs";
 import { pnpmInvocationForPath, resolvePnpmCommands } from "../src/update/pnpm-invocation.mjs";
-import { detectInstallFromPath } from "../src/update/install-detection.mjs";
+import { detectInstallOwnershipFromPath } from "../src/update/install-detection.mjs";
 import {
   pnpmOwnerInvocation,
   resolvePnpmGlobalOwner,
@@ -71,7 +71,8 @@ try {
 }
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
-const installMethod = detectInstallFromPath(here, { exists: existsSync });
+const installOwnership = detectInstallOwnershipFromPath(here, { exists: existsSync });
+const installMethod = installOwnership.installer;
 const cliPath = join(here, "..", "src", "cli", "index.ts");
 const NODE_LAUNCH_CONTEXT_ENV = "OCX_NODE_LAUNCH_CONTEXT";
 const NODE_LAUNCH_PROOF_PREFIX = "--ocx-internal-launch-proof=";
@@ -590,17 +591,30 @@ function runPackageManagerSelfUpdate(manager) {
     let stopAttempted = false;
 
     function recoverStoppedRuntimeAfterFailure(reason) {
-      const recoveryOwnership = readOwnership();
-      const recoveryLiveness = currentPackageRuntimeLiveness();
-      const recovery = planStoppedRuntimeRecovery({
-        stopAttempted,
-        ...recoveryOwnership,
-        sameOwner: ownershipIdentity(recoveryOwnership) === stoppedOwnershipIdentity,
-        liveness: recoveryLiveness,
-        serviceInstalled: serviceWasInstalled,
-        launcherUsable: postUpdateLauncherUsable,
-        hadRuntimeState: hasRuntimeState,
-      });
+      const planRecovery = () => {
+        const recoveryOwnership = readOwnership();
+        const liveness = currentPackageRuntimeLiveness();
+        return {
+          liveness,
+          plan: planStoppedRuntimeRecovery({
+            stopAttempted,
+            ...recoveryOwnership,
+            sameOwner: ownershipIdentity(recoveryOwnership) === stoppedOwnershipIdentity,
+            liveness,
+            serviceInstalled: serviceWasInstalled,
+            launcherUsable: postUpdateLauncherUsable,
+            hadRuntimeState: hasRuntimeState,
+          }),
+        };
+      };
+      let { liveness: recoveryLiveness, plan: recovery } = planRecovery();
+      if (recovery.action === "service") {
+        // The service manager starts the proxy outside this process tree, so it cannot join this
+        // lease, and holding the lease through the repair's health wait keeps that proxy from
+        // starting (#5760). Release it as the successful path does, then decide again.
+        releaseUpdateLease();
+        ({ liveness: recoveryLiveness, plan: recovery } = planRecovery());
+      }
       if (recovery.reason === "ownership-unknown") {
         console.error(`opencodex: ${reason}; runtime ownership is unknown, so automatic recovery was refused. Run 'ocx status --json' and repair the service-state record before retrying.`);
       } else if (recovery.reason === "ownership-transferred") {
@@ -921,6 +935,19 @@ if (updateHelpRequested) {
 const codexCliUpdateInspection = isCodexCliUpdateInspectionArgv(process.argv);
 if (codexCliUpdateInspection && typeof process.versions.bun === "string") {
   console.error("opencodex: codex-cli-update inspection must use the published Node launcher.");
+  process.exit(1);
+}
+
+if (process.argv[2] === "update" && installMethod === "mise") {
+  if (installOwnership.owner) {
+    console.error(
+      `opencodex: this installation is externally managed by mise; update it with: mise upgrade ${installOwnership.owner.tool}`,
+    );
+  } else {
+    console.error(
+      "opencodex: this installation appears to be managed by mise, but its ownership metadata is unreadable or inconsistent; repair the mise installation metadata before updating.",
+    );
+  }
   process.exit(1);
 }
 

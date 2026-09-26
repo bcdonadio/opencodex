@@ -8,23 +8,22 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Подписывайтесь на @claudeebum в X"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/github/v/release/lidge-jun/opencodex?label=desktop&logo=github&color=24292f" alt="Последний релиз настольного приложения"></a>
   <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="версия npm"></a>
   <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="лицензия"></a>
   <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="версия Node">
 </p>
 
-<p align="center">
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-macos.svg" alt="Скачать OpenCodex для macOS" width="220"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-windows.svg" alt="Скачать OpenCodex для Windows" width="220"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-linux.svg" alt="Скачать OpenCodex для Linux" width="220"></a>
-</p>
-<p align="center"><sub>Настольное приложение (бета): универсальный <code>.dmg</code> для macOS · <code>.msi</code> для Windows x64 · <code>.AppImage</code> / <code>.deb</code> для Linux x86_64. Предпочитаете терминал? Установите CLI:</sub></p>
-
 ```bash
 npm install -g @bitkyc08/opencodex
 ocx start
 ```
+
+<p align="center">
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/macOS-.dmg-24292f?logo=apple&logoColor=white" alt="Скачать для macOS (.dmg)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Windows-.msi-24292f?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0zIDNoOC41djguNUgzem05LjUgMEgyMXY4LjVoLTguNXpNMyAxMi41aDguNVYyMUgzem05LjUgMEgyMVYyMWgtOC41eiIvPjwvc3ZnPg==" alt="Скачать для Windows (.msi)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Linux-.AppImage-24292f?logo=linux&logoColor=white" alt="Скачать для Linux (.AppImage)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Linux-.deb-24292f?logo=debian&logoColor=white" alt="Скачать для Linux (.deb)"></a>
+</p>
 
 <table>
 <tr>
@@ -92,7 +91,21 @@ Ollama или любую другую LLM с Codex, Claude Code, Claude Desktop 
 
 ## Быстрый старт
 
-### Настольное приложение (бета)
+### Личная установка (CLI)
+
+```bash
+npm install -g @bitkyc08/opencodex   # Node 18+; рантайм Bun подключается автоматически
+ocx start                         # прокси + панель управления на localhost:10100
+```
+
+Чтобы запустить его в фоне, используйте `ocx service`.
+
+Откройте **http://localhost:10100** и настройте всё в веб-панели: добавьте провайдеров
+(40+ встроенных или любой OpenAI-совместимый endpoint), выберите модели, управляйте
+аккаунтами. `ocx gui` в любой момент снова откроет панель.
+
+<details>
+<summary><b>Настольное приложение (бета)</b></summary>
 
 Настольное приложение — это тот же прокси и та же панель управления в нативном окне,
 с иконкой в трее и встроенным `ocx`. Оно подключается к уже запущенному прокси либо
@@ -118,18 +131,7 @@ Ollama или любую другую LLM с Codex, Claude Code, Claude Desktop 
 описан первый запуск, а
 [`AGENTS_INSTALL.md`](../AGENTS_INSTALL.md#where-things-are-installed) перечисляет всё, что записывается на диск.
 
-### Личная установка (CLI)
-
-```bash
-npm install -g @bitkyc08/opencodex   # Node 18+; рантайм Bun подключается автоматически
-ocx start                         # прокси + панель управления на localhost:10100
-```
-
-Чтобы запустить его в фоне, используйте `ocx service`.
-
-Откройте **http://localhost:10100** и настройте всё в веб-панели: добавьте провайдеров
-(40+ встроенных или любой OpenAI-совместимый endpoint), выберите модели, управляйте
-аккаунтами. `ocx gui` в любой момент снова откроет панель.
+</details>
 
 ### Пул аккаунтов ChatGPT
 
@@ -317,15 +319,16 @@ ocx init      # интерактивная настройка: пишет ~/.ope
 <details>
 <summary>Подробности владения памятью</summary>
 
-OpenCodex отслеживает 36 категорий состояния, удерживаемого процессом. У каждой есть
+OpenCodex отслеживает состояние, удерживаемое процессом, в категориях ниже. У каждой есть
 документированная граница:
 
-- **12 удерживаемых хранилищ** (журнал запросов, отладочные кольца, кэш изображений, кэш
+- **14 удерживаемых хранилищ** (журнал запросов, отладочные кольца, кэш изображений, кэш
   моделей, vision-описания, cursor-блобы, продолжение responses и т. д.) учитываются
-  в байтах и вытесняются бюджетом памяти приложения (по умолчанию 256 MiB).
+  в байтах и вытесняются бюджетом памяти приложения (по умолчанию 256 MiB), кроме
+  хранилища native control replay: оно закреплено и не вытесняется.
 - **4 наблюдаемых буфера** (аккумуляторы транслятора, хвосты image/OAuth/Grok)
   мониторятся по байтовому давлению in-flight без вытеснения.
-- **24 регистрации state-store** выполняют sweeps истечения (интервал 60 с) и сверку
+- **28 регистраций state-store** выполняют sweeps истечения (интервал 60 с) и сверку
   поколений конфигурации, чтобы удалять устаревшие ключи провайдеров и аккаунтов.
 - **Мемо пути и отпечатков** (метаданные рабочей области, усиленные идентификаторы,
   соли установки, возможности mode-hint) используют LRU-потолки в порядке вставки
@@ -354,6 +357,20 @@ codex -m "ollama/llama3" "Отрефакторьте эту функцию"
 подобрать его по шаблону имени модели. Id моделей провайдера, содержащие `/`,
 отдаются с внутренними слэшами, заменёнными на `-`; исходная форма со всеми слэшами
 тоже продолжает работать. Подробности: [документация по маршрутизации моделей](https://opencodex.me/ru/guides/model-routing/).
+
+### Маршрутизация JEV Auto (опционально)
+
+TypeSafe JEV может выбирать первую модель и уровень рассуждения для явно включённого Combo, не меняя
+обычный выбор модели и прямые маршруты. Добавьте ключ через `ocx login jev`, в
+**Providers → TypeSafe JEV → Add API key** или через `TYPESAFE_API_KEY`/`JEV_API_KEY`. Затем откройте
+**Models → Combos → Create JEV Auto**, выберите разрешённые целевые модели и отметьте, какие уровни
+рассуждения JEV может выбрать для каждой цели. Если настройку не трогать, цель разрешает все уровни,
+которые модель сейчас объявляет.
+
+JEV вызывается только для `jev-auto` и только один раз на логический вызов модели. При отсутствии ключа,
+сетевой ошибке или некорректном решении запрос уходит на первую доступную цель (fail-open); отмена
+со стороны клиента по-прежнему отменяет запрос. Автотесты используют имитацию TypeSafe и не проверяют
+настоящий аккаунт JEV.
 
 ## Провайдеры и адаптеры
 

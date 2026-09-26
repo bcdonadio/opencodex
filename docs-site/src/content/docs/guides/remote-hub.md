@@ -3,6 +3,8 @@ title: Remote Hub Deployment
 description: Run a one-port opencodex hub on Linux, macOS, or Docker with a loopback companion listener, a self-provisioned data token, ocx hub invite, a loopback-only management ingress, Tailscale Serve, and headless OAuth.
 ---
 
+For SSH machine links, see [Remote Link](/guides/remote-link/).
+
 An opencodex hub keeps provider credentials and usage state on one host while authenticated clients
 use its data plane remotely. The browser-facing management plane is separate: an optional listener
 binds only `127.0.0.1`, serves the dashboard and `/api/*`, and is intended to sit behind Tailscale
@@ -60,6 +62,12 @@ The hub automatically issues a per-client key. The client writes it to the exist
 `service-api-token` file, never `config.json`. While connected, usage comes from the hub usage store
 filtered to that client's stable `apiKeyId`. After disconnect, usage comes from the local store.
 OpenCodex does not mirror usage between the two stores.
+`ocx service uninstall` removes the local service but preserves an existing key when the client is
+connected, its connection metadata is invalid or mismatched, or a pending connection marker matches
+the current key. A valid marker for an older key does not retain an unrelated service key.
+If a marker is unsafe, malformed, or unreadable, token cleanup cannot be verified;
+the command warns instead of claiming the key was kept. Use `ocx disconnect` to remove a connected
+client's local key and state.
 
 If a client saved a remote `http://` Hub URL before the secure transport rule, its Hub
 operations now return `insecure_http_refused`. Run `ocx disconnect` locally, then reconnect

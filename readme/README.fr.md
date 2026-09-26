@@ -8,23 +8,22 @@ Deux commandes suffisent pour que chacun d'eux exécute le LLM de votre choix.</
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Suivre @claudeebum sur X"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/github/v/release/lidge-jun/opencodex?label=desktop&logo=github&color=24292f" alt="Dernière version de l'application de bureau"></a>
   <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="version npm"></a>
   <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="licence"></a>
   <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="version de Node">
 </p>
 
-<p align="center">
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-macos.svg" alt="Télécharger OpenCodex pour macOS" width="220"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-windows.svg" alt="Télécharger OpenCodex pour Windows" width="220"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-linux.svg" alt="Télécharger OpenCodex pour Linux" width="220"></a>
-</p>
-<p align="center"><sub>Application de bureau (bêta) : macOS universel <code>.dmg</code> · Windows x64 <code>.msi</code> · Linux x86_64 <code>.AppImage</code> / <code>.deb</code>. Vous préférez le terminal ? Installez la CLI :</sub></p>
-
 ```bash
 npm install -g @bitkyc08/opencodex
 ocx start
 ```
+
+<p align="center">
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/macOS-.dmg-24292f?logo=apple&logoColor=white" alt="Télécharger pour macOS (.dmg)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Windows-.msi-24292f?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0zIDNoOC41djguNUgzem05LjUgMEgyMXY4LjVoLTguNXpNMyAxMi41aDguNVYyMUgzem05LjUgMEgyMVYyMWgtOC41eiIvPjwvc3ZnPg==" alt="Télécharger pour Windows (.msi)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Linux-.AppImage-24292f?logo=linux&logoColor=white" alt="Télécharger pour Linux (.AppImage)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Linux-.deb-24292f?logo=debian&logoColor=white" alt="Télécharger pour Linux (.deb)"></a>
+</p>
 
 <table>
 <tr>
@@ -91,7 +90,22 @@ tandis que les fils existants restent associés au compte qui les a démarrés.
 
 ## Démarrage rapide
 
-### Application de bureau (bêta)
+### Installation personnelle (CLI)
+
+```bash
+npm install -g @bitkyc08/opencodex   # Node 18+ ; le runtime Bun est inclus automatiquement
+ocx start                         # proxy + tableau de bord sur localhost:10100
+```
+
+Utilisez `ocx service` pour l'exécuter en arrière-plan.
+
+Ouvrez **http://localhost:10100** et configurez tout dans le tableau de bord web — ajoutez des
+fournisseurs (plus de 40 intégrés, ou n'importe quel point de terminaison compatible OpenAI),
+choisissez les modèles, gérez les comptes. `ocx gui`
+rouvre le tableau de bord à tout moment.
+
+<details>
+<summary><b>Application de bureau (bêta)</b></summary>
 
 L'application de bureau reprend le même proxy et le même tableau de bord dans une fenêtre native, avec une icône dans la barre d'état et le binaire `ocx` inclus.
 Elle se rattache à un proxy déjà en cours d'exécution ou démarre celui qui est fourni, et le tableau de bord reste
@@ -115,19 +129,7 @@ exige macOS). Le [guide de l'application de bureau](https://opencodex.me/fr/guid
 [guide de l'application macOS dans la barre des menus](https://opencodex.me/fr/guides/macos-menu-bar/) détaillent le premier lancement, et
 [`AGENTS_INSTALL.md`](../AGENTS_INSTALL.md#where-things-are-installed) répertorie tout ce qui est écrit sur le disque.
 
-### Installation personnelle (CLI)
-
-```bash
-npm install -g @bitkyc08/opencodex   # Node 18+ ; le runtime Bun est inclus automatiquement
-ocx start                         # proxy + tableau de bord sur localhost:10100
-```
-
-Utilisez `ocx service` pour l'exécuter en arrière-plan.
-
-Ouvrez **http://localhost:10100** et configurez tout dans le tableau de bord web — ajoutez des
-fournisseurs (plus de 40 intégrés, ou n'importe quel point de terminaison compatible OpenAI),
-choisissez les modèles, gérez les comptes. `ocx gui`
-rouvre le tableau de bord à tout moment.
+</details>
 
 ### Groupe de comptes ChatGPT
 
@@ -311,14 +313,15 @@ consultez la [documentation d'installation](https://opencodex.me/fr/getting-star
 <details>
 <summary>Détails de la gestion de la mémoire</summary>
 
-OpenCodex suit 36 catégories d'état conservé par le processus. Chacune possède une limite documentée :
+OpenCodex suit l'état conservé par le processus dans les catégories ci-dessous. Chacune possède une limite documentée :
 
-- **12 stockages conservés** (journal des requêtes, tampons circulaires de débogage, cache d'images, cache de
+- **14 stockages conservés** (journal des requêtes, tampons circulaires de débogage, cache d'images, cache de
   modèles, descriptions visuelles, blobs de curseurs, continuation des réponses, etc.) sont comptabilisés en octets et
-  évincés selon le budget mémoire géré par l'application (256 Mio par défaut).
+  évincés selon le budget mémoire géré par l'application (256 Mio par défaut), sauf le stockage de
+  rejeu des contrôles natifs, épinglé et jamais évincé.
 - **4 tampons observés** (accumulateurs de traduction, segments finaux d'images/OAuth/Grok) sont
   surveillés pour détecter la pression des octets en cours de traitement, sans éviction.
-- **24 enregistrements de stockages d'état** gèrent les balayages d'expiration (intervalle de 60 s) et la
+- **28 enregistrements de stockages d'état** gèrent les balayages d'expiration (intervalle de 60 s) et la
   réconciliation des générations de configuration afin de supprimer les clés obsolètes des fournisseurs et des comptes.
 - **Les mémos de chemins et d'empreintes** (métadonnées de l'espace de travail, identités renforcées, sels
   d'installation, capacités indiquées par le mode) utilisent des limites LRU selon l'ordre d'insertion (8 à 128 entrées).
@@ -347,6 +350,20 @@ Omettez le préfixe `provider/` pour utiliser le fournisseur par défaut ou éta
 correspondance selon le motif du nom du modèle. Les identifiants de modèles du fournisseur contenant `/`
 sont présentés avec leurs barres obliques internes remplacées par `-` ; la forme brute comportant toutes
 les barres obliques continue également de fonctionner. Détails : [documentation sur le routage des modèles](https://opencodex.me/fr/guides/model-routing/).
+
+### Routage JEV Auto (optionnel)
+
+TypeSafe JEV peut choisir le premier modèle et l'effort de raisonnement d'un Combo activé explicitement,
+sans rien changer au sélecteur de modèles ni aux routes directes. Ajoutez l'identifiant avec
+`ocx login jev`, depuis **Providers → TypeSafe JEV → Add API key**, ou via `TYPESAFE_API_KEY`/`JEV_API_KEY`.
+Ouvrez ensuite **Models → Combos → Create JEV Auto**, choisissez les modèles cibles autorisés et cochez
+les efforts exacts que JEV peut sélectionner pour chaque cible. Sans réglage d'effort, une cible autorise
+tous les efforts que le modèle annonce actuellement.
+
+JEV n'est consulté que pour `jev-auto`, et une seule fois par appel logique au modèle. Un identifiant
+manquant, une erreur réseau ou une décision invalide retombent sur la première cible éligible ;
+l'annulation par l'appelant annule toujours la requête. Les tests automatisés utilisent un point de
+terminaison TypeSafe simulé et ne valident pas un compte JEV réel.
 
 ## Fournisseurs et adaptateurs
 

@@ -9,7 +9,7 @@ through the protocol at `GET /v1/models`; it does not pin Codex to the generated
 Every config edit is idempotent and reversible.
 
 The **Integrations** overview has a Codex switch for this native integration. Its switch shows
-the desired state from OpenCodex's configuration, while the badge reports whether Codex is
+the latest saved desired state from OpenCodex's configuration, including immediately after a toggle, while the badge reports whether Codex is
 currently observed using the proxy; during cleanup those can briefly differ while the badge
 continues to report the observed state. Disabling names the effective Codex config
 file, removes OpenCodex's generated routing artifacts, and leaves the proxy running for other
@@ -106,6 +106,13 @@ is a `POST` to the canonical Responses URL or a configured WebSocket route, and 
 `stream` to `true` at the root. Everything else stays on SSE over HTTP, and an eligible turn still
 falls back to it when the request cannot be prepared, the `response.create` frame exceeds its size
 limit, or the proxy route cannot carry the socket.
+
+To keep the built-in ChatGPT provider on HTTP/SSE, set `providers.openai.upstreamWebsocket`
+to `false` in `~/.opencodex/config.json` and restart the proxy. Merge this field into the
+existing `openai` provider; preserve its account mode and other settings. Omit the field
+to restore the default upstream WebSocket selection. This setting does not change the
+client-facing `websockets` switch or the ChatGPT account used for the request. Native
+mid-turn steering and injection need upstream WebSocket and are unavailable while it is off.
 
 Local provider pacing can also hold a request before it is dispatched at all. So a slow first
 output has several possible contributors, and upstream queueing is only one of them. `ocx doctor`
@@ -343,10 +350,15 @@ $CODEX_HOME/opencodex-catalog.json
 $CODEX_HOME/models_cache.json
 ```
 
-On WSL, if `CODEX_HOME` is unset and the Linux `~/.codex/config.toml` is absent, opencodex also
+On WSL, if `CODEX_HOME` is unset and the Linux `~/.codex` directory is absent or holds no Codex state
+(`config.toml`, `auth.json`, `sessions`, `history.jsonl`), opencodex also
 checks for a single Windows Codex Desktop home at `/mnt/c/Users/*/.codex/config.toml`. When exactly
 one candidate exists, it uses that directory so WSL app-server mode and Windows Codex Desktop share
-the same config and auth files. Set `CODEX_HOME` explicitly to override this detection.
+the same config and auth files. Set `CODEX_HOME` explicitly to override this detection. When Windows Codex Desktop runs its app-server inside WSL, it ships the Linux Codex binary under that home as `bin/wsl/<hash>/codex`; opencodex finds it there when the service PATH has no `codex`, after any explicitly configured runtime and PATH.
+
+If the Codex home exists but Codex has not written `config.toml` yet (for example a fresh Desktop install
+that was never signed in to OpenAI), opencodex creates an empty `config.toml` there and continues. If
+the home directory itself does not exist, start Codex once so it creates it, or set `CODEX_HOME`.
 
 Codex can keep SQLite-backed thread state in a separate directory. OpenCodex history operations use
 the same precedence as Codex: root `sqlite_home` in `config.toml`, then `CODEX_SQLITE_HOME`, then the
@@ -605,6 +617,16 @@ executes and authorizes the command. Valid JavaScript fallback fields, ambiguous
 and unrelated tool namespaces are not converted. This compatibility repair does not bypass
 provider rate limits or change the configured retry policy.
 
+The same repair covers the goal helpers. A routed model that calls `create_goal`, `get_goal`, or
+`update_goal` (or a `default.`-prefixed spelling of one) as a tool while the catalog declares only
+code-mode `exec` has the call converted into the matching `tools.<helper>(...)` call inside
+`exec`. A catalog that genuinely declares the bare goal tool keeps it, and a catalog that declares
+neither the tool nor `exec` still rejects the call as undeclared.
+
+For routed Responses turns, an explicit tool-enforcement policy also rejects client tool calls if
+the request's declared-tool catalog is unavailable. An empty declared catalog rejects every client
+tool call; Chat and Anthropic clients retain their own tool-validation responsibility.
+
 Routed code-mode turns are also told the host's rules for the nested helpers before the first
 call: `tools.apply_patch` takes one string that opens and closes with the bare patch marker lines,
 the isolate has no `import`, and long-running commands are polled through `write_stdin`. When a
@@ -686,6 +708,20 @@ file unchanged and skips profile writes, catalog/cache refresh, and both immedia
 Codex history metadata restoration. Tools that manage a custom provider often tag existing sessions with that
 provider id; replacing the active id can make those intact sessions disappear from Codex's history
 view. The same protection applies to an external provider selected by a legacy root profile.
+
+While an external provider owns `config.toml`, the settings report that
+`GET /api/settings` and `ocx system settings --json` return a description of the Desktop authless and
+client-compaction switches — and the Codex sign-in requirement — as controlled by that
+provider instead of showing the effective state OpenCodex would produce. Flipping either
+switch still stores the preference, but `config.toml` is not rewritten; the stored value
+takes effect if you switch Codex back to a provider OpenCodex manages and rerun `ocx start`.
+
+If `config.toml` exists but cannot be read (permissions, or a delete racing the read), the same
+report withholds the effective values and the sign-in answer as undetermined instead of showing
+the state OpenCodex would compute locally. The apply record keeps that explanation — including on
+a save whose injection gate is already closed by a disabled integration or a stopped proxy — and
+marks it retryable, so a later `ocx system settings --json` read reports the settled answer once
+the file is readable again. With Codex integration disabled, `ocx sync` is catalog-only and cannot apply it.
 
 Keep one tool as the owner of Codex provider configuration. To use OpenCodex behind an existing
 provider manager, point that provider at `http://127.0.0.1:10100/v1` with Responses passthrough

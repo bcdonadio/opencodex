@@ -39,6 +39,21 @@ attempt with tools removed and existing results retained. This can incur another
 request. A second empty answer fails; malformed calls and provider refusal or truncation
 outcomes are preserved without this retry.
 
+## xAI policy refusals
+
+Some xAI Chat Completions refusals arrive as HTTP 403 with an exact model-refusal
+sentence such as `I can't help with that request.` instead of HTTP 200 plus
+`finish_reason: content_filter`. Codex treats a 403 as a transport failure, so the
+user turn is never recorded and the same request is retried.
+
+On a non-combo Responses request, OpenCodex rewrites that allowlisted 403 to an
+HTTP 200 Responses payload with `status: "incomplete"` and
+`incomplete_details.reason: "content_filter"`. The rewrite runs on the openai-chat
+adapter path and on openai-responses passthrough (grok-4.6 / grok-4.5 OAuth).
+Streaming uses the same incomplete boundary. Empty or whitespace 403 bodies stay
+errors. Subscription, credit, entitlement, and `not allowed to use this
+model` 403s stay errors. Combo failover still sees the original HTTP 403.
+
 ## Cursor context overflow
 
 Cursor's first bare context overflow is surfaced to the client. Later eligible requests
@@ -177,6 +192,9 @@ top-level `instructions`, and `truncation` is removed because that destination r
 Responses shapes. Other Responses destinations preserve them.
 The same canonical boundary removes nested client-only `prompt_cache_breakpoint` markers and drops
 `item_reference` entries only on `store: false` continuations; tool call/result pairing is unchanged.
+`metadata` is removed on every forward route for compatibility with the canonical ChatGPT backend, which rejects it. `max_output_tokens`
+is removed only on that canonical route, which rejects the field outright; every other forward destination
+receives the caller's output cap unchanged, but the cap bounds the turn only when the destination enforces it.
 
 Image file IDs are provider-scoped references, not portable image bytes. Responses passthrough
 retains them; translating adapters receive an `[image: file_id]` text marker for file-only image

@@ -28,6 +28,7 @@ export const RESPONSES_CORE_MODULES = [
   "core-auth.ts",
   "core-normalize.ts",
   "core-combo.ts",
+  "core-combo-native.ts",
   "request-prepare.ts",
   "shadow-target-availability.ts",
   "compaction-routing.ts",
@@ -35,7 +36,6 @@ export const RESPONSES_CORE_MODULES = [
   "request-sidecar-auth.ts",
   "response-effects.ts",
   "request-send-budget.ts",
-  "request-spend.ts",
   "passthrough-execution.ts",
   "passthrough-dispatch.ts",
   "reset-replay.ts",
@@ -46,6 +46,7 @@ export const RESPONSES_CORE_MODULES = [
   "adapter-dispatch.ts",
   "adapter-continuation.ts",
   "adapter-delivery.ts",
+  "policy-refusal.ts",
 ] as const;
 
 export type ResponsesCoreModule = typeof RESPONSES_CORE_MODULES[number];

@@ -26,7 +26,7 @@ description: 리스너, 원격 접근, admission 키, 타임아웃, 저장소, �
 | `codexAutoStart?` | `boolean` | `true` | Codex shim이 Codex를 실행하기 전에 `ocx ensure`를 돌리도록 허용합니다. `false`이면 ensure는 아무 작업도 하지 않습니다. |
 | `codexShimAutoRestore?` | `boolean` | `true` | 완료된 외부 Codex 업데이트가 설치된 shim을 교체한 뒤 복원합니다. 환경 변수로 끌 수 있습니다: `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`. |
 | `syncResumeHistory?` | `boolean` | `true` | 되돌릴 수 있는 Codex App history 호환성입니다. 원래 메타데이터는 `ocx stop` / `ocx restore`가 백업하고 복원합니다. |
-| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | 인식된 Codex 보조/섀도 호출을 요청에 설정된 reasoning effort를 유지한 채 선택한 모델로 다시 보냅니다. 기본 source prefix는 `gpt-5.6-luna`입니다. 0.144.x 이하의 이전 클라이언트는 `gpt-5.4-mini`를 사용했으며 `sourceModels`로 복원할 수 있습니다. |
+| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | 인식된 Codex 보조/섀도 호출을 요청에 설정된 reasoning effort를 유지한 채 선택한 모델로 다시 보냅니다. 기본 source prefix는 `gpt-6-luna`, `gpt-5.6-luna`입니다. 0.144.x 이하의 이전 클라이언트는 `gpt-5.4-mini`를 사용했으며 `sourceModels`로 복원할 수 있습니다. |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | on when usable | 웹 검색 사이드카 옵션입니다. |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | on when usable | 이미지 설명 사이드카 옵션입니다. |
 | `images?` | `OcxImagesConfig` | automatic OpenAI selection | Codex `image_gen`용 독립형 Images 릴레이 옵션입니다. |
@@ -162,12 +162,14 @@ ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 
 Codex는 제목과 커밋 메시지 같은 작업에 작은 보조 모델을 사용합니다. 인식된 source-model prefix를 다른 구성된 모델로 돌리려면 `shadowCallIntercept`를 활성화합니다. 대체 호출은 요청에 설정된 reasoning effort를 유지합니다. 클라이언트가 다른 helper id를 사용할 때만 `sourceModels`를 설정합니다.
 
+가로채기는 모델을 기준으로 합니다. 모델 ID가 `sourceModels`와 일치하는 모든 요청은 일반 `request_kind: "turn"` 요청을 포함해 다시 보낼 수 있습니다. `x-openai-subagent: collab_spawn` 또는 `x-codex-turn-metadata` JSON 헤더의 `subagent_kind: "thread_spawn"`로 생성된 자식으로 표시된 요청은 예외이므로, 명시적으로 생성된 서브에이전트는 모델을 유지합니다.
+
 ```json
 {
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"]
+    "sourceModels": ["gpt-6-luna", "gpt-5.6-luna"]
   }
 }
 ```
@@ -193,7 +195,7 @@ Codex는 제목과 커밋 메시지 같은 작업에 작은 보조 모델을 사
 
 | 필드 | 형식 | 기본값 | 의미 |
 | --- | --- | --- | --- |
-| `enabled?` | `boolean` | on when usable | 주 스위치입니다. |
+| `enabled?` | `boolean` | on when usable | 주 스위치입니다. `false`이면 OpenCodex는 `web_search` 가로채기를 멈추고 Codex 통합이 `~/.codex/config.toml`에 `web_search = "disabled"`를 씁니다. |
 | `backend?` | `"openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"` | `openai` | 명시값이 우선입니다. 생략하면 항상 `openai`입니다. `anthropic`과 `xai`는 명시적으로 설정할 때만 실행되며, `gemini`와 `exa`는 executor가 제공될 때까지 예약 상태입니다. |
 | `model?` | `string` | backend-dependent | OpenAI는 `gpt-5.6-luna`, Anthropic은 `claude-sonnet-5`, xAI는 `grok-4.6`입니다. 레거시로 명시된 `gpt-5.4-mini`는 시작 시 마이그레이션됩니다. |
 | `exaApiKey?` | `string` | 없음 | `exa` 백엔드용 운영자 키입니다. 쓰기 전용이며 관리 API 조회에서는 저장된 값을 반환하지 않습니다. |

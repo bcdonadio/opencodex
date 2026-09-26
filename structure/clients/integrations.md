@@ -8,6 +8,16 @@ promise is reversibility: apply snapshots first, writes atomically, records exac
 and refuses refresh, disable, or restore when the current file cannot be classified safely.
 Managed client targets are inspected without following a final symbolic link, and their atomic
 replacement addresses the named directory entry rather than resolving that link again at commit.
+Uninstall runs the same coordinated disable path for every strict ownership record before removing
+OpenCodex state, including the legacy Aside owner and every child profile store under
+`integrations/aside-profiles/<profileId>/`. `src/cli/uninstall-integrations.ts` validates all stores
+and registered Aside paths before mutation; `src/integrations/aside-profile-context.ts` supplies
+the guarded child stores. An unreadable record, conflict, or failed compensation aborts config
+removal and retains remaining recovery state. Earlier successful disables are not rolled back;
+failed compensation can leave an intermediate client file. Inspect the reported client files and
+retained snapshots before retrying; preserved recovery state does not prove restoration completed.
+
+> Decision record: [ADR-0107](../decisions/ADR-0107-uninstall-integration-recovery.md)
 
 Shared response support has a separate [bounded ingestion contract](../transports/inventory.md#bounded-response-ingestion-and-orcarouter-login):
 raw-byte callers own their byte and deadline budgets and inherit best-effort cancellation.
@@ -174,6 +184,26 @@ model object so Hermes receives no guessed capability. OpenCodex does not emit `
 because its authoritative input-modality vocabulary currently has no video value.
 
 > Decision record: [ADR-0090](../decisions/ADR-0090-hermes-model-capabilities.md)
+
+## Hermes session affinity
+
+Hermes exports include `session_affinity_header: session-id` on the entire OpenCodex provider,
+independent of the model roster. This is a header name: Hermes generates the conversation-scoped
+value. No static session identifier or protocol switch is emitted, and upstream header-forwarding
+rules remain unchanged. Hermes must support the documented per-provider affinity option to use it.
+
+`src/integrations/ownership-policy.ts` recognizes exactly one predecessor: an owned Hermes block
+without this setting. The block may remain unchanged or have gained only the supported value; after
+removing that field, its exact or recorded semantic fingerprint must match the previous record.
+Client, config path and fragment-path ownership still apply. Other edits remain conflicts, and
+after adoption the affinity field is fully protected, including against deletion.
+
+Legacy blocks report `stale` until an explicit Apply records the new contribution. Implicit refresh
+leaves both their configuration and ownership unchanged, reporting that Apply is needed; this also
+defers catalog updates until Apply. Once upgraded, normal refresh resumes and preserves affinity.
+Replace emits the setting too. The existing source-preserving YAML, snapshot and restore paths
+remain authoritative. `tests/clients/integrations-hermes-affinity.test.ts` exercises the real writer
+against temporary client homes, including exact-workaround adoption, refusal, refresh and undo.
 
 ## Ownership Axes
 

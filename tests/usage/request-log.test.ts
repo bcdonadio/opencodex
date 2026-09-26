@@ -677,10 +677,10 @@ describe("request log metadata", () => {
 
   test("records ordered attempts with sealed identity, fresh estimates, and deduplicated recoveries", () => {
     const a = beginRequestAttempt(1, "provisional-a", "model-a", "openai-chat");
+    sealRequestAttemptIdentity(a, "chatgpt-pabcdef", "openai-responses", "pabcdef");
     noteAttemptSend(a, 100);
     noteAttemptSend(a, 120, "transient-5xx");
     noteAttemptSend(a, 120, "transient-5xx");
-    sealRequestAttemptIdentity(a, "chatgpt-pabcdef", "openai-responses", "pabcdef");
     finishRequestAttempt(a, 503, 12);
 
     const b = beginRequestAttempt(2, "prov-b", "model-b", "openai-chat");

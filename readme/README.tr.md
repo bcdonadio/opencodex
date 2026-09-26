@@ -8,23 +8,22 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="X üzerinde @claudeebum hesabını takip et"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/github/v/release/lidge-jun/opencodex?label=desktop&logo=github&color=24292f" alt="En güncel masaüstü sürümü"></a>
   <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm sürümü"></a>
   <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="lisans"></a>
   <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node sürümü">
 </p>
 
-<p align="center">
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-macos.svg" alt="macOS için OpenCodex'i indir" width="220"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-windows.svg" alt="Windows için OpenCodex'i indir" width="220"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-linux.svg" alt="Linux için OpenCodex'i indir" width="220"></a>
-</p>
-<p align="center"><sub>Masaüstü uygulaması (beta): macOS evrensel <code>.dmg</code> · Windows x64 <code>.msi</code> · Linux x86_64 <code>.AppImage</code> / <code>.deb</code>. Terminali mi tercih ediyorsunuz? CLI'yı kurun:</sub></p>
-
 ```bash
 npm install -g @bitkyc08/opencodex
 ocx start
 ```
+
+<p align="center">
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/macOS-.dmg-24292f?logo=apple&logoColor=white" alt="macOS için indir (.dmg)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Windows-.msi-24292f?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0zIDNoOC41djguNUgzem05LjUgMEgyMXY4LjVoLTguNXpNMyAxMi41aDguNVYyMUgzem05LjUgMEgyMVYyMWgtOC41eiIvPjwvc3ZnPg==" alt="Windows için indir (.msi)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Linux-.AppImage-24292f?logo=linux&logoColor=white" alt="Linux için indir (.AppImage)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Linux-.deb-24292f?logo=debian&logoColor=white" alt="Linux için indir (.deb)"></a>
+</p>
 
 <table>
 <tr>
@@ -90,7 +89,21 @@ kullanılan sağlıklı hesaba kendiliğinden gitsin; mevcut dizilerse onları b
 
 ## Hızlı başlangıç
 
-### Masaüstü uygulaması (beta)
+### Kişisel kurulum (CLI)
+
+```bash
+npm install -g @bitkyc08/opencodex   # Node 18+; Bun çalışma zamanı otomatik olarak paketlenir
+ocx start                         # proxy + kontrol paneli, localhost:10100
+```
+
+Arka planda çalıştırmak için `ocx service` kullanın.
+
+**http://localhost:10100** adresini açın ve her şeyi web kontrol panelinden yapılandırın: sağlayıcı
+ekleyin (40'tan fazla hazır sağlayıcı ya da herhangi bir OpenAI uyumlu uç nokta), model seçin, hesap
+yönetin. `ocx gui` paneli istediğiniz zaman yeniden açar.
+
+<details>
+<summary><b>Masaüstü uygulaması (beta)</b></summary>
 
 Masaüstü uygulaması; aynı proxy ve kontrol panelini yerel bir pencerede, menü çubuğu simgesi ve
 paketlenmiş `ocx` ile sunar. Zaten çalışan bir proxy'ye bağlanır ya da kendi paketlenmiş proxy'sini
@@ -115,19 +128,7 @@ Windows ve Linux'ta ise `bun install && bun run prepare-sidecar && bun run build
 anlatır; [`AGENTS_INSTALL.md`](../AGENTS_INSTALL.md#where-things-are-installed) diske yazılan her
 şeyi listeler.
 
-### Kişisel kurulum (CLI)
-
-```bash
-npm install -g @bitkyc08/opencodex   # Node 18+; Bun çalışma zamanı otomatik olarak paketlenir
-ocx start                         # proxy + kontrol paneli, localhost:10100
-```
-
-Arka planda çalıştırmak için `ocx service` kullanın.
-
-**http://localhost:10100** adresini açın ve her şeyi web kontrol panelinden yapılandırın: sağlayıcı
-ekleyin (40'tan fazla hazır sağlayıcı ya da herhangi bir OpenAI uyumlu uç nokta), model seçin, hesap
-yönetin. `ocx gui` paneli istediğiniz zaman yeniden açar.
-
+</details>
 
 ### ChatGPT hesap havuzu
 
@@ -312,14 +313,15 @@ betiklerini engellediyse [kurulum belgelerine](https://opencodex.me/tr/getting-s
 <details>
 <summary>Bellek sahipliği ayrıntıları</summary>
 
-OpenCodex, süreçte tutulan durumu 36 kategoride izler. Her birinin belgelenmiş bir sınırı vardır:
+OpenCodex, süreçte tutulan durumu aşağıdaki kategorilerde izler. Her birinin belgelenmiş bir sınırı vardır:
 
-- **12 tutulan depo** (istek günlüğü, hata ayıklama halkaları, görsel önbelleği, model önbelleği, görü
+- **14 tutulan depo** (istek günlüğü, hata ayıklama halkaları, görsel önbelleği, model önbelleği, görü
   açıklamaları, imleç blob'ları, responses devamlılığı vb.) bayt olarak hesaplanır ve uygulamanın sahip
-  olduğu bellek bütçesiyle (varsayılan 256 MiB) tahliye edilir.
+  olduğu bellek bütçesiyle (varsayılan 256 MiB) tahliye edilir; yalnızca native control replay deposu
+  sabitlenmiştir ve hiç tahliye edilmez.
 - **4 gözlenen arabellek** (çevirici biriktiricileri, görsel/OAuth/Grok kuyrukları) tahliye edilmeden,
   yalnızca uçuştaki bayt baskısı için izlenir.
-- **24 state-store kaydı**, süre dolumu taramalarını (60 sn aralık) ve yapılandırma kuşağı uzlaştırmasını
+- **28 state-store kaydı**, süre dolumu taramalarını (60 sn aralık) ve yapılandırma kuşağı uzlaştırmasını
   yürüterek eski sağlayıcı/hesap anahtarlarını kaldırır.
 - **Yol ve parmak izi notları** (çalışma alanı meta verileri, sağlamlaştırılmış kimlikler, kurulum
   tuzları, mod ipucu yetenekleri) ekleme sıralı LRU sınırları kullanır (8–128 girdi).
@@ -347,6 +349,20 @@ Varsayılan sağlayıcıyı kullanmak ya da model adı desenine göre otomatik e
 önekini atlayın. İçinde `/` bulunan sağlayıcı model kimlikleri, iç eğik çizgileri `-` ile
 değiştirilmiş biçimde sunulur; eğik çizgili tam biçim de çalışmaya devam eder. Ayrıntılar:
 [model yönlendirme belgeleri](https://opencodex.me/tr/guides/model-routing/).
+
+### JEV Auto yönlendirme (isteğe bağlı)
+
+TypeSafe JEV, açıkça etkinleştirilen bir Combo için ilk modeli ve akıl yürütme düzeyini seçebilir;
+normal model seçici ve tüm doğrudan rotalar değişmez. Kimlik bilgisini `ocx login jev` ile,
+**Providers → TypeSafe JEV → Add API key** üzerinden veya `TYPESAFE_API_KEY`/`JEV_API_KEY` ile ekleyin.
+Ardından **Models → Combos → Create JEV Auto** bölümünü açın, izin verilen hedef modelleri seçin ve
+JEV'in her hedef için seçebileceği düzeyleri işaretleyin. Düzey ayarına dokunulmayan bir hedef, modelin
+şu anda duyurduğu tüm düzeylere izin verir.
+
+JEV yalnızca `jev-auto` için ve mantıksal model çağrısı başına yalnızca bir kez kullanılır. Eksik kimlik
+bilgisi, ağ hatası veya geçersiz karar durumunda şu anda uygun olan ilk hedefe fail-open yapılır;
+çağıranın iptali isteği yine iptal eder. Otomatik testler sahte bir TypeSafe uç noktası kullanır ve
+gerçek bir JEV hesabını doğrulamaz.
 
 ## Sağlayıcılar ve adaptörler
 

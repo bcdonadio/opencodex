@@ -1,5 +1,9 @@
 # Providers And Adapters
 
+RunTurn hosted search uses `src/web-search/run-turn-loop.ts`: synthetic calls remain private, progress reaches the bridge during collection, and a validated terminal precedes search execution. Complete search calls remain actionable at a truncated `done`; cancellation prevents subsequent queries and calls. OAuth preflight replay in `src/server/responses/run-turn-execution.ts` retains the synthetic tool while refreshing credential-scoped route state. In `src/server/responses/sidecar-execution.ts`, a search plan takes priority over image/video bridge execution for both transports; only fetch-capable adapters enter the fetch search loop.
+
+Combo preflight allows the private search tool only while a search plan is active; client tool declaration checks and replay-unsafe heartbeat protection remain enforced.
+
 The opt-in `inlineThinkTagModels` list follows static-policy override and model-rename rules;
 shared Kiro/Chat splitting and raw display follow [Chat compatibility](providers/chat-compat.md#inline-think-tag-recovery).
 
@@ -21,6 +25,12 @@ system prompt through its documented scoped `QODER_APPEND_SYSTEM_PROMPT` or
 `QODERCN_APPEND_SYSTEM_PROMPT` child environment,
 never through command-line arguments or inherited vendor variables.
 
+Coding-agent stdout is framed as bounded JSONL directly from decoded stream segments. The framer
+tracks the current line's UTF-8 byte count incrementally, searches each decoded segment once, and
+joins only when a newline or EOF completes the frame. This preserves split UTF-8, BOM, CRLF,
+blank-line, line-limit, and total-limit behavior without re-encoding the growing partial frame on
+every child stdout chunk. See [ADR-0102](decisions/ADR-0102-incremental-stream-accounting.md).
+
 Kimi Coding's Chat, API-key, and optional Responses presets consume the same model seeds in
 `src/providers/registry/model-seeds.ts`, including the native `k3-256k` ID. The Responses preset
 shares the `kimi` OAuth account and Coding endpoint, keeps Chat as the featured default, and
@@ -34,6 +44,24 @@ the [bounded ingestion contract](transports/inventory.md#bounded-response-ingest
 Anthropic model-scoped quota labels in `src/providers/quota/vendor-probes-oauth.ts` publish
 only canonical Fable, Opus, or Sonnet labels after removing terminal controls; unknown upstream display names are omitted.
 
+The routed identity sentence a catalog row carries is model-neutral on disk: `base_instructions`,
+and a native capability alias's `model_messages.instructions_template`, hold `NEUTRAL_IDENTITY_LINE`
+rather than a model id, because Codex stores a session's instruction block once and replays it
+verbatim into a sub-agent spawned on a DIFFERENT model, where a baked id makes the worker answer
+identity questions with the parent's id (#5217). The destination model is therefore named at request
+time, in two steps, because the parser reads the body before routing has run and can only name the
+id the CLIENT sent. `src/responses/parser.ts` names it in the top-level `instructions` string and in
+developer and system-role items; `applyFinalRouteRequestNormalization`
+(`src/server/responses/core-normalize.ts`) then settles that sentence on `route.modelId` through
+`renameRoutedIdentityInContext`, where the wire id is final and every dispatch path — passthrough,
+`runTurn`, and the adapter request build — still has to read the context. Adapters that build their
+own system text call `identifyRoutedModel` on top of that with their own wire id, so the ones that
+never call it are not the ones that leak a client selector upstream (#5221).
+The Responses passthrough rewrites the sentence on a routed destination and strips it on a native or
+forward one, where Codex's own identity wording already supplies it;
+`tests/adapters/identity-neutralize.test.ts` and `tests/adapters/identity-subagent.test.ts` pin the
+rewrite rules and the routed-id settlement.
+
 | Path | Responsibility |
 | --- | --- |
 | `src/providers/registry.ts` | Compatibility facade; canonical provider presets for CLI, dashboard, OAuth, key providers, and metadata live in `src/providers/registry/entries-core.ts` and `entries-extended.ts`, with model seeds in `model-seeds.ts`. |
@@ -46,16 +74,16 @@ only canonical Fable, Opus, or Sonnet labels after removing terminal controls; u
 | `src/combos/request.ts` | Clones each selected combo target request and applies the existing target capability ladder: adaptive unknown targets and explicit empty ladders receive no unsupported reasoning/thinking controls, while known ladders retain per-target resolution. |
 | `src/adapters/openai-responses.ts` | Native OpenAI/ChatGPT Responses passthrough. |
 | `src/responses/muse-tool-name-alias.ts` | Host-gated Meta Muse 64-char tool-name alias/restore used by the Responses passthrough. |
-| `src/adapters/openai-chat.ts`, `src/adapters/openai-chat/` | OpenAI-compatible Chat Completions bridge, split into leaves (`wire.ts`, `messages.ts`, `response-events.ts`, `passthrough.ts`, `parallel-tool-calls.ts`, `reasoning-wire.ts`, `tool-call-validation.ts`, `tool-schema.ts`, `errors.ts`). `parallel-tool-calls.ts` owns the `parallel_tool_calls` wire value for both the translated and native builders, so the three provider states — configured opt-out, configured opt-in, and the unset default that forwards only a caller's explicit `false` — cannot drift between them. `reasoning-wire.ts` applies explicit gateway-object and tool-bearing effort-omission declarations to both builders; absent declarations leave native raw forwarding unchanged. Its client delivery shapes in `src/chat/outbound.ts` and `src/server/chat-native-sse.ts` relay the upstream `service_tier` echo on non-stream, folded-stream, and synthesized-SSE bodies, never inventing the key when the upstream omits it. |
-| `src/adapters/anthropic.ts` | Anthropic Messages bridge. A `refusal` or `content_filter` stop reason yields an explicit `incomplete` event with `retryable: false` rather than `done` with that stopReason (#4312); `max_tokens` remains `done`. It is the wire that defines `tools[*].strict` and `tools[*].allowed_callers`, so a rebuilt declaration carries both: an explicit `strict: true` and any `allowed_callers` the caller declared. An absent `strict` stays absent, because the Messages inbound records it as `false` and a `false` on the wire would read as an opt-out nobody asked for. Anthropic Fast uses the native `anthropic-speed` FastWire: a set decision sends `speed: "fast"` with `fast-mode-2026-02-01` in one case-insensitively merged, deduplicated `anthropic-beta` header that preserves OAuth betas. Stream and buffered `usage.speed` echoes confirm fast or downgrade to standard; no echo leaves the request assumed. `tests/adapters/anthropic/anthropic-fast-speed.test.ts` pins the wire and echoes. |
+| `src/adapters/openai-chat.ts`, `src/adapters/openai-chat/` | OpenAI-compatible Chat Completions bridge, split into leaves (`wire.ts`, `messages.ts`, `response-events.ts`, `passthrough.ts`, `parallel-tool-calls.ts`, `reasoning-wire.ts`, `serialized-tool-call-content.ts`, `tool-call-validation.ts`, `tool-schema.ts`, `errors.ts`). `parallel-tool-calls.ts` owns the `parallel_tool_calls` wire value for both the translated and native builders, so the three provider states — configured opt-out, configured opt-in, and the unset default that forwards only a caller's explicit `false` — cannot drift between them. `reasoning-wire.ts` applies explicit gateway-object and tool-bearing effort-omission declarations to both builders; absent declarations leave native raw forwarding unchanged. Its client delivery shapes in `src/chat/outbound.ts` and `src/server/chat-native-sse.ts` relay the upstream `service_tier` echo on non-stream, folded-stream, and synthesized-SSE bodies, never inventing the key when the upstream omits it. |
+| `src/adapters/anthropic.ts` | Anthropic Messages bridge. A `refusal` or `content_filter` stop reason yields an explicit `incomplete` event with `retryable: false` rather than `done` with that stopReason (#4312); `max_tokens` remains `done`. It is the wire that defines `tools[*].strict` and `tools[*].allowed_callers`, so a rebuilt declaration carries both: an explicit `strict: true` and any `allowed_callers` the caller declared. An absent `strict` stays absent, because the Messages inbound records it as `false` and a `false` on the wire would read as an opt-out nobody asked for. Anthropic Fast uses the native `anthropic-speed` FastWire: a set decision sends `speed: "fast"` with `fast-mode-2026-02-01` in one case-insensitively merged, deduplicated `anthropic-beta` header that preserves OAuth betas. Stream and buffered `usage.speed` echoes confirm fast or downgrade to standard; no echo leaves the request assumed. `tests/adapters/anthropic/anthropic-fast-speed.test.ts` pins the wire and echoes. Anthropic Fast is opt-in: the registry marks both Anthropic entries `fastOptIn`, and `src/providers/fast-opt-in.ts` (`providerFastSwitchOff`) keeps Fast off until `providers.<name>.fastEnabled` is `true`. An off switch is provider capability `false`, applied in the FastPolicy authority (`service-tier.ts`), `resolveModelPolicy`, and router registry enrichment, so no model-level Fast toggle, `--fast` row, or proxy-generated `speed` field is produced. Native Claude Messages passthrough still forwards a `speed` field the caller sends itself, outside the proxy Fast policy. `tests/adapters/anthropic/anthropic-fast-opt-in.test.ts` pins the default, the switch, and the management PATCH/GET. |
 | `src/adapters/google.ts` | Gemini bridge. The final wire compiler owns [endpoint-scoped tool-schema loss policy](providers/google.md#google-tool-schema-loss-reporting): compatible mode changes no request bytes, strict initial loss creates no physical send, and strict non-direct repair creates no changed repair send. A caller-declared strict tool selects `functionCallingConfig.mode: "VALIDATED"` in place of the absent-choice default; `NONE`, `ANY` and a forced-name choice are stronger constraints the caller asked for and are never overwritten. |
 | `src/adapters/declaration-carrier.ts`, `src/adapters/input-media-guard.ts` | Default-deny allowlists for constraints the normalized request carries but a wire may not be able to express: `tools[*].allowed_callers`, which fences a tool off from callers, and inline document bytes. Both are refused with a 400 at the single guard every registered adapter passes through, rather than left to each adapter, because an adapter that never learned about the carrier rebuilds without it and answers normally. `allowed_callers` reaches the `anthropic` wire; document bytes reach `anthropic`, `openai-chat` and `google`; the `openai-responses` wire is exempt from the whole guard because it forwards the original body. Adding an `AdapterWire` member makes the omission visible in these lists instead of at a customer's upstream. The unrestricted `["direct"]` caller default is not a restriction. |
 | `src/adapters/azure.ts` | Azure OpenAI bridge. |
 | `src/adapters/cursor.ts`, `src/adapters/cursor/` | Cursor protobuf transport: discovery, request builder, event decoding, MCP, thread continuity, native-exec policy. |
-| `src/adapters/devin.ts`, `src/adapters/devin/cloud-direct/` | Devin runTurn transport over Cognition Connect-RPC. `GetChatMessage` uses the Responses provider executor and shared physical-send budget; catalog and JWT support RPCs remain outside inference-send accounting. Provider-stated 429 reset delays are surfaced to the client rather than slept inside an admitted turn, so they cannot retain shared active-turn capacity. A recorded tenant host is used only for the stored account whose credential owns the transmitted key, searched in the configured provider id and then its deprecated alias; a configured, forwarded, or unmatched key uses the configured base URL or the US default. |
+| `src/adapters/devin.ts`, `src/adapters/devin/cloud-direct/` | Devin runTurn transport over Cognition Connect-RPC. `GetChatMessage` uses the Responses provider executor and shared physical-send budget; catalog, JWT, and `src/web-search/devin-executor.ts` native search support RPCs remain outside inference-send accounting. Provider-stated 429 reset delays are surfaced to the client rather than slept inside an admitted turn, so they cannot retain shared active-turn capacity. A recorded tenant host is used only for the stored account whose credential owns the transmitted key, searched in the configured provider id and then its deprecated alias; a configured, forwarded, or unmatched key uses the configured base URL or the US default. Native search previews the current route by effective adapter without mutating combo selection state, pins one admitted active-account snapshot for the request, and calls `GetWebSearchResults`, so it starts no CLI or second model. |
 | `src/adapters/kiro.ts` and `src/adapters/kiro/` | Kiro event/tool/thinking/truncation/retry handling. The original path is a facade over leaves for wire identity, reasoning, conversation state, token estimation, payload assembly, streaming, and the adapter. |
 | `src/adapters/mimo-free.ts` | Mimo Free transport (client identity + JWT). Concurrent requests share one JWT bootstrap bound only to its timeout; each request stops waiting on its own abort without cancelling the others. |
-| `src/adapters/command-code.ts`, `src/adapters/command-code-tool-text.ts`, `src/adapters/command-code-restored-schema.ts` | Command Code OAuth NDJSON translation. For every `xiaomi/mimo-` model, text, native calls, reasoning, and terminal decisions share one byte-bounded queue with linear queue visits. Markup is deduplicated against matching native calls; text-only restoration requires one contiguous text run, a clean finish, a declared tool, and arguments validated against supported schema constraints. A parameter-free (freeform) block may omit `</function>` but must end with `</tool_call>`; parameter blocks keep the canonical close. Native, reasoning, and other intervening events release an open markup block as text. Regex patterns, other unsupported constraints, and abnormal finishes fail closed. |
+| `src/adapters/command-code.ts`, `src/adapters/command-code-tool-text.ts`, `src/adapters/command-code-restored-schema.ts` | Command Code OAuth NDJSON translation. For every `xiaomi/mimo-` model, text, native calls, reasoning, and terminal decisions share one byte-bounded queue with linear queue visits. Markup is deduplicated against matching native calls; text-only restoration requires one contiguous text run, a clean finish, a declared tool, and arguments validated against supported schema constraints. A parameter-free (freeform) block may omit `</function>` but must end with `</tool_call>`; parameter blocks keep the canonical close. Markup appended after prose in the same delta is split off at the marker and held like a block that opens with `<tool_call>`; a marker split across deltas after prose is still released as text. Native, reasoning, and other intervening events interrupt a still-probing block but leave a held block held in arrival order, and the queued byte bound still flushes an unresolved envelope as text. An envelope the strict parser rejects but that opens with `<tool_call>`, closes with `</tool_call>`, and names a declared function is dropped when a native call for that same function arrives and on a clean finish; markup that parses but fits no supported schema is still released as text. Regex patterns, other unsupported constraints, and abnormal finishes fail closed. `tests/providers/command-code-tool-text-prose-split.test.ts` covers the split, the interleaved-event hold, and both drop paths. |
 | `src/adapters/image.ts`, `src/adapters/anthropic-image-guard.ts`, `src/adapters/anthropic-image-normalize.ts`, `src/adapters/anthropic-image-codec.ts` | Image conversion for adapter ingress and Anthropic-specific normalization/limits. An image's ladder position is pinned to its own identity (content hash + media type), so appending a newer image cannot re-encode older ones and bust Anthropic's prompt prefix cache (#4532). |
 | `src/adapters/run-turn-queue.ts`, `src/adapters/tool-catalog-nudge.ts`, `src/adapters/identity.ts`, `src/adapters/upstream-http-error.ts` | Shared adapter execution support: turn queueing, tool-catalog nudging, client identity, upstream error normalization. |
 
@@ -86,6 +114,63 @@ destination, and key boundary instead of being silently canonicalized onto the n
 OAuth presets resolve discovery against the same canonical registry transport as normal routing
 before any adapter-specific transport override, so a stale configured `baseUrl` cannot receive an
 OAuth bearer token.
+
+## TypeSafe JEV decision provider
+
+`src/providers/registry/entries-extended.ts` owns the canonical `jev` key preset at
+`https://api.typesafe.ai/v1/systemone` with adapter `jev-decision`. It is a credential owner, not an
+inference route: the registry marks it `credentialOnly`, its adapter is deliberately absent from the
+routable adapter registry, live discovery is disabled, no default/static model is published, and
+key login returns unknown without probing a nonexistent model catalog. The normal `ocx login jev`
+flow and provider-workspace API-key panel both persist the same credential-only row. Combo validation
+rejects the decision provider as a target. `src/server/management/provider-routes.ts`
+special-cases its connection test through the same bounded decision client before the generic
+static-catalog branch. The test sends no user prompt and returns only sanitized health status.
+
+The request path consumes a configured literal/reference key only when the row still matches the
+canonical registry transport, with `TYPESAFE_API_KEY` and the standard provider-derived
+`JEV_API_KEY` as explicit environment fallbacks. A same-named custom destination cannot receive
+either credential through the JEV client. All automated coverage mocks TypeSafe; live-key behavior
+remains an operator smoke boundary.
+
+`src/combos/jev.ts` extracts bounded user-task, previous-assistant, and latest-tool-output text plus
+the tool name and boolean signals; raw image data, tool arguments, encrypted reasoning, headers, and
+the JEV credential are excluded. It owns the joint target/effort choice map, strict response
+validation, fixed `jev-latest` destination, four-second deadline, no-redirect policy, bounded response,
+and caller-cancellation propagation. Missing credentials or safe state, transport failures, and invalid
+answers fail open to the first eligible target; no response can escape the configured choice map.
+Telemetry never retains extracted state or credentials.
+
+`src/server/responses/core-combo.ts` computes current eligibility, asks JEV once for the initial pick,
+applies the validated effort, and removes caller `service_tier` for that child. A retryable child
+failure re-enters the ordinary Combo fallback loop from the untouched request without another JEV
+call. Each target may carry an optional non-empty `reasoningEfforts` allowlist. Omission keeps the
+backward-compatible all-advertised behavior; a present list is intersected with current capabilities,
+and an empty intersection removes that target from the JEV choice map rather than broadening it.
+Direct models and every other Combo strategy bypass this path. The shared Combo editor owns the GUI
+checkboxes and `Create JEV Auto` template; no second model picker or JEV-only editor exists.
+
+JEV setup stays inside those existing shells. A configured `jev-decision` provider Overview exposes
+**Create JEV Auto**, which navigates to the registered `models/combos/jev-auto` action hash.
+`gui/src/pages/Combos.tsx` owns that one-shot add intent and normalizes the hash when the modal
+closes; `ComboWorkspace` and `combo-workspace-add-modal.tsx` reuse the ordinary Combo form and target
+editor with a pure template from `combo-workspace-data.ts`. The template includes only currently
+available Astra/Sol/Luna rows, remains fully editable, marks the first eligible row as fail-open,
+and displays known effort ladders. The JEV provider is hidden from the target picker because it owns
+only the decision credential. Existing model rows, default selection, and direct picker behavior are
+unchanged; an existing `jev-auto` id or alias disables or reports the quick action.
+An existing JEV Combo adds a lazy **Stats** detail tab. It polls only while visible, uses the
+management API's JEV projection, and keeps decision-service tokens separate from physical model
+tokens. Config remains the ordinary editable Combo form, including per-target effort allowlists.
+
+`src/usage/jev-stats.ts` owns the parallel content-free JEV projection. Its retained accumulator is
+keyed by Combo and stable preset boundary, shares concurrent reads, verifies append identity and LF
+digest, clones before folding a suffix, and starts a fresh accumulator after a rebuild-required
+scan. It counts physical sends from `attempts[].sendCount`, ignores zero-send rows for fallback
+detection, and folds identities beyond 255 concrete rows into one explicit overflow row while
+preserving global totals. Up to four JEV projections participate in the same app-owned memory budget
+and eviction path as ordinary usage aggregates. Read failure returns HTTP 500 rather than a partial
+projection.
 
 The Crusoe preset uses that fixed-key path at `https://api.inference.crusoecloud.com/v1`. Its
 registry-owned policy admits only public rows whose `architecture.modality` is `text` or

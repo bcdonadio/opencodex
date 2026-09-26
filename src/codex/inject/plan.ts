@@ -17,6 +17,8 @@ import {
 import {
   journaledInjectedOpenaiBaseUrl,
   journaledInjectedRealtimeWsBaseUrl,
+  journaledInjectedRootWebSearch,
+  journaledReplacedRootWebSearch,
 } from "../journal";
 import { stripJournaledOpenaiBaseUrl } from "../injected-marker";
 import { CODEX_CONFIG_PATH, resolveCodexStateDbPath } from "../paths";
@@ -31,6 +33,7 @@ import {
   chooseCatalogPathForInjection,
   dominantEol,
   ensureFastModeFeature,
+  ensureRootWebSearchDisabled,
   normalizeServiceTier,
   removeProfileSection,
   setRootModelProvider,
@@ -73,6 +76,10 @@ export interface CodexInjectionPlanOk {
   keepRootOverrideAlongsideTable: boolean;
   keptUserBaseUrl: boolean;
   keptUserRealtimeWsBaseUrl: boolean;
+  /** The root `web_search` value this plan writes, or null when it writes none. */
+  injectedRootWebSearch: string | null;
+  /** The user-owned root `web_search` line this plan removed, for the journal to carry. */
+  replacedRootWebSearch: string | null;
   nativeSubagentDefaultsWarning: string | undefined;
   managedDefaultsMessage: string;
   /**
@@ -93,6 +100,19 @@ export type CodexInjectionPlan =
       historyPreflightFailureReason?: string;
     }
   | CodexInjectionPlanOk;
+
+function websocketsForRoutingTarget(
+  config: OcxConfig | undefined,
+  routingTarget: CodexRoutingTarget,
+): boolean {
+  // A link client reaches the hub through an HTTP-only tunnel. Its local Codex target is
+  // deliberately distinct from the tunnel origin, so force the injected websocket setting off
+  // even when the operator enabled the global websocket option. Hub mode can also use a local
+  // HTTP target with admission, so the explicit discriminator is required here.
+  return (routingTarget as CodexRoutingTarget & { link?: boolean }).link === true
+    ? false
+    : websocketsEnabled(config ?? {});
+}
 
 export function deriveCodexInjectionPlan(
   source: string,
@@ -168,6 +188,20 @@ export function deriveCodexInjectionPlan(
   content = stripRootContextWindowOverrides(content);
   content = normalizeServiceTier(content);
   content = ensureFastModeFeature(content, config?.fastMode);
+  // Codex's own web-search switch follows the sidecar's master switch. While the sidecar is off,
+  // the client must not keep offering a native `web_search` tool that an MCP search server is
+  // meant to replace. The journal carries both halves of an earlier pass — the value we wrote,
+  // because the marker comment does not survive a Codex app reserialize, and the operator line we
+  // had to remove, because the sidecar coming back on is what returns it.
+  const webSearch = ensureRootWebSearchDisabled(
+    content,
+    config?.webSearchSidecar?.enabled === false,
+    {
+      injectedValue: journaledInjectedRootWebSearch({ readOnly: ctx.journalReadOnly }),
+      replacedUserLine: journaledReplacedRootWebSearch({ readOnly: ctx.journalReadOnly }),
+    },
+  );
+  content = webSearch.content;
 
   const catalogPath = chooseCatalogPathForInjection(
     content,
@@ -217,7 +251,7 @@ export function deriveCodexInjectionPlan(
     content =
       content.trimEnd() +
       "\n" +
-      buildProviderTableBlockForTarget(routingTarget, websocketsEnabled(config ?? {}), config?.codexProviderDisplayName);
+      buildProviderTableBlockForTarget(routingTarget, websocketsForRoutingTarget(config, routingTarget), config?.codexProviderDisplayName);
     // 3) Keep existing `openai`-tagged threads reaching the proxy (see above). Ownership rules
     // are the Design B ones: a user's own root line is never replaced.
     if (keepRootOverrideAlongsideTable) {
@@ -276,7 +310,7 @@ export function deriveCodexInjectionPlan(
   const profileContent = buildProfileFileForTarget(
     routingTarget,
     catalogOverride.overridePath,
-    websocketsEnabled(config ?? {}),
+    websocketsForRoutingTarget(config, routingTarget),
     config?.fastMode,
     config?.codexProviderDisplayName,
   );
@@ -335,7 +369,7 @@ export function deriveCodexInjectionPlan(
    */
   if (hadOcxProviderTableOnDisk && !providerTableMode) {
     content = applyEol(
-      content.trimEnd() + "\n" + buildProviderTableBlockForTarget(routingTarget, websocketsEnabled(config ?? {}), config?.codexProviderDisplayName),
+      content.trimEnd() + "\n" + buildProviderTableBlockForTarget(routingTarget, websocketsForRoutingTarget(config, routingTarget), config?.codexProviderDisplayName),
       eol,
     );
   }
@@ -350,6 +384,8 @@ export function deriveCodexInjectionPlan(
     keepRootOverrideAlongsideTable,
     keptUserBaseUrl,
     keptUserRealtimeWsBaseUrl,
+    injectedRootWebSearch: webSearch.wroteValue,
+    replacedRootWebSearch: webSearch.replacedUserLine,
     nativeSubagentDefaultsWarning,
     managedDefaultsMessage,
     historyRelabelRefusal: observedHistoryRefusal,

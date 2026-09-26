@@ -27,7 +27,7 @@ description: Listener, удалённый доступ, admission key, тайм�
 | `codexAutoStart?` | `boolean` | `true` | Разрешает shim'у Codex запускать `ocx ensure` перед стартом Codex. При false `ensure` становится no-op. |
 | `codexShimAutoRestore?` | `boolean` | `true` | Восстанавливает установленный shim после завершённого внешнего обновления Codex, которое заменило его. Для отключения через окружение: `OPENCODEX_CODEX_SHIM_AUTO_RESTORE=0`. |
 | `syncResumeHistory?` | `boolean` | `true` | Обратимый режим совместимости истории Codex App. Исходные metadata резервируются и восстанавливаются через `ocx stop` / `ocx restore`. |
-| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | Перенаправляет распознанные helper/shadow-call'ы Codex на выбранную модель с сохранением настроенного для запроса reasoning effort. Source-prefix по умолчанию: `gpt-5.6-luna`; клиенты до 0.144.x включительно использовали `gpt-5.4-mini`, который можно восстановить через `sourceModels`. |
+| `shadowCallIntercept?` | `{ enabled?: boolean; model?: string; sourceModels?: string[] }` | off | Перенаправляет распознанные helper/shadow-call'ы Codex на выбранную модель с сохранением настроенного для запроса reasoning effort. Source-prefix по умолчанию: `gpt-6-luna`, `gpt-5.6-luna`; клиенты до 0.144.x включительно использовали `gpt-5.4-mini`, который можно восстановить через `sourceModels`. |
 | `webSearchSidecar?` | `OcxWebSearchSidecarConfig` | on when usable | Настройки sidecar'а web-search. |
 | `visionSidecar?` | `OcxVisionSidecarConfig` | on when usable | Настройки sidecar'а описания изображений. |
 | `images?` | `OcxImagesConfig` | automatic OpenAI selection | Настройки standalone Images relay для Codex `image_gen`. |
@@ -141,12 +141,14 @@ Codex использует маленькие helper-model'и для задач 
 модель. Замещающая модель сохраняет настроенный для запроса reasoning effort. `sourceModels` задавайте только если клиент
 использует другие helper-id.
 
+Перехват определяется моделью: любой запрос, чей полный идентификатор модели совпадает с `sourceModels`, включая обычные запросы с `request_kind: "turn"`, может быть перенаправлен. Запросы, помеченные как порождённые дочерние через `x-openai-subagent: collab_spawn` или `subagent_kind: "thread_spawn"` в JSON-заголовке `x-codex-turn-metadata`, освобождаются от перехвата, поэтому явно порождённый субагент сохраняет свою модель.
+
 ```json
 {
   "shadowCallIntercept": {
     "enabled": true,
     "model": "gpt-5.5",
-    "sourceModels": ["gpt-5.6-luna"]
+    "sourceModels": ["gpt-6-luna", "gpt-5.6-luna"]
   }
 }
 ```
@@ -174,7 +176,7 @@ Codex использует маленькие helper-model'и для задач 
 
 | Поле | Тип | По умолчанию | Значение |
 | --- | --- | --- | --- |
-| `enabled?` | `boolean` | on when usable | Главный переключатель. |
+| `enabled?` | `boolean` | on when usable | Главный переключатель. При `false` OpenCodex перестаёт перехватывать `web_search`, а интеграция Codex записывает `web_search = "disabled"` в `~/.codex/config.toml`. |
 | `backend?` | `"openai" \| "anthropic" \| "xai" \| "gemini" \| "exa"` | `openai` | Явный выбор выигрывает; отсутствие значения всегда означает `openai`. `anthropic` и `xai` запускаются только при явной настройке; `gemini` и `exa` зарезервированы до появления executor. |
 | `model?` | `string` | backend-dependent | `gpt-5.6-luna` для OpenAI, `claude-sonnet-5` для Anthropic или `grok-4.6` для xAI. Старый явный `gpt-5.4-mini` мигрирует при старте. |
 | `exaApiKey?` | `string` | отсутствует | Ключ оператора для backend `exa`. Только для записи: management-read никогда не возвращает сохранённое значение. |

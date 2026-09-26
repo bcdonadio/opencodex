@@ -41,12 +41,12 @@ function nativeTemplate(): Record<string, unknown> {
 
 const EXPECTED_KEY_PROVIDER_IDS = [
   "anthropic-apikey", "openai-apikey", "meta-model", "umans", "opencode-go", "neuralwatt", "openrouter", "cline-pass", "cline", "orcarouter", "packycode", "bizrouter", "groq", "google", "google-vertex", "azure-openai",
-  "deepseek", "cerebras", "chutes", "deepinfra", "hyperbolic", "nscale", "vultr", "baseten", "commandcode", "sambanova", "nebius", "crusoe", "digitalocean", "scaleway", "featherless", "novita", "together", "fireworks", "firepass", "moonshot",
+  "deepseek", "cerebras", "chutes", "deepinfra", "hyperbolic", "nscale", "vultr", "jev", "baseten", "commandcode", "sambanova", "nebius", "crusoe", "digitalocean", "scaleway", "featherless", "novita", "together", "fireworks", "firepass", "moonshot",
   "huggingface", "nvidia", "venice", "zai", "zhipu-bigmodel", "zhipu-bigmodel-coding", "zhipu-bigmodel-responses", "nanogpt", "synthetic", "siliconflow", "qwen-cloud", "tencent-coding-plan",
   "volcengine", "volcengine-coding-plan", "volcengine-agent-plan", "qianfan", "alibaba", "alibaba-token-plan", "alibaba-token-plan-intl", "parallel", "zenmux", "litellm", "ollama-cloud", "mistral",
   "minimax", "minimax-cn", "kimi-code", "opencode-zen", "vercel-ai-gateway", "opper",
   "opencode-free", "xiaomi", "xiaomi-mimo", "kilo", "mimo-free", "mimo", "cloudflare-ai-gateway", "cloudflare-workers-ai", "gitlab-duo",
-  "qoder", "qoder-cn", "codebuddy", "codebuddy-cn", "stepfun",
+  "qoder", "qoder-cn", "codebuddy", "codebuddy-cn", "stepfun", "claude-cli",
 ];
 
 describe("provider registry parity", () => {
@@ -368,8 +368,11 @@ describe("provider registry parity", () => {
     expect(KEY_LOGIN_PROVIDERS.deepseek.modelReasoningEffortMap?.["deepseek-v4-flash"]?.low).toBe("low");
     expect(KEY_LOGIN_PROVIDERS.deepseek.modelReasoningEffortMap?.["deepseek-v4-flash"]?.xhigh).toBe("high");
     expect(KEY_LOGIN_PROVIDERS.deepseek.modelReasoningEffortMap?.["deepseek-v4-flash"]?.max).toBe("max");
+    // The retired deepseek-v4-pro stays OUT of `models` (line 357) but inside the preserve
+    // list: it still routes to a thinking-mode model, so a saved config that carries it
+    // must get reasoning replay rather than a guaranteed 400 (#5421).
     expect(KEY_LOGIN_PROVIDERS.deepseek.preserveReasoningContentModels)
-      .toEqual(["deepseek-flash", "deepseek-v4-flash"]);
+      .toEqual(["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"]);
     // #4436: first-party Flash accepts images; unprobed compatibility aliases keep the sidecar.
     expect(KEY_LOGIN_PROVIDERS.deepseek.noVisionModels).toEqual([
       "deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash",
@@ -1107,7 +1110,9 @@ describe("provider registry parity", () => {
 
     expect(litellm?.authKind).toBe("key");
     expect(providerConfigSeed(litellm!).keyOptional).toBe(true);
-    expect(optionalKeyProviders).toEqual(["litellm", "opencode-free", "mimo-free"]);
+    // claude-cli joins them as the first CLI-backed member: its row is `key` because the turn
+    // leaves this machine, and keyless because the Claude Code CLI reads the operator's sign-in.
+    expect(optionalKeyProviders).toEqual(["litellm", "opencode-free", "mimo-free", "claude-cli"]);
   });
 
   test("NVIDIA NIM is free-tier priced but still requires an API key", () => {
@@ -1316,7 +1321,7 @@ describe("provider registry parity", () => {
     expect(OAUTH_PROVIDERS.xai.providerConfig.modelReasoningEfforts?.["grok-4.7"]).toEqual(["low", "medium", "high", "xhigh"]);
     expect(OAUTH_PROVIDERS.xai.providerConfig.modelReasoningEfforts?.["grok-4.6"]).toEqual(["low", "medium", "high", "xhigh"]);
     expect(OAUTH_PROVIDERS.xai.providerConfig.modelReasoningEfforts?.["grok-4.5"]).toEqual(["low", "medium", "high"]);
-    expect(OAUTH_PROVIDERS.xai.providerConfig.modelDefaultReasoningEfforts).toEqual({ "grok-4.7": "high", "grok-4.6": "high" });
+    expect(OAUTH_PROVIDERS.xai.providerConfig.modelDefaultReasoningEfforts).toEqual({ "grok-4.7": "high", "grok-4.7-build-fast": "high", "grok-4.6": "high" });
     expect(OAUTH_PROVIDERS.xai.providerConfig.modelInputModalities?.["grok-4.7"]).toEqual(["text", "image"]);
     expect(OAUTH_PROVIDERS.xai.providerConfig.modelReasoningEffortMap).toBeUndefined();
     expect(OAUTH_PROVIDERS.xai.providerConfig.noVisionModels).toContain("grok-build-0.1");

@@ -11,6 +11,7 @@ import {
   MAX_AGENT_TASK_ENCRYPTED_PARTS,
   structurallyValidFernetTokens,
 } from "./encrypted-payload";
+import { isTransientUpstreamStatus, retryBackoffDelayMs, sleepWithAbort } from "../../lib/upstream-retry";
 import {
   cachedAgentTaskRecovery,
   discardCachedAgentTaskRecovery,
@@ -92,6 +93,11 @@ function diagnose(
 ): void {
   if (traceId) logAgentTaskRecoveryDiagnostic({ traceId, ...event });
 }
+// 1 initial send + up to 2 retries matches TRANSIENT_RETRY_MAX_ATTEMPTS; retries stay inside
+// the caller's deadline, admission scope, and shared flight (#3661).
+const MAX_RECOVERY_RETRIES = 2;
+const RECOVERY_RETRY_BASE_DELAY_MS = 500;
+const RECOVERY_RETRY_MAX_DELAY_MS = 2_000;
 
 export interface AgentTaskRecoveryOptions {
   enabled?: boolean;
@@ -100,6 +106,7 @@ export interface AgentTaskRecoveryOptions {
   serviceTier?: NonNullable<OcxConfig["agentTaskRecovery"]>["serviceTier"];
   timeoutMs?: number;
   cacheEntries?: number;
+  retries?: number;
 }
 
 export type AgentTaskRecoveryFailureReason =
@@ -152,6 +159,9 @@ export function agentTaskRecoveryConfig(config: OcxConfig): AgentTaskRecoveryOpt
     cacheEntries: Number.isFinite(raw.cacheEntries) && (raw.cacheEntries ?? 0) >= 1
       ? Math.min(512, Math.floor(raw.cacheEntries!))
       : 200,
+    retries: Number.isFinite(raw.retries) && (raw.retries ?? 0) >= 0
+      ? Math.min(MAX_RECOVERY_RETRIES, Math.floor(raw.retries!))
+      : 0,
   };
 }
 
@@ -160,8 +170,8 @@ interface AgentEnvelope {
   encryptedStartIndex: number;
   inputSnapshot: string;
   headerText: string;
-  messageType: "NEW_TASK" | "MESSAGE";
-  taskName: string;
+  messageType: "NEW_TASK" | "MESSAGE" | "FOLLOWUP_TASK" | "FINAL_ANSWER";
+  taskName: string | null;
   sender: string;
   ciphertexts: readonly string[];
   author: string;
@@ -178,11 +188,9 @@ function isControlPreambleOnly(text: string): boolean {
   return remaining.length === 0;
 }
 
-// Both collaboration delivery forms carry the same account-bound Fernet payload and exact
-// sender/recipient envelope. MESSAGE recovery stays behind the same opt-in, loopback-only native
-// OAuth admission and identity checks as NEW_TASK; the fixed ChatGPT endpoint remains the
-// ciphertext authority and refuses payloads outside the authenticated account.
-const ROUTING_HEADER = /(?:^|\n)Message Type\s*:\s*(NEW_TASK|MESSAGE)\s*\nTask name\s*:\s*(\S+)\s*\nSender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
+const ROUTING_HEADER = /(?:^|\n)Message Type\s*:\s*(NEW_TASK|MESSAGE|FOLLOWUP_TASK)\s*\nTask name\s*:\s*(\S+)\s*\nSender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
+// FINAL_ANSWER omits the Task name line when the sender declares no recipient.
+const FINAL_ANSWER_HEADER = /(?:^|\n)Message Type\s*:\s*FINAL_ANSWER\s*\n(?:Task name\s*:\s*(\S+)\s*\n)?Sender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
 
 function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): AgentEnvelope | null {
   const reject = (reason: string): null => {
@@ -197,7 +205,7 @@ function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): 
   if (!Array.isArray(content)) return reject("content_not_array");
 
   let headerText: string | null = null;
-  let messageType: "NEW_TASK" | "MESSAGE" | null = null;
+  let messageType: "NEW_TASK" | "MESSAGE" | "FOLLOWUP_TASK" | "FINAL_ANSWER" | null = null;
   let taskName: string | null = null;
   let sender: string | null = null;
   let encryptedStartIndex = -1;
@@ -212,16 +220,24 @@ function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): 
       && typeof part.text === "string"
     ) {
       const match = ROUTING_HEADER.exec(part.text);
-      if (match) {
+      const finalMatch = match ? null : FINAL_ANSWER_HEADER.exec(part.text);
+      if (match || finalMatch) {
         if (headerText !== null) return reject("multiple_routing_headers");
+        const m = match ?? finalMatch!;
         if (
-          part.text.slice(0, match.index).trim().length > 0
-          || part.text.slice(match.index + match[0].length).trim().length > 0
+          part.text.slice(0, m.index).trim().length > 0
+          || part.text.slice(m.index + m[0].length).trim().length > 0
         ) return reject("routing_header_has_extra_text");
-        headerText = match[0].startsWith("\n") ? match[0].slice(1) : match[0];
-        messageType = match[1] as "NEW_TASK" | "MESSAGE";
-        taskName = match[2]!;
-        sender = match[3]!;
+        headerText = m[0].startsWith("\n") ? m[0].slice(1) : m[0];
+        if (match) {
+          messageType = match[1] as "NEW_TASK" | "MESSAGE" | "FOLLOWUP_TASK";
+          taskName = match[2]!;
+          sender = match[3]!;
+        } else {
+          messageType = "FINAL_ANSWER";
+          taskName = finalMatch![1] ?? null;
+          sender = finalMatch![2]!;
+        }
       } else if (!isControlPreambleOnly(part.text)) {
         return reject("extra_text_block");
       }
@@ -239,14 +255,23 @@ function findEnvelopeAt(input: unknown[], itemIndex: number, traceId?: string): 
     ciphertexts.push(part.encrypted_content);
   }
 
-  if (!headerText || !messageType || !taskName || !sender) return reject("routing_header_missing");
-  if (encryptedStartIndex < 0 || ciphertexts.length === 0) return reject("ciphertext_missing");
+  if (
+    !headerText
+    || !messageType
+    || !sender
+    || encryptedStartIndex < 0
+    || ciphertexts.length === 0
+  ) return null;
 
   const itemRecord = item as { author?: unknown; recipient?: unknown };
-  if (typeof itemRecord.author !== "string" || typeof itemRecord.recipient !== "string") {
-    return reject("identity_missing");
-  }
-  if (itemRecord.author !== sender || itemRecord.recipient !== taskName) return reject("identity_mismatch");
+  if (typeof itemRecord.author !== "string" || typeof itemRecord.recipient !== "string") return null;
+  // A FINAL_ANSWER without a Task name line declares no recipient, so the structured
+  // recipient is only cross-checked when a task name is present; admission is the
+  // trust boundary either way.
+  if (
+    itemRecord.author !== sender
+    || (taskName !== null && itemRecord.recipient !== taskName)
+  ) return null;
 
   const envelope = {
     itemIndex,
@@ -296,17 +321,21 @@ function stripMatchingEnvelope(assignment: string, envelope: AgentEnvelope): str
     if (!control || control.index !== 0) break;
     normalized = normalized.slice(control[0].length).replace(/^\n+/, "");
   }
-  const match = ROUTING_HEADER.exec(normalized);
-  const hasRouting = new RegExp(ROUTING_HEADER.source).test(normalized);
+  const header = envelope.messageType === "FINAL_ANSWER" ? FINAL_ANSWER_HEADER : ROUTING_HEADER;
+  const foreign = header === FINAL_ANSWER_HEADER ? ROUTING_HEADER : FINAL_ANSWER_HEADER;
+  if (foreign.test(normalized)) return null;
+  const match = header.exec(normalized);
   if (!match) return normalized;
   if (match.index !== 0) return null;
-  if (
+  if (envelope.messageType === "FINAL_ANSWER") {
+    if ((match[1] ?? null) !== envelope.taskName || match[2] !== envelope.sender) return null;
+  } else if (
     match[1] !== envelope.messageType
     || match[2] !== envelope.taskName
     || match[3] !== envelope.sender
   ) return null;
   const payload = normalized.slice(match[0].length);
-  if (hasRouting && new RegExp(ROUTING_HEADER.source).test(payload)) return null;
+  if (header.test(payload) || foreign.test(payload)) return null;
   if (new RegExp(AGENT_MESSAGE_CONTROL_PREAMBLE.source, "i").test(payload)) return null;
   return payload;
 }
@@ -315,7 +344,7 @@ function validateAssignment(assignment: unknown, envelope: AgentEnvelope): strin
   if (typeof assignment !== "string") return null;
   const payload = stripMatchingEnvelope(assignment, envelope);
   if (payload === null || payload.trim().length === 0) return null;
-  if (new RegExp(ROUTING_HEADER.source).test(payload)) return null;
+  if (ROUTING_HEADER.test(payload) || FINAL_ANSWER_HEADER.test(payload)) return null;
   if (new RegExp(AGENT_MESSAGE_CONTROL_PREAMBLE.source, "i").test(payload)) return null;
   if (Buffer.byteLength(payload) > MAX_ASSIGNMENT_BYTES) return null;
   if (structurallyValidFernetTokens(payload).length > 0) return null;
@@ -478,18 +507,21 @@ function cacheKeyForEnvelope(
   parentThreadId: string | null | undefined,
   envelope: AgentEnvelope,
 ): string {
+  // A JSON-encoded fixed-order tuple, not a delimiter-joined string: a field that carries the
+  // delimiter shifts every boundary after it, so two envelopes could hash to one entry and one
+  // recovery would replay for the other. A FINAL_ANSWER that omits its Task name line carries no
+  // addressing in the header, which leaves the structured recipient as the only field separating
+  // two such envelopes and makes the boundary the whole difference.
   return createHash("sha256")
-    .update(admission.cacheScope)
-    .update("\0")
-    .update(parentThreadId ?? "")
-    .update("\0")
-    .update(envelope.messageType)
-    .update("\0")
-    .update(envelope.taskName)
-    .update("\0")
-    .update(envelope.sender)
-    .update("\0")
-    .update(JSON.stringify(envelope.ciphertexts))
+    .update(JSON.stringify([
+      admission.cacheScope,
+      parentThreadId ?? "",
+      envelope.messageType,
+      envelope.taskName ?? "",
+      envelope.recipient,
+      envelope.sender,
+      envelope.ciphertexts,
+    ]))
     .digest("hex");
 }
 
@@ -847,13 +879,25 @@ function assignmentFromRecoverySse(
   return assignment;
 }
 
-async function requestRecovery(
+interface RecoveryAttempt {
+  resolution: AgentTaskRecoveryResolution;
+  retryable: boolean;
+  retryHeaders?: Headers;
+}
+
+async function attemptRecovery(
   admission: RecoveryAdmission,
   envelope: AgentEnvelope,
   options: AgentTaskRecoveryOptions,
-  abortSignal?: AbortSignal,
+  signal: AbortSignal,
+  abortSignal: AbortSignal | undefined,
+  deadlineSignal: AbortSignal,
   traceId?: string,
-): Promise<AgentTaskRecoveryResolution> {
+): Promise<RecoveryAttempt> {
+  const terminal = (resolution: AgentTaskRecoveryResolution): RecoveryAttempt => ({
+    resolution,
+    retryable: false,
+  });
   const startedAt = Date.now();
   const recoveryModel = typeof options.model === "string" && options.model.trim().length > 0
     ? options.model.trim()
@@ -863,14 +907,6 @@ async function requestRecovery(
     outcome: "started",
     recoveryModel: sanitizeLogMetadataString(recoveryModel) ?? DEFAULT_AGENT_TASK_RECOVERY_MODEL,
   });
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(new DOMException("Agent task recovery timed out", "TimeoutError")),
-    options.timeoutMs ?? DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS,
-  );
-  const signal = abortSignal
-    ? AbortSignal.any([abortSignal, controller.signal])
-    : controller.signal;
   try {
     const response = await fetch(RECOVERY_ENDPOINT, {
       method: "POST",
@@ -889,9 +925,13 @@ async function requestRecovery(
         httpStatus: response.status,
         durationMs: Date.now() - startedAt,
       });
-      if (abortSignal?.aborted) return { recovered: false, reason: "recovery_aborted" };
-      if (controller.signal.aborted) return { recovered: false, reason: "recovery_timeout" };
-      return { recovered: false, reason: "recovery_http_rejected" };
+      if (abortSignal?.aborted) return terminal({ recovered: false, reason: "recovery_aborted" });
+      if (deadlineSignal.aborted) return terminal({ recovered: false, reason: "recovery_timeout" });
+      return {
+        resolution: { recovered: false, reason: "recovery_http_rejected" },
+        retryable: isTransientUpstreamStatus(response.status),
+        retryHeaders: response.headers,
+      };
     }
     diagnose(traceId, {
       stage: "fetch",
@@ -907,6 +947,8 @@ async function requestRecovery(
       inactivityTimeoutMs: options.timeoutMs ?? DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS,
       firstByteTimeoutMs: options.timeoutMs ?? DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS,
     });
+    if (abortSignal?.aborted) return terminal({ recovered: false, reason: "recovery_aborted" });
+    if (deadlineSignal.aborted || body.timedOut) return terminal({ recovered: false, reason: "recovery_timeout" });
     const bodyReason = body.truncated
       ? "truncated"
       : body.oversized
@@ -923,9 +965,9 @@ async function requestRecovery(
         reason: bodyReason,
         responseBytes: Buffer.byteLength(body.text),
       });
-      if (abortSignal?.aborted) return { recovered: false, reason: "recovery_aborted" };
-      if (controller.signal.aborted || body.timedOut) return { recovered: false, reason: "recovery_timeout" };
-      return { recovered: false, reason: "recovery_invalid_output" };
+      if (abortSignal?.aborted) return terminal({ recovered: false, reason: "recovery_aborted" });
+      if (deadlineSignal.aborted || body.timedOut) return terminal({ recovered: false, reason: "recovery_timeout" });
+      return terminal({ recovered: false, reason: "recovery_invalid_output" });
     }
     diagnose(traceId, {
       stage: "response_body",
@@ -933,9 +975,9 @@ async function requestRecovery(
       responseBytes: Buffer.byteLength(body.text),
     });
     const assignment = assignmentFromRecoverySse(body.text, envelope, traceId);
-    return assignment === null
+    return terminal(assignment === null
       ? { recovered: false, reason: "recovery_invalid_output" }
-      : { recovered: true, assignment };
+      : { recovered: true, assignment });
   } catch (error) {
     const reason = error instanceof DOMException && error.name === "TimeoutError"
       ? "timeout"
@@ -948,10 +990,61 @@ async function requestRecovery(
       reason,
       durationMs: Date.now() - startedAt,
     });
-    if (abortSignal?.aborted) return { recovered: false, reason: "recovery_aborted" };
+    if (abortSignal?.aborted) return terminal({ recovered: false, reason: "recovery_aborted" });
     const decodeFailure = boundedBodyDecodeFailure(error);
-    if (controller.signal.aborted || decodeFailure === "timeout") return { recovered: false, reason: "recovery_timeout" };
-    return { recovered: false, reason: decodeFailure === "invalid_utf8" ? "recovery_invalid_output" : "recovery_transport_error" };
+    if (deadlineSignal.aborted || decodeFailure === "timeout") return terminal({ recovered: false, reason: "recovery_timeout" });
+    return decodeFailure === "invalid_utf8"
+      ? terminal({ recovered: false, reason: "recovery_invalid_output" })
+      : { resolution: { recovered: false, reason: "recovery_transport_error" }, retryable: true };
+  }
+}
+
+async function requestRecovery(
+  admission: RecoveryAdmission,
+  envelope: AgentEnvelope,
+  options: AgentTaskRecoveryOptions,
+  abortSignal?: AbortSignal,
+  traceId?: string,
+): Promise<AgentTaskRecoveryResolution> {
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_AGENT_TASK_RECOVERY_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+  const timeout = setTimeout(
+    () => controller.abort(new DOMException("Agent task recovery timed out", "TimeoutError")),
+    timeoutMs,
+  );
+  const signal = abortSignal
+    ? AbortSignal.any([abortSignal, controller.signal])
+    : controller.signal;
+  try {
+    // The configured bound is re-clamped here: callers may pass options that never went
+    // through agentTaskRecoveryConfig, and a larger value must not widen the outage window.
+    const retries = Number.isFinite(options.retries)
+      ? Math.max(0, Math.min(MAX_RECOVERY_RETRIES, Math.floor(options.retries!)))
+      : 0;
+    for (let attempt = 0; ; attempt += 1) {
+      const { resolution, retryable, retryHeaders } = await attemptRecovery(
+        admission, envelope, options, signal, abortSignal, controller.signal, traceId,
+      );
+      if (resolution.recovered || !retryable || attempt >= retries) return resolution;
+      // Retry-After is the provider's floor, not something our backoff cap may shorten.
+      // If honouring it would outlive the shared deadline, end with this failure rather
+      // than resend early into a refusal.
+      const delayMs = retryBackoffDelayMs(attempt, {
+        baseDelayMs: RECOVERY_RETRY_BASE_DELAY_MS,
+        maxDelayMs: RECOVERY_RETRY_MAX_DELAY_MS,
+        headers: retryHeaders,
+        retryAfterIsLowerBound: true,
+      });
+      if (delayMs >= deadline - Date.now()) return resolution;
+      try {
+        await sleepWithAbort(delayMs, signal);
+      } catch {
+        return abortSignal?.aborted
+          ? { recovered: false, reason: "recovery_aborted" }
+          : { recovered: false, reason: "recovery_timeout" };
+      }
+    }
   } finally {
     clearTimeout(timeout);
   }

@@ -89,7 +89,7 @@ describe("agent task recovery (opt-in, default off)", () => {
     clearResponseStateForTests();
   });
 
-  for (const messageType of ["NEW_TASK", "MESSAGE"] as const) {
+  for (const messageType of ["NEW_TASK", "MESSAGE", "FOLLOWUP_TASK"] as const) {
     test(`typed ${messageType} recovery preserves boolean, replay and discard contracts`, async () => {
       const req = new Request("http://localhost/v1/responses", { headers: codexHeaders() });
       const config = routedConfig();
@@ -1285,7 +1285,7 @@ describe("agent task recovery (opt-in, default off)", () => {
     }) as typeof fetch;
     const input = encryptedInput() as Array<Record<string, any>>;
     input[0].content[0].text = String(input[0].content[0].text)
-      .replace("Message Type: NEW_TASK", "Message Type: FINAL_ANSWER");
+      .replace("Message Type: NEW_TASK", "Message Type: UNKNOWN_TASK");
 
     const response = await post(routedConfig(), "xai/grok-4.5", input, codexHeaders());
 

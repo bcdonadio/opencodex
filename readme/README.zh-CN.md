@@ -8,23 +8,22 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="在 X 上关注 @claudeebum"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/github/v/release/lidge-jun/opencodex?label=desktop&logo=github&color=24292f" alt="最新桌面版发布"></a>
   <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm 版本"></a>
   <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="许可证"></a>
   <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="Node 版本">
 </p>
 
-<p align="center">
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-macos.svg" alt="下载 macOS 版 OpenCodex" width="220"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-windows.svg" alt="下载 Windows 版 OpenCodex" width="220"></a>
-  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="../assets/download-linux.svg" alt="下载 Linux 版 OpenCodex" width="220"></a>
-</p>
-<p align="center"><sub>桌面应用（测试版）：macOS 通用 <code>.dmg</code> · Windows x64 <code>.msi</code> · Linux x86_64 <code>.AppImage</code> / <code>.deb</code>。更喜欢终端？安装 CLI：</sub></p>
-
 ```bash
 npm install -g @bitkyc08/opencodex
 ocx start
 ```
+
+<p align="center">
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/macOS-.dmg-24292f?logo=apple&logoColor=white" alt="下载 macOS 版 (.dmg)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Windows-.msi-24292f?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0zIDNoOC41djguNUgzem05LjUgMEgyMXY4LjVoLTguNXpNMyAxMi41aDguNVYyMUgzem05LjUgMEgyMVYyMWgtOC41eiIvPjwvc3ZnPg==" alt="下载 Windows 版 (.msi)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Linux-.AppImage-24292f?logo=linux&logoColor=white" alt="下载 Linux 版 (.AppImage)"></a>
+  <a href="https://github.com/lidge-jun/opencodex/releases/latest"><img src="https://img.shields.io/badge/Linux-.deb-24292f?logo=debian&logoColor=white" alt="下载 Linux 版 (.deb)"></a>
+</p>
 
 <table>
 <tr>
@@ -89,7 +88,21 @@ Codex 认证管理一个 **ChatGPT 账户池**：添加账户，在仪表板中�
 
 ## 快速开始
 
-### 桌面应用（测试版）
+### 个人安装（CLI）
+
+```bash
+npm install -g @bitkyc08/opencodex   # Node 18+；Bun 运行时会自动捆绑
+ocx start                         # 代理 + 仪表板：localhost:10100
+```
+
+使用 `ocx service` 在后台运行。
+
+打开 **http://localhost:10100**，在 Web 仪表板中完成所有配置 —— 添加提供商
+（40 多个内置，或任意 OpenAI 兼容端点）、选择模型、管理账户。随时运行 `ocx gui`
+可重新打开仪表板。
+
+<details>
+<summary><b>桌面应用（测试版）</b></summary>
 
 桌面应用把同一个代理和仪表板装进原生窗口，附带系统托盘和内置的 `ocx`。
 它会连接已在运行的代理，或启动自带的代理；仪表板仍使用代理端口
@@ -111,18 +124,7 @@ WidgetKit 扩展，可显示代理状态、今日用量和提供商配额；它�
 [macOS 菜单栏应用指南](https://opencodex.me/zh-cn/guides/macos-menu-bar/)介绍了首次启动，
 [`AGENTS_INSTALL.md`](../AGENTS_INSTALL.md#where-things-are-installed)列出了写入磁盘的所有内容。
 
-### 个人安装（CLI）
-
-```bash
-npm install -g @bitkyc08/opencodex   # Node 18+；Bun 运行时会自动捆绑
-ocx start                         # 代理 + 仪表板：localhost:10100
-```
-
-使用 `ocx service` 在后台运行。
-
-打开 **http://localhost:10100**，在 Web 仪表板中完成所有配置 —— 添加提供商
-（40 多个内置，或任意 OpenAI 兼容端点）、选择模型、管理账户。随时运行 `ocx gui`
-可重新打开仪表板。
+</details>
 
 ### ChatGPT 账户池
 
@@ -296,14 +298,15 @@ Bun，Windows 也不需要 WSL。如果 npm 拦截了捆绑运行时的安装脚
 <details>
 <summary>内存所有权详情</summary>
 
-OpenCodex 跟踪 36 类进程保留状态。每一类都有文档化的边界：
+OpenCodex 在下列类别中跟踪进程保留状态。每一类都有文档化的边界：
 
-- **12 个保留存储**（请求日志、调试环、图片缓存、模型缓存、视觉
+- **14 个保留存储**（请求日志、调试环、图片缓存、模型缓存、视觉
   描述、光标 blob、responses 续写等）按字节记账，并由应用自有的内存预算
-  （默认 256 MiB）逐出。
+  （默认 256 MiB）逐出；其中 native control replay 存储是固定的，
+  不会被逐出。
 - **4 个观测缓冲区**（翻译累加器、图片/OAuth/Grok 尾部）会监测飞行中的字节压力，
   但不做逐出。
-- **24 个状态存储注册** 负责过期扫描（60 秒间隔）和配置世代对账，从而移除过期的
+- **28 个状态存储注册** 负责过期扫描（60 秒间隔）和配置世代对账，从而移除过期的
   提供商/账户键。
 - **路径与指纹备忘**（工作区元数据、加固身份、安装盐、模式提示能力）使用按插入顺序的
   LRU 上限（8–128 条）。
@@ -329,6 +332,17 @@ codex -m "ollama/llama3" "重构这个 function"
 省略 `provider/` 前缀则使用默认提供商，或按模型名模式自动匹配。
 包含 `/` 的提供商模型 id 会把内部斜杠别名为 `-` 再对外暴露；带全部斜杠的原始形式
 仍然可用。详情：[模型路由文档](https://opencodex.me/zh-cn/guides/model-routing/)。
+
+### JEV Auto 路由（可选）
+
+TypeSafe JEV 可以为显式启用的 Combo 选择首个模型和推理强度，普通模型选择器和所有直连路由保持不变。
+通过 `ocx login jev`、**Providers → TypeSafe JEV → Add API key** 或 `TYPESAFE_API_KEY`/`JEV_API_KEY`
+添加凭据。然后打开 **Models → Combos → Create JEV Auto**，选择允许的目标模型，并为每个目标勾选
+JEV 可选的推理强度。未改动强度设置的目标允许该模型当前声明的全部强度。
+
+JEV 只用于 `jev-auto`，且每次逻辑模型调用只咨询一次。缺少凭据、网络失败或决策无效时，会回退
+（fail-open）到当前第一个可用目标；调用方取消仍会取消请求。自动化测试使用模拟的 TypeSafe 端点，
+不验证真实的 JEV 账户。
 
 ## 提供商与适配器
 

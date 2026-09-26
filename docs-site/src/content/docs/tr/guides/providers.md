@@ -299,6 +299,9 @@ Zorunlu/hesap ekleme girişi yerel CLI ikili dosyasına da ihtiyaç duyar:
 opencodex önce `PATH`'i kullanır, ardından
 `%LOCALAPPDATA%\Kiro-Cli\kiro-cli.exe` ve `C:\Program
 Files\Kiro-Cli\kiro-cli.exe`'ye geri döner.
+Bu klasörlerin hiçbirinde `kiro-cli.exe` yoksa, aynı iki `Kiro-Cli` klasöründeki `kiro.exe`
+kullanılır. opencodex, `PATH` üzerinde veya paylaşılan macOS/Linux bin dizinlerinde bulunan kısa
+`kiro` ya da `kiro.exe` dosyasını asla çalıştırmaz; CLI'yi orada `kiro-cli` adıyla kurun veya bağlayın.
 
 Başarılı bir içe aktarmadan sonra opencodex içe aktarılan kimlik bilgisini
 `~/.opencodex/auth.json` dosyasına kalıcı hale getirir. Bu değişkenleri ve
@@ -324,7 +327,7 @@ olmayan bir makineden oturum açmak bundan etkilenmez.
 
 ## 3. API anahtarı kataloğu
 
-opencodex 97 yerleşik önayar ile birlikte gelir: 80 anahtar tabanlı, 13
+opencodex 99 yerleşik önayar ile birlikte gelir: 82 anahtar tabanlı, 13
 OAuth, üç yerel ve bir varsayılan ChatGPT iletme önayarı. Kontrol panelinin
 **Sağlayıcı ekle** seçicisi bir anahtar sağlayıcısının kontrol panelini açar,
 anahtarı doğrular ve saklar; doğrulama sağlayıcıya özgüdür. Dikkate değer

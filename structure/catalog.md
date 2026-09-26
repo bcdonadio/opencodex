@@ -58,7 +58,11 @@ provider-wide fallback. Exact model output limits precede the provider default o
   explicitly configured canonical `openai/gpt-daybreak-blue-latest` Codex-forward row from the
   pinned Sol capability metadata while preserving its selector and Daybreak wire identity;
   this never expands the bare/API-key model lists or rewrites the wire model to `gpt-5.6-sol`;
-- clones a native template for routed `provider/model` entries;
+- clones a native template for routed `provider/model` entries without its `comp_hash`, and resets
+  that value on opencodex rows kept from disk while their provider's discovery is degraded, so these
+  rows carry the fixed `"opencodex"` marker instead of whichever native row a rebuild found first;
+  Codex compacts a thread whenever that value changes (#5796). Codex-forward aliases keep their
+  native value and rows written by other tools keep theirs;
 - forces strict Codex catalog fields required by the current parser;
 - hides `disabledModels` without blocking direct routing (routed provider ids are excluded;
   account-qualified native ids hide only that selector row; BARE native slugs hide the bare row
@@ -74,6 +78,16 @@ provider-wide fallback. Exact model output limits precede the provider default o
   rather than assuming a single file; restoration omits retired bare and trusted account-qualified
   native rows from the output without rewriting the pristine backup or unrelated snapshots;
 - invalidates `$CODEX_HOME/models_cache.json` when model visibility changes.
+
+Per-catalog hashed backups are recorded only after `src/codex/catalog/parsing.ts` writes or `src/codex/internal/catalog-writer.ts` publishes a new one;
+preserving an existing file never registers it, even when its deterministic name or bytes match. Retained sync initializes metadata in an empty
+root before publication without claiming the hashed path, and publication attempts to record ownership before temporary-file cleanup, whose errors stay visible;
+a root with missing or invalid ownership metadata leaves the new backup unregistered, so uninstall reports it as a residual.
+Recorded paths keep their ownership; unrecorded pre-ledger backups remain residuals (after stopping OpenCodex and any needed restore, review and
+archive those exact paths, then remove only confirmed obsolete backups, never by glob). Legacy fixed-name manifest entries are not migrated by
+this rule, and uninstall keeps the [manifest validation and residual reporting contract](config.md#restore).
+
+Cache invalidation reports an unchanged derived cache separately from a failed rewrite. `ocx sync-cache` treats identical bytes as a successful no-op, preserving the cache mtime and avoiding a needless app-server restart; malformed catalogs and write failures remain errors.
 
 `src/codex/catalog/model-visibility.ts` also excludes models owned by disabled providers, including custom rows. `src/codex/catalog/routed-gather.ts` does not inherit provider configuration into custom rows while that provider is disabled.
 
@@ -197,7 +211,11 @@ deliberately does not, because a disabled provider is already excluded from the 
 instead. Codex's own `models_cache.json` is a different cache, invalidated by catalog refresh.
 Account-scoped discovery transports remain bound to the credential snapshot that supplied the
 token. Devin discovery uses the allowlisted tenant API base URL from that same snapshot rather
-than pairing a durable account key with the provider registry's default host. If the stored
+than pairing a durable account key with the provider registry's default host. The same holds for
+the provider connection test and for refreshing catalog gathers of every OAuth row: the token and
+its origin come from one snapshot, so a Copilot account switch or a refresh that moves the
+account's API host cannot pair one account's token with another origin, and a key row never
+borrows a stored OAuth account's origin. When the snapshot carries no API host (a legacy credential), the destination comes only from static configuration validated against the vendor allowlist, or the vendor default, and never from the live credential store. If the stored
 destination is invalid, registered Devin discovery and routing use the registry's fixed base URL
 instead of a stale configured override. For Devin, the irreversible roster fingerprint covers
 both credential and validated destination, so switching either observes neither fresh nor stale
