@@ -56,6 +56,21 @@ export const compactionRoutingSchema = z.object({
 }).strict();
 
 /**
+ * One phase of Codex's memory pipeline. A present phase must name a model: the GUI's "Off"
+ * removes the phase instead of blanking it, so an empty entry would only ever come from a
+ * hand-edited file, where failing the write is the honest answer.
+ */
+export const memoryModelSettingSchema = z.object({
+  model: z.string().trim().min(1),
+  reasoningEffort: z.string().refine(value => pinnedReasoningEffortConfigError(value) === null).optional(),
+}).strict();
+
+export const memoryModelsSchema = z.object({
+  extract: memoryModelSettingSchema.optional(),
+  consolidation: memoryModelSettingSchema.optional(),
+}).strict();
+
+/**
  * Bounds for the opt-in same-target 429 wait-and-retry policy. Single source of truth
  * shared by the config schema, the load-time sanitizer, and the management write
  * boundary. Strict, so an unknown key is rejected at every validation boundary instead
@@ -97,18 +112,23 @@ const requestPacingRuleSchema = z.object({
   // Keep the RPM-derived timer within the same one-hour bound as minIntervalMs.
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
-}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined, {
-  message: "request pacing rules need requestsPerMinute or minIntervalMs",
+  maxConcurrentRequests: z.number().int().min(1).optional(),
+}).strict().refine(value => value.requestsPerMinute !== undefined
+  || value.minIntervalMs !== undefined
+  || value.maxConcurrentRequests !== undefined, {
+  message: "request pacing rules need requestsPerMinute, minIntervalMs, or maxConcurrentRequests",
 });
 
 const requestPacingSchema = z.object({
   enabled: z.boolean(),
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
+  maxConcurrentRequests: z.number().int().min(1).optional(),
   models: z.record(z.string().trim().min(1), requestPacingRuleSchema).optional(),
 }).strict().refine(value => value.enabled === false
   || value.requestsPerMinute !== undefined
   || value.minIntervalMs !== undefined
+  || value.maxConcurrentRequests !== undefined
   || (value.models !== undefined && Object.keys(value.models).length > 0), {
   message: "enabled request pacing needs a provider rule or model override",
 });
@@ -117,7 +137,7 @@ export function requestPacingConfigError(value: unknown): string | null {
   if (value === undefined) return null;
   const parsed = requestPacingSchema.safeParse(value);
   if (parsed.success) return null;
-  return "requestPacing must contain enabled and a valid requestsPerMinute/minIntervalMs provider rule or model overrides";
+  return "requestPacing must contain enabled and a valid requestsPerMinute/minIntervalMs/maxConcurrentRequests provider rule or model overrides";
 }
 
 /**
@@ -292,6 +312,7 @@ export const providerConfigSchema = z.object({
   annotateEmptyToolOutputs: z.boolean().optional(),
   foldDeveloperRoleToSystem: z.boolean().optional(),
   fastWire: fastWireSchema.nullable().optional(),
+  responseTierAuthoritative: z.boolean().optional(),
   fastEnabled: z.boolean().optional(),
   supportsServiceTier: z.boolean().optional(),
   modelSupportsServiceTier: z.record(z.string().min(1), z.boolean()).optional(),
@@ -940,6 +961,7 @@ export const clientConnectionSchema = z.object({
  */
 export const codexPoolSchema = z.object({
   excludedPlans: z.array(z.string().trim().min(1)).optional(),
+  startIdleWindows: z.boolean().optional(),
 }).strict();
 
 /**
@@ -1050,4 +1072,11 @@ export const spendSchema = z.object({
   identity: spendScopeSchema.optional(),
   pool: spendScopeSchema.optional(),
   retentionDays: z.number().int().min(1).max(365).optional(),
+}).strict();
+
+/**
+ * Runtime skills catalog configuration (#5569).
+ */
+export const skillsConfigSchema = z.object({
+  catalog_refresh: z.enum(["per_session", "per_turn"]).optional(),
 }).strict();

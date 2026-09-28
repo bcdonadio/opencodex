@@ -12,7 +12,9 @@ import {
   localClientSkipMessage,
   localClientSkipReason,
   shouldSyncCodexOnStart,
+  type LocalClientSkipReason,
 } from "./desired-state";
+import { siblingOfLivePort, siblingSkipMessage } from "./sibling-start";
 import { resolveCodexHistoryTransition } from "./history-transition";
 import {
   buildInjectWitness,
@@ -63,6 +65,7 @@ import {
 import type { OcxConfig } from "../types";
 import {
   configuredManagedSubagentDefaults,
+  remoteThreadListCompatibilityWarning,
   standaloneCodexRoutingTarget,
   validateCodexRoutingTarget,
   type CodexRoutingTarget,
@@ -148,7 +151,7 @@ export interface CodexInjectResult {
   /** Busy write lock, emitted by `codexInjectLockOutcome` and undeclared here until #4809. */
   retryable?: boolean;
   /** `hub-gated` is the hub-role gate (#4236), distinct from the user's own OFF switch. */
-  skippedReason?: "desired_disabled" | "desired_enabled" | "hub-gated";
+  skippedReason?: LocalClientSkipReason | "desired_enabled";
   nativeSubagentDefaultsWarning?: string;
 }
 
@@ -185,6 +188,11 @@ export async function injectCodexConfig(
   config?: OcxConfig,
   options: InjectCodexOptions = {},
 ): Promise<CodexInjectResult> {
+  // First, before the external-provider branch below removes the SHARED journal: a sibling owns
+  // none of this home's routing, not even the courtesy cleanup.
+  if (siblingOfLivePort() !== null) {
+    return { success: true, status: "skipped", skippedReason: "sibling", message: siblingSkipMessage() };
+  }
   try { return await injectCodexConfigImpl(port, config, options); }
   catch (error) {
     if (error instanceof CodexHistoryPreflightRefusal) return { success: false, historyPreflightFailureReason: error.message, message: `Codex config injection refused: ${error.message}. Existing configuration and history were preserved.` };
@@ -714,6 +722,7 @@ async function injectCodexConfigImpl(
       ? `  Codex model catalog: served by the proxy protocol (source: ${effectivePlan.catalogPath}).\n`
       : `  Codex model catalog: preserved user override ${effectivePlan.catalogPath}.\n`
     : `  Codex model catalog: served by the proxy protocol; no local catalog artifact exists yet.\n`;
+  const remoteHistoryMessage = remoteThreadListCompatibilityWarning(routingTarget);
   const ejected = (history as { ejectedRows?: number }).ejectedRows ?? 0;
   const migratedRows = (history.rows ?? 0) + ejected;
   const historyMessage =
@@ -749,6 +758,7 @@ async function injectCodexConfigImpl(
         `  Your root openai_base_url was left exactly as you set it, so opencodex did not add its own.\n` +
         catalogMessage +
         historyMessage +
+        remoteHistoryMessage +
         effectivePlan.managedDefaultsMessage +
         `  New threads use the injected opencodex provider and route through the proxy.\n` +
         `  Threads already tagged openai resolve through Codex's built-in provider, which your root openai_base_url points at.\n` +
@@ -787,6 +797,7 @@ async function injectCodexConfigImpl(
       headline +
       catalogMessage +
       historyMessage +
+      remoteHistoryMessage +
       effectivePlan.managedDefaultsMessage +
       `  All models now route through opencodex proxy (like OpenRouter).\n` +
       `  OpenAI models (gpt-5.5, etc.) are passed through to OpenAI.\n` +

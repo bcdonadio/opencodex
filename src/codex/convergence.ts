@@ -74,6 +74,8 @@ import { suppressedSyntheticMaxCatalogSlugs } from "./catalog/model-hints";
 import { codexRuntimeStatePath, peekCodexRuntimeProcessCache } from "./runtime";
 import { codexAccountNamespaceEntries, isMainCodexAccountTarget } from "./account-namespaces";
 import { MAIN_CODEX_ACCOUNT_ID } from "./main-account";
+import { applyNativeAccessPrograms } from "./catalog/access-programs";
+import { applyAccountModelMetadata } from "./catalog/account-model-metadata";
 import {
   availableAccountGatedNativeModels,
   codexModelEntitlementStateForAccount,
@@ -397,6 +399,8 @@ function prepareCatalog(
   // `source-invalid` rejection returns by a different route. Silent because this merge runs under
   // `warningPolicy: "suppress"`.
   catalog.models = enforceCatalogSlugUniqueness(mergedModels, false);
+  applyAccountModelMetadata(catalog.models, modelEntitlements, accountTargets, bareEligibleAccountIds);
+  applyNativeAccessPrograms(catalog.models, modelEntitlements, accountTargets);
   return catalog;
 }
 

@@ -180,6 +180,8 @@ export interface RequestPacingRule {
   requestsPerMinute?: number;
   /** Minimum delay between request starts. The slower configured value wins. */
   minIntervalMs?: number;
+  /** Maximum number of requests concurrently in flight. */
+  maxConcurrentRequests?: number;
 }
 
 export interface ProviderRequestPacingConfig extends RequestPacingRule {
@@ -216,6 +218,8 @@ export interface AttemptTierOutcome {
   callerFastSuppressedByConfig?: boolean;
   confirmation: "confirmed" | "assumed" | "downgraded" | "unknown";
   responseServiceTier?: string;
+  /** False retains the raw echo as evidence only, including during cost estimation. */
+  responseTierAuthoritative?: boolean;
 }
 
 /**
@@ -305,6 +309,13 @@ export interface OcxProviderConfig {
    * absence derives from the final model adapter.
    */
   fastWire?: FastWire | null;
+  /**
+   * Whether echoed service_tier can confirm or deny Fast. Set false for a relay whose
+   * response metadata cannot establish the granted tier. Absence keeps legacy authority;
+   * canonical ChatGPT Codex forwarding always treats the echo as non-authoritative.
+   * Observation only: this does not enable Fast or change request serialization.
+   */
+  responseTierAuthoritative?: boolean;
   baseUrl: string;
   /**
    * Optional relative resource path for key-auth openai-responses requests. Must start with `/`
@@ -660,13 +671,15 @@ export interface OcxProviderConfig {
    * Reactive 429 rotation remains available even when proactive routing is disabled.
    */
   oauthAccountFailover?: {
+    /** Kiro OAuth only: active serving requests per account, 1..100. */
+    maxConcurrentPerAccount?: number;
     enabled?: boolean;
     /**
      * Generic OAuth pool selection strategy (#695). Persisted through the pool-settings
      * contract. Consumed by the selector only while `pool.kernel` is on; with the flag off
      * it is still merely persisted, so omitted and set behave the same.
      */
-    strategy?: "quota" | "round-robin" | "fill-first";
+    strategy?: "quota" | "round-robin" | "fill-first" | "least-loaded";
     /**
      * 0-100 usage percent at which fill-first advances off the active account (#695).
      * Read only under `pool.kernel` with `strategy: "fill-first"`; 80 when unset, matching

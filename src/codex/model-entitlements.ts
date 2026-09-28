@@ -408,6 +408,8 @@ interface CachedAccountModels {
   readonly expiresAt: number;
   readonly models: ReadonlySet<string>;
   readonly metadataByModel: ReadonlyMap<string, CodexAccountModelMetadata>;
+  readonly accessProgramsByModel?: ReadonlyMap<string, CodexAvailableAccessPrograms>;
+  readonly availabilityNuxByModel?: ReadonlyMap<string, { message: string }>;
   readonly confirmed: boolean;
   readonly provenance?: CodexModelEntitlementProvenance;
 }
@@ -416,6 +418,8 @@ export interface CodexModelEntitlementSnapshot {
   readonly modelsByAccount: ReadonlyMap<string, ReadonlySet<string>>;
   /** Validated, non-sensitive fields from each authenticated account roster. */
   readonly metadataByAccount?: ReadonlyMap<string, ReadonlyMap<string, CodexAccountModelMetadata>>;
+  readonly accessProgramsByAccount?: ReadonlyMap<string, ReadonlyMap<string, CodexAvailableAccessPrograms>>;
+  readonly availabilityNuxByAccount?: ReadonlyMap<string, ReadonlyMap<string, { message: string }>>;
   readonly clientVersionByAccount: ReadonlyMap<string, string>;
   readonly confirmedAccountIds: ReadonlySet<string>;
   readonly credentialIdentities: ReadonlyMap<string, string>;
@@ -427,6 +431,7 @@ export interface CodexAccountModelMetadata {
 }
 
 export type CodexCyberAccessProgram = "standard" | "daybreak_blue" | "daybreak_red";
+export type CodexAvailableAccessPrograms = Readonly<Record<string, readonly string[]>> | null;
 
 export type CodexModelEntitlementState = "granted" | "denied" | "unknown";
 
@@ -647,14 +652,28 @@ const CODEX_CYBER_ACCESS_PROGRAMS = new Set<CodexCyberAccessProgram>([
   "standard", "daybreak_blue", "daybreak_red",
 ]);
 
+const AVAILABILITY_MESSAGE_MAX_CODE_UNITS = 2_000;
+// Codex parses the catalog with a strict JSON reader that rejects a lone surrogate escape.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** Trim and cap a prompt without leaving half of a surrogate pair at the cut or anywhere else. */
+function boundedAvailabilityMessage(message: string): string {
+  return message.trim().slice(0, AVAILABILITY_MESSAGE_MAX_CODE_UNITS).replace(LONE_SURROGATE, "").trim();
+}
+
+/** Keep valid roster slugs while dropping malformed program and availability metadata. */
 function parseAccountModels(text: string): {
   models: ReadonlySet<string>;
   metadataByModel: ReadonlyMap<string, CodexAccountModelMetadata>;
+  accessProgramsByModel: ReadonlyMap<string, CodexAvailableAccessPrograms>;
+  availabilityNuxByModel: ReadonlyMap<string, { message: string }>;
 } | null {
   try {
     const payload = JSON.parse(text) as { models?: unknown };
     if (!Array.isArray(payload.models)) return null;
     const metadataByModel = new Map<string, CodexAccountModelMetadata>();
+    const accessProgramsByModel = new Map<string, CodexAvailableAccessPrograms>();
+    const availabilityNuxByModel = new Map<string, { message: string }>();
     const models = payload.models.flatMap(entry => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
       const row = entry as {
@@ -663,13 +682,22 @@ function parseAccountModels(text: string): {
         visibility?: unknown;
         model_specialty?: unknown;
         available_access_programs?: unknown;
+        availability_nux?: unknown;
       };
       if (typeof row.slug !== "string" || row.supported_in_api !== true || row.visibility === "hide") return [];
       const metadata: CodexAccountModelMetadata = {};
       if (row.model_specialty === "cyber") metadata.model_specialty = "cyber";
-      if (row.available_access_programs && typeof row.available_access_programs === "object"
-        && !Array.isArray(row.available_access_programs)) {
-        const cyber = (row.available_access_programs as { cyber?: unknown }).cyber;
+      const nux = row.availability_nux;
+      if (nux && typeof nux === "object" && !Array.isArray(nux)) {
+        const message = (nux as { message?: unknown }).message;
+        const bounded = typeof message === "string" ? boundedAvailabilityMessage(message) : "";
+        if (bounded) availabilityNuxByModel.set(row.slug, { message: bounded });
+      }
+      const programs = row.available_access_programs;
+      if (programs === null) accessProgramsByModel.set(row.slug, null);
+      else if (programs && typeof programs === "object" && !Array.isArray(programs)) {
+        const record = programs as Record<string, unknown>;
+        const cyber = record.cyber;
         if (Array.isArray(cyber)) {
           metadata.available_access_programs = {
             cyber: cyber.filter((value): value is CodexCyberAccessProgram => (
@@ -677,11 +705,16 @@ function parseAccountModels(text: string): {
             )),
           };
         }
+        if (Array.isArray(record.cyber) && record.cyber.every(item => typeof item === "string")) {
+          const validPrograms = Object.fromEntries(Object.entries(record).filter(([, value]) =>
+            Array.isArray(value) && value.every(item => typeof item === "string"))) as Record<string, string[]>;
+          accessProgramsByModel.set(row.slug, validPrograms);
+        }
       }
       if (Object.keys(metadata).length > 0) metadataByModel.set(row.slug, metadata);
       return [row.slug];
     });
-    return { models: new Set(models), metadataByModel };
+    return { models: new Set(models), metadataByModel, accessProgramsByModel, availabilityNuxByModel };
   } catch {
     return null;
   }
@@ -708,6 +741,7 @@ function isTimeoutError(error: unknown): boolean {
   return error instanceof Error && error.name === "TimeoutError";
 }
 
+/** Fetch one bounded, version-scoped roster; failures and empty results remain unconfirmed for a short retry. */
 async function fetchAccountModels(
   credential: CodexModelEntitlementCredentialSnapshot,
   fetcher: typeof fetch,
@@ -752,7 +786,8 @@ async function fetchAccountModels(
     // account asked under too old a client version answers with no gated rows, and treating
     // that as authoritative is exactly how 2.36.0 denied sol/terra/luna to accounts that own
     // them (#3022). No usable rows means unconfirmed, on the 15s failure TTL, asked again.
-    const usable = parsed.models.size > 0;
+    const { models, metadataByModel, accessProgramsByModel, availabilityNuxByModel } = parsed;
+    const usable = models.size > 0;
     if (!usable) {
       return unconfirmedAccountModels(credential, clientVersion, now, { kind: "parsed-empty" });
     }
@@ -773,8 +808,10 @@ async function fetchAccountModels(
       expiresAt: now + (!hasUnknownGatedAbsence
         ? MODEL_ROSTER_TTL_MS
         : MODEL_ROSTER_FAILURE_TTL_MS),
-      models: parsed.models,
-      metadataByModel: parsed.metadataByModel,
+      models,
+      metadataByModel,
+      accessProgramsByModel,
+      availabilityNuxByModel,
       confirmed: true,
     };
   } catch (error) {
@@ -1217,6 +1254,14 @@ export async function resolveCodexModelEntitlements(
     modelsByAccount: new Map(results.map(({ credential, result }) => [credential.accountId, result.models])),
     metadataByAccount: new Map(results.map(({ credential, result }) => (
       [credential.accountId, result.metadataByModel]
+    ))),
+    accessProgramsByAccount: new Map(results.flatMap(({ credential, result }) => (
+      result.confirmed && result.accessProgramsByModel
+        ? [[credential.accountId, result.accessProgramsByModel] as const] : []
+    ))),
+    availabilityNuxByAccount: new Map(results.flatMap(({ credential, result }) => (
+      result.confirmed && result.availabilityNuxByModel
+        ? [[credential.accountId, result.availabilityNuxByModel] as const] : []
     ))),
     clientVersionByAccount: new Map(results.map(({ credential, result }) => (
       [credential.accountId, result.clientVersion]
