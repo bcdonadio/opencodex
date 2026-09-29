@@ -68,6 +68,7 @@ export async function executeResponsesSidecars(
     | "genericFailoverLimit"
     | "replayOAuthCredentialSnapshot"
     | "applyFailoverSnapshot"
+    | "anthropicRouteDecision"
     | "anthropicPoolAccountId"
     | "anthropicPoolFailovers"
     | "anthropicSessionKey"
@@ -276,6 +277,7 @@ export async function executeResponsesSidecars(
         anthropicSessionKey,
         Date.now(),
         responseHeaders,
+        transportState.anthropicRouteDecision,
       );
       if (!nextAccountId) {
         hop.permit?.release();
@@ -396,7 +398,7 @@ export async function executeResponsesSidecars(
     );
     const imgResponse = await runWithImageBridge({
       parsed, adapter: transportState.adapter,
-      incomingMeta: { headers: requestState.selectedForwardHeaders, abortSignal: options.abortSignal, translatorBudget },
+      incomingMeta: { headers: requestState.selectedForwardHeaders, providerName: route.providerName, abortSignal: options.abortSignal, translatorBudget },
       ...(imgPlan ? { plan: imgPlan } : {}),
       ...(vidPlan ? { videoPlan: vidPlan } : {}),
       forwardHeaders: requestState.selectedForwardHeaders,
@@ -495,6 +497,7 @@ export async function executeResponsesSidecars(
       }),
       incomingMeta: {
         headers: requestState.selectedForwardHeaders,
+        providerName: route.providerName,
         abortSignal: options.abortSignal,
         translatorBudget,
         providerFetch: routedProviderFetch,

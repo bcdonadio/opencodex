@@ -912,6 +912,25 @@ JSON mode: `envelope`.
 
 - Only meaningful under the sticky-capable strategies; the pool strategy is the other half of this setting.
 
+### `ocx account routes`
+
+Read, replace, or clear Anthropic OAuth model account routes.
+
+| Method | Route |
+|---|---|
+| GET | `/api/pool/settings` |
+| PUT | `/api/pool/settings` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--file` | string | Read a bounded JSON route array from a local file. |
+| `--clear` | boolean | Remove the stored routes. |
+| `--json` | boolean | Emit the unified settings response as JSON. |
+
+JSON mode: `envelope`.
+
+- Only anthropic is supported. The server validates route names, patterns, and account IDs.
+
 ### `ocx account auto-switch`
 
 Show or set the usage percentage at which a pool moves to another account.
@@ -1099,7 +1118,7 @@ JSON mode: `none`.
 
 ### `ocx integration native`
 
-Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, and read the Cursor status (which builds are installed, gateway values, last request seen).
+Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, and read the Cursor status (which builds are installed, gateway values, last request seen) and, on request, the Private Inference installer Cursor's update channel advertises.
 
 | Method | Route |
 |---|---|
@@ -1109,6 +1128,7 @@ Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, 
 | PUT | `/api/native-integrations/codex` |
 | PUT | `/api/native-integrations/grok` |
 | GET | `/api/native-integrations/cursor` |
+| GET | `/api/native-integrations/cursor/local-installer` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -1205,6 +1225,6 @@ JSON mode: `payload`.
 
 ## Counts
 
-- declared capabilities: 67
-- of those, state-changing: 36
+- declared capabilities: 68
+- of those, state-changing: 37
 - head-resolved invocations: 2

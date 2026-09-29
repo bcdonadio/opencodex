@@ -97,6 +97,7 @@ import {
 import { resolveClientRetryAfter } from "../../lib/retry-after";
 import { cancelBodyOnAbort } from "../../lib/abort";
 import { chargeWorkflowSends } from "../../lib/workflow-budget";
+import { isAntigravityValidationRefusal } from "./antigravity-validation-refusal";
 
 /** One responsibility of the Responses request pipeline; state owners are explicit. */
 export async function prepareAdapterExchange(
@@ -130,6 +131,7 @@ export async function prepareAdapterExchange(
     | "replayOAuthCredentialSnapshot"
     | "invalidateSameTargetRequest"
     | "resolveSelectionAdapter"
+    | "anthropicRouteDecision"
     | "anthropicPoolAccountId"
     | "anthropicPoolFailovers"
     | "anthropicSessionKey"
@@ -272,6 +274,7 @@ export async function prepareAdapterExchange(
   try {
     initialRequest = await transportState.activeAdapter.buildRequest(parsed, {
       headers: requestState.selectedForwardHeaders,
+            providerName: route.providerName,
       translatorBudget,
       abortSignal: upstream.signal,
     });
@@ -422,7 +425,7 @@ export async function prepareAdapterExchange(
     // moments later; at most one byte-identical replay is allowed per request.
     const consoleGoUploadRetryGuard: { attempted: boolean } = { attempted: false };
     let oauth401ReplayAttempted = false;
-    let antigravity401RotationAttempted = false;
+    let antigravityAuthRotationAttempted = false;
     // At most one reasoning-effort downgrade per request. This sits outside the recovery loop
     // below for the same reason the two guards above do: a guard declared inside it is reset by
     // every `continue recovery`, which would let one turn walk the whole ladder down.
@@ -463,6 +466,7 @@ export async function prepareAdapterExchange(
         try {
           retryRequest = await transportState.activeAdapter.buildRequest(parsed, {
             headers: requestState.selectedForwardHeaders,
+            providerName: route.providerName,
             translatorBudget,
             abortSignal: upstream.signal,
             ...(transportState.imageTierBias > 0 ? { imageTierBias: transportState.imageTierBias } : {}),
@@ -681,7 +685,7 @@ export async function prepareAdapterExchange(
           if (route.providerName === "google-antigravity" && err instanceof OAuthLoginRequiredError && failed
             && getAccountSet(route.providerName)?.accounts.some(row =>
               row.id === failed.accountId && row.needsReauth === true)) {
-            antigravity401RotationAttempted = true;
+            antigravityAuthRotationAttempted = true;
             const rotated = await rotateAntigravityAuth(upstreamResponse, "oauth-401");
             if (rotated) { upstreamResponse = rotated; continue recovery; }
           }
@@ -774,10 +778,21 @@ export async function prepareAdapterExchange(
       }
 
       if (route.providerName === "google-antigravity" && upstreamResponse.status === 401
-        && oauth401ReplayAttempted && !antigravity401RotationAttempted
+        && oauth401ReplayAttempted && !antigravityAuthRotationAttempted
         && !isNonReplayableResponse(upstreamResponse)) {
-        antigravity401RotationAttempted = true;
+        antigravityAuthRotationAttempted = true;
         const rotated = await rotateAntigravityAuth(upstreamResponse, "oauth-401");
+        if (rotated) { upstreamResponse = rotated; continue recovery; }
+      }
+
+      if (route.providerName === "google-antigravity" && upstreamResponse.status === 403
+        && transportState.activeAdapter.name === "google"
+        && antigravityPoolActivated && !antigravityAuthRotationAttempted
+        && !isNonReplayableResponse(upstreamResponse)
+        && transportState.genericFailovers < transportState.genericFailoverLimit
+        && await isAntigravityValidationRefusal(upstreamResponse, options.abortSignal)) {
+        antigravityAuthRotationAttempted = true;
+        const rotated = await rotateAntigravityAuth(upstreamResponse, "oauth-account-403");
         if (rotated) { upstreamResponse = rotated; continue recovery; }
       }
 
@@ -975,6 +990,7 @@ export async function prepareAdapterExchange(
           anthropicSessionKey,
           Date.now(),
           upstreamResponse.headers,
+          transportState.anthropicRouteDecision,
         );
         if (!nextAccountId) break;
         try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }

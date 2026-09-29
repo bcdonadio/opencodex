@@ -3,6 +3,7 @@ import { nameRoutedIdentity, repairIdentityInResponsesBody, stripRoutedIdentity 
 import { stripBracketedModelSuffix } from "../openai-chat";
 import { normalizeOpenCodeGoAdditionalTools } from "../opencode-go-additional-tools";
 import { isXaiResponsesDestination } from "../../providers/xai-transport";
+import { applyGithubCopilotContextTier } from "../../providers/github-copilot-context";
 import { Buffer } from "node:buffer";
 import type { AdapterRequest, IncomingMeta, ProviderAdapter } from "../base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../../types";
@@ -558,7 +559,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (!isCanonicalOpenAiForwardProvider(provider)) {
         validateFinalCustomToolCompatibility(finalBody, provider.supportsResponsesCustomTools);
       }
-      const body = JSON.stringify(finalBody);
+      const body = JSON.stringify(applyGithubCopilotContextTier(finalBody, provider, parsed.modelId, incoming.providerName));
       // All wire rewrites have settled. Parsed intent may differ from this body,
       // and an absent emitted field must not acquire an inferred effective effort.
       const wireEffort = isPlainObject(finalBody) && isPlainObject(finalBody.reasoning)

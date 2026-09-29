@@ -339,7 +339,11 @@ export async function preparePassthroughExchange(
     const providerExecutedCallTypes = new Set<ProviderExecutedCallType>();
     let request: Awaited<ReturnType<typeof transportState.adapter.buildRequest>>;
     try {
-      request = await transportState.adapter.buildRequest(parsed, { headers: requestState.selectedForwardHeaders, translatorBudget });
+      request = await transportState.adapter.buildRequest(parsed, {
+        headers: requestState.selectedForwardHeaders,
+        providerName: route.providerName,
+        translatorBudget,
+      });
     } catch (error) {
       releaseCodexAuthContextProbeLease(admissionState.authCtx);
       // A tool catalog this proxy cannot lower onto one wire namespace is a client input error, and
@@ -1009,6 +1013,7 @@ export async function preparePassthroughExchange(
         if (recovery !== "console-go-upload-retry") {
           request = await retryAdapter.buildRequest(parsed, {
             headers: requestState.selectedForwardHeaders,
+          providerName: route.providerName,
             translatorBudget,
           });
         }
@@ -1148,6 +1153,7 @@ export async function preparePassthroughExchange(
       try {
         request = await replayAdapter.buildRequest(parsed, {
           headers: requestState.selectedForwardHeaders,
+          providerName: route.providerName,
           translatorBudget,
         });
         refreshRequestToolAliases(request);
@@ -1296,6 +1302,7 @@ export async function preparePassthroughExchange(
       try {
         request = await refreshedAdapter.buildRequest(parsed, {
           headers: requestState.selectedForwardHeaders,
+          providerName: route.providerName,
           translatorBudget,
         });
         refreshRequestToolAliases(request);
