@@ -28,6 +28,7 @@ export const zh: Record<TKey, string> = {
   "logs.diagnostics.failed": "无法下载支持包。请重试。",
   "logs.diagnostics.yes": "是",
   "logs.diagnostics.no": "否",
+  "pws.anthropicAccountThresholdHint": "覆盖 Claude 池默认阈值。0 仅禁用此账户的按用量切换；暂停和速率限制恢复仍然生效。",
   "kiroLogin.title": "登录 Kiro",
   "kiroLogin.chooseMethod": "选择登录方式",
   "kiroLogin.cli": "从 Kiro CLI 导入",

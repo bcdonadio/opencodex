@@ -28,6 +28,7 @@ export const ja: Record<TKey, string> = {
   "logs.diagnostics.failed": "サポートバンドルをダウンロードできませんでした。再試行してください。",
   "logs.diagnostics.yes": "はい",
   "logs.diagnostics.no": "いいえ",
+  "pws.anthropicAccountThresholdHint": "Claude プールの既定値を上書きします。0 はこのアカウントだけで使用量による切り替えを無効にします。一時停止とレート制限からの復旧は引き続き適用されます。",
   "kiroLogin.title": "Kiro にログイン",
   "kiroLogin.chooseMethod": "ログイン方法を選択",
   "kiroLogin.cli": "Kiro CLI から取り込む",

@@ -1,4 +1,6 @@
 import { parseAnthropicModelRoutes, readAnthropicModelRoutes } from "../../oauth/anthropic-model-routes";
+import { effectiveAnthropicAccountThreshold } from "../../oauth/anthropic-account-threshold";
+import { handleAnthropicAccountThreshold } from "./anthropic-account-threshold";
 import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
@@ -396,7 +398,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const { isGenericFailoverProvider, kiroAutoSelection } = await import("../../oauth/generic-account-failover");
     const effectiveProvider = genericOAuthProviderConfig(provider, config);
     const supportsPause = effectiveProvider !== undefined
-      && isGenericFailoverProvider(provider, effectiveProvider);
+      && (provider === "anthropic" && effectiveProvider.authMode === "oauth"
+        || isGenericFailoverProvider(provider, effectiveProvider));
     const {
       oauthAccountHealthFields,
       projectOAuthAccountHealth,
@@ -417,6 +420,9 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
             });
           return { ...summary, ...oauthAccountHealthFields(provider, summary.id, health), quotaMode,
             ...(supportsPause ? { paused: full?.paused === true } : {}),
+            ...(provider === "anthropic" && supportsPause ? { autoSwitchThresholdOverride: full?.autoSwitchThresholdOverride ?? null,
+              effectiveAutoSwitchThreshold: effectiveAnthropicAccountThreshold(config, full),
+              autoSwitchThreshold: effectiveAnthropicAccountThreshold(config) } : {}),
             ...(provider === "kiro" && full ? kiroAutoSelection(full) : {}) };
         }),
       };
@@ -492,6 +498,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     return jsonResponse({ ok: true, provider, activeAccountId: body.accountId });
   }
 
+  if (url.pathname === "/api/oauth/accounts/auto-switch" && req.method === "PUT") return handleAnthropicAccountThreshold(req, config);
   if (url.pathname === "/api/oauth/accounts/pause" && req.method === "PUT") {
     const body = await readManagementJsonBodyOr(req, {});
     if (!isPlainRecord(body)) return jsonResponse({ error: "body must be an object" }, 400);
@@ -504,7 +511,8 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
 
     const { isGenericFailoverProvider } = await import("../../oauth/generic-account-failover");
     const effectiveProvider = genericOAuthProviderConfig(provider, config);
-    if (!effectiveProvider || !isGenericFailoverProvider(provider, effectiveProvider)) {
+    if (!effectiveProvider || !(provider === "anthropic" && effectiveProvider.authMode === "oauth"
+      || isGenericFailoverProvider(provider, effectiveProvider))) {
       return jsonResponse({ error: "account pause is not supported for this OAuth provider" }, 400);
     }
 
@@ -513,8 +521,13 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     if (result.status === "not-found") return jsonResponse({ error: "account not found" }, 404);
 
     if (result.activeAccountChanged) {
-      const { genericPoolKey, seedPoolRotationAccount } = await import("../../oauth/pool-kernel");
-      seedPoolRotationAccount(genericPoolKey(provider), result.activeAccountId);
+      if (provider === "anthropic") {
+        const { resetAnthropicRoutingForManualSelection } = await import("../../oauth/anthropic-routing");
+        resetAnthropicRoutingForManualSelection(result.activeAccountId);
+      } else {
+        const { genericPoolKey, seedPoolRotationAccount } = await import("../../oauth/pool-kernel");
+        seedPoolRotationAccount(genericPoolKey(provider), result.activeAccountId);
+      }
       const { clearModelCache } = await import("../../codex/model-cache");
       const { clearGatherRoutedModelsInflight } = await import("../../codex/catalog");
       clearModelCache(provider);

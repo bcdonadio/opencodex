@@ -28,6 +28,7 @@ export const fr: Record<TKey, string> = {
   "logs.diagnostics.failed": "Impossible de télécharger le dossier d’assistance. Réessayez.",
   "logs.diagnostics.yes": "Oui",
   "logs.diagnostics.no": "Non",
+  "pws.anthropicAccountThresholdHint": "Remplace le seuil par défaut du pool Claude. 0 désactive le basculement selon l’utilisation uniquement pour ce compte ; la pause et la reprise après limitation restent actives.",
   "kiroLogin.title": "Se connecter à Kiro",
   "kiroLogin.chooseMethod": "Choisir une méthode de connexion",
   "kiroLogin.cli": "Importer avec Kiro CLI",

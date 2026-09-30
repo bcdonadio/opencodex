@@ -34,7 +34,7 @@ import {
 import {
   createAdapterTierMetadata,
 } from "../../providers/fastwire";
-import { dropResponsesReasoningInputItems, mapRoutedResponsesReasoningEffort, normalizeConfiguredReasoningSummaryDelivery, sanitizeReasoningInputContent, stripDisabledReasoningSummaries, stripDisabledVerbosity, stripUnsupportedReasoningSummaryDelivery } from "./reasoning";
+import { dropResponsesReasoningInputItems, mapRoutedResponsesReasoningEffort, normalizeConfiguredReasoningSummaryDelivery, sanitizeReasoningInputContent, stripDisabledReasoningSummaries, stripDisabledVerbosity, stripNoneReasoningSummary, stripUnsupportedReasoningSummaryDelivery } from "./reasoning";
 import { scrubOcxCompactionItems, stripCanonicalOnlyToolFields, stripCanonicalOnlyTopLevelFields, stripChatGptAccessPrograms, stripInternalChatMessageMetadataPassthrough, stripInvalidItemIds, stripItemIdsWhenUnstored, stripRejectedSamplingParams } from "./request-strips";
 import { stripCanonicalForwardPromptCacheOptions, stripDeprecatedPromptCacheRetention } from "./prompt-cache";
 import { isPlainObject } from "./internal";
@@ -369,6 +369,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = repairOversizedReplayCallIds(outBody);
       }
       outBody = stripUnsupportedReasoningSummaryDelivery(outBody, parsed.modelId);
+      outBody = stripNoneReasoningSummary(outBody);
       // #4587: on a bridged provider, hand the destination back the search call and result the
       // proxy executed on its behalf, in place of the hosted cell the caller replays. Scoped to
       // its exact conversation and serving identity and recorded by the bridge itself, so a
@@ -528,6 +529,16 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (isMetaAiResponsesDestination(url)) {
         const originalChoice = isPlainObject(parsed._rawBody) ? parsed._rawBody.tool_choice : undefined;
         finalBody = normalizeMuseToolChoice(finalBody, originalChoice);
+      }
+      // The canonical ChatGPT Codex endpoint is SSE-only even though the public Responses surface
+      // permits an omitted/false `stream`. Keep the client's delivery preference on `parsed.stream`
+      // and coerce only this final upstream copy; passthrough delivery folds the terminal stream
+      // back into JSON for that client. `store` is intentionally untouched here because explicit
+      // caller storage semantics are independent of the transport required by the destination.
+      if (isCanonicalOpenAiForwardProvider(provider)
+        && isPlainObject(finalBody)
+        && finalBody.stream !== true) {
+        finalBody = { ...finalBody, stream: true };
       }
       if (isCanonicalOpenAiForwardProvider(provider)) {
         const routingHeaders = new Headers(headers);

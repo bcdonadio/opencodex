@@ -403,7 +403,11 @@ working tree and pins that wiring.
 
 The `package-standalone` job in `.github/workflows/release.yml` also builds Bun compiled
 `ocx` archives for Linux, macOS, and Windows, bundles `gui/dist`, smoke-tests `/healthz`, and
-publishes SHA-256 sidecars for the attach job.
+publishes SHA-256 sidecars for the attach job. Each archive also carries the target-matching
+`@napi-rs/keyring` native addon under `keyring/`; the macOS release installs both optional Darwin
+packages so its separate arm64 and x64 builds cannot silently reuse the hosted runner's
+architecture. Desktop preparation copies those same pinned assets into Tauri resources. The loader
+and packaged-app proof are owned by the [desktop keyring contract](../desktop-shell.md#packaged-native-keyring-binding).
 
 Opening a release starts with the `dev` pre-move. Dispatch
 `.github/workflows/dev-version-bump.yml` with the intended version, merge the pull request it opens,

@@ -1156,6 +1156,17 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     modelContextWindows: { "gpt-5.6-terra": 1_050_000 },
     modelMaxOutputTokens: { "gpt-5.6-terra": 128_000 },
     modelInputModalities: { "gpt-5.6-terra": ["text", "image"] },
+    // Per-model wires from `tokenlab.accepted_request_formats` (GET /v1/models/{id}, 2026-09-30).
+    // The provider stays on Chat, the released and end-to-end verified path, and every model
+    // accepts it. Models that also declare Responses use it for Codex (Responses inbound) only,
+    // so Chat and Anthropic clients skip a translation hop; an explicit modelAdapters entry wins.
+    // Claude ids ride Anthropic Messages through the endpoint-bound pin in src/types/wire.ts.
+    // gemini-3.8-flash declares Chat + Gemini native and stays on Chat. No delivery-policy
+    // header is sent: the API key's own policy stays authoritative.
+    modelWireDefaults: Object.fromEntries([
+      "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "grok-4.7",
+      "deepseek-v4.1-flash", "deepseek-v4-pro", "kimi-k3", "glm-5.3",
+    ].map(id => [id, { wire: "openai-responses", inbound: ["responses"] }])),
     modelDiscovery: {
       path: "models",
       query: { category: "chat" },
@@ -1342,7 +1353,7 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
     featured: false,
     dashboardUrl: "https://github.com/settings/copilot",
     liveModels: true,
-    models: ["gpt-4o", "gpt-4.1", "gpt-4.1-mini", "claude-sonnet-4", "gemini-2.5-pro", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6-sol", "gpt-6-luna"],
+    models: ["gpt-4o", "gpt-4.1", "gpt-4.1-mini", "claude-sonnet-4", "gemini-2.5-pro", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"],
     defaultModel: "gpt-4o",
     // Copilot fronts a mixed-wire catalog: these models reject /chat/completions for
     // real Codex-agent traffic (function tools + reasoning), so every inbound wire
@@ -1362,6 +1373,8 @@ export const PROVIDER_REGISTRY_EXTENDED: readonly ProviderRegistryEntry[] = [
       // 260923 preemptive: GPT-6 Sol/Luna ride Responses like every GPT-5.6/6 row above.
       "gpt-6-sol": "openai-responses",
       "gpt-6-luna": "openai-responses",
+      // GPT-6.1 Sol: GA in Copilot 2026-09-29 (github.blog changelog); rides Responses like GPT-6 Sol.
+      "gpt-6.1-sol": "openai-responses",
       "grok-4.5": "openai-responses",
       "grok-4.6": "openai-responses",
       "mai-code-1.1-flash": "openai-responses",

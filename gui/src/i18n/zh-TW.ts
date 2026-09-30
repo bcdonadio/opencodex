@@ -26,6 +26,7 @@ export const zhTW: Record<TKey, string> = {
   "logs.diagnostics.failed": "無法下載支援套件。請再試一次。",
   "logs.diagnostics.yes": "是",
   "logs.diagnostics.no": "否",
+  "pws.anthropicAccountThresholdHint": "覆寫 Claude 集區預設門檻。0 僅停用此帳戶的依用量切換；暫停和速率限制復原仍然適用。",
   "kiroLogin.title": "登入 Kiro",
   "kiroLogin.chooseMethod": "選擇登入方式",
   "kiroLogin.cli": "從 Kiro CLI 匯入",

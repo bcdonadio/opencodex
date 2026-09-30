@@ -91,7 +91,8 @@ export const DOCUMENTED_NATIVE_OPENAI_ADDITIONS = [
   // client_version >= 0.155.0, so an installed catalog built by an older client lacks them.
   // Astra Minor is deliberately absent: it is gated, and nativeOpenAiSlugs() would drop it anyway.
   NATIVE_GPT6_SOL_MODEL, NATIVE_GPT6_LUNA_MODEL,
-  // GPT-6.1 Sol from the same roster pin (captured at client_version=0.159.0).
+  // GPT-6.1 Sol requires client_version >= 0.153.0; our authenticated roster pin was
+  // captured at 0.159.0, and older installed catalogs lack it.
   NATIVE_GPT61_SOL_MODEL,
 ];
 
@@ -200,7 +201,8 @@ export const NATIVE_OPENAI_CONTEXT_OVERRIDES: Record<string, { contextWindow?: n
   // the row's own ceiling rather than the GPT-5.6 family's measured 922,000.
   [NATIVE_GPT6_SOL_MODEL]: { ...NATIVE_GPT6_CONTEXT },
   [NATIVE_GPT6_LUNA_MODEL]: { ...NATIVE_GPT6_CONTEXT },
-  // GPT-6.1 Sol's roster row (client_version=0.159.0, 2026-09-29) ships the same pair.
+  // GPT-6.1 Sol's roster row (client_version=0.159.0, 2026-09-29), corroborated by
+  // openai/codex models.json after #49318, ships the same 272,000 / 872,000 pair.
   [NATIVE_GPT61_SOL_MODEL]: { ...NATIVE_GPT6_CONTEXT },
   // Astra Minor borrows Astra's row, so it inherits Astra's numbers. No account we hold can reach
   // it, so this is inheritance, not a measurement.

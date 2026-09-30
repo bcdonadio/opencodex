@@ -30,6 +30,7 @@ export const vi: Record<TKey, string> = {
   "logs.diagnostics.failed": "Không thể tải xuống gói hỗ trợ. Hãy thử lại.",
   "logs.diagnostics.yes": "Có",
   "logs.diagnostics.no": "Không",
+  "pws.anthropicAccountThresholdHint": "Ghi đè ngưỡng mặc định của nhóm Claude. 0 chỉ tắt chuyển đổi dựa trên mức sử dụng của tài khoản này; tạm dừng và khôi phục khi bị giới hạn vẫn áp dụng.",
   "kiroLogin.title": "Đăng nhập Kiro",
   "kiroLogin.chooseMethod": "Chọn cách đăng nhập",
   "kiroLogin.cli": "Nhập từ Kiro CLI",

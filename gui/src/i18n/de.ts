@@ -29,6 +29,7 @@ export const de: Record<TKey, string> = {
   "logs.diagnostics.failed": "Das Supportpaket konnte nicht heruntergeladen werden. Erneut versuchen.",
   "logs.diagnostics.yes": "Ja",
   "logs.diagnostics.no": "Nein",
+  "pws.anthropicAccountThresholdHint": "Überschreibt den Standard des Claude-Pools. 0 deaktiviert den nutzungsbasierten Wechsel nur für dieses Konto; Pause und Wiederherstellung bei Ratenlimits gelten weiterhin.",
   "kiroLogin.title": "Bei Kiro anmelden",
   "kiroLogin.chooseMethod": "Anmeldemethode wählen",
   "kiroLogin.cli": "Mit Kiro CLI anmelden",

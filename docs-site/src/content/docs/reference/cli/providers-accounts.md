@@ -251,7 +251,7 @@ alias <provider> <id|alias> <display-name|->  Set or clear an account's display 
 pause <provider> <id|alias|main>  Hold an account out of automatic selection.
 resume <provider> <id|alias|main>  Return a paused account to automatic selection.
 pause-exhausted <provider>  Pause every account whose quota is spent.
-clear-cooldown <provider> <id|alias|main>  Drop a cooldown the proxy set after an upstream failure.
+clear-cooldown <openai|anthropic> <id|alias|main>  Drop a cooldown the proxy set after an upstream failure.
 strategy <provider> [<quota|round-robin|fill-first|least-loaded|reset-first>]  Pool placement strategy; least-loaded is Kiro-only.
 sticky <provider> [<1-100>]  Requests a bound thread keeps on one account; omit the value to read it.
 priority <provider> <id|alias|main> [first|earlier|normal|later|last|-100..100|reset]  Selection order; omit the value to read it.
@@ -469,20 +469,39 @@ Clear the manual Codex account selection without resolving an account id, so it 
 
 ### `ocx account pause|resume <provider> <id|alias|main> [--json]`
 
-Pause or resume one account in the Codex pool or a generic OAuth provider pool, including
+Pause or resume one account in the Codex, Anthropic, or generic OAuth provider pool, including
 `google-antigravity`. For the Codex pool, `main` identifies only the built-in Codex account;
-generic OAuth accounts must be identified by id or a unique alias. A paused generic OAuth account
+OAuth accounts must be identified by id or a unique alias. A paused OAuth account
 is excluded from request selection, 429 failover, and proactive token refresh, and cannot be
 selected manually. Pausing the active account switches to the next usable account when one exists.
 If every account is paused, requests that need that pool return 403 until an account is resumed.
 
-For a generic OAuth provider, identify the account by id or by a unique exact or case-insensitive
+For Anthropic and generic OAuth providers, identify the account by id or by a unique exact or case-insensitive
 alias. The JSON response reports the account id, pause state, and active account id.
+
+Anthropic pause applies even when proactive pooling is disabled, including session affinity and
+429 successors. It survives restart and reauthentication, preserves credentials and health,
+and does not interrupt a turn already sent. Removing the account removes its pause state.
+Per-account Anthropic auto-switch thresholds are not part of this control.
 
 ```bash
 ocx account pause google-antigravity <account-id-or-alias>
 ocx account resume google-antigravity <account-id-or-alias>
 ```
+
+### `ocx account clear-cooldown <openai|anthropic> <id|alias|main> [--json]`
+
+Drops a process-local failure cooldown without changing stored credentials. Use `openai` for a Codex
+pool account or `anthropic` for an Anthropic OAuth account; other providers are rejected. Both forms
+accept an account id or unique alias, while `main` is specific to the Codex pool.
+
+```bash
+ocx account clear-cooldown anthropic <id-or-alias>
+```
+
+The command reports success even when no cooldown is active, with `cleared: false` in JSON. Clearing
+an Anthropic cooldown also advances the account generation so an older in-flight quota probe cannot
+restore the cleared state or publish stale quota-derived eligibility afterward.
 
 ### `ocx account refresh <provider> [--json]`
 
@@ -499,7 +518,11 @@ instead (exit 0), matching the dashboard's quota bars.
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-Controls the `openai` Codex pool threshold, or stores a threshold for a generic OAuth pool. `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0–100. A generic pool threshold steers selection only while `pool.kernel` is on with `strategy: "fill-first"`; with the flag off, saving one does not enable threshold-based switching. It never changes the provider enablement override or disables reactive 429 rotation. `status` and mutation output for generic pools use the confirmed server response. For generic pools, `poolEnabled` is the stored provider override (`null` means unspecified), not inherited effective state; `inert: true` means the threshold is stored but not applied, `inert: false` means the pool is applying it, and an absent `inert` is an unknown capability, which never reports `enabled: true`. API-key providers, Anthropic and invalid values are rejected.
+Controls the `openai` Codex pool threshold, or stores a threshold for a generic OAuth pool. `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0–100. A generic pool threshold steers selection only while `pool.kernel` is on with `strategy: "fill-first"`; with the flag off, saving one does not enable threshold-based switching. It never changes the provider enablement override or disables reactive 429 rotation. `status` and mutation output for generic pools use the confirmed server response. For generic pools, `poolEnabled` is the stored provider override (`null` means unspecified), not inherited effective state; `inert: true` means the threshold is stored but not applied, `inert: false` means the pool is applying it, and an absent `inert` is an unknown capability, which never reports `enabled: true`. API-key providers and invalid values are rejected.
+
+### `ocx account auto-switch anthropic … --account <id>`
+
+For Anthropic OAuth, use `ocx account auto-switch anthropic threshold 90 --account <id>` (integer 0–100), `off --account <id>` (0), `on --account <id>` (80), `inherit --account <id>` (reset), or `status --account <id>` (read-only); append `--json` for structured output. The account card offers the same custom-threshold toggle. Missing/null inherits `anthropicAccountPool.autoSwitchThreshold` (default 80); 0 disables usage-driven switching for that account, not pause or reactive 429 recovery. Overrides survive restart and re-login and are removed with the account. With pooling enabled, quota and fill-first compare each source/candidate against its own threshold in the selected quota window. Manual/affinity precedence, identity-less round-robin/fill-first behavior, unknown-quota fallback and all-drained fallback remain unchanged. Round-robin is not usage-driven; disabled pools ignore these thresholds. Model-route allowlists still constrain every candidate.
 
 ```text
 openai: { provider, autoSwitchThreshold: number, enabled: boolean }

@@ -28,6 +28,7 @@ export const ko: Record<TKey, string> = {
   "logs.diagnostics.failed": "지원 번들을 다운로드하지 못했습니다. 다시 시도하세요.",
   "logs.diagnostics.yes": "예",
   "logs.diagnostics.no": "아니요",
+  "pws.anthropicAccountThresholdHint": "Claude 풀 기본값을 재정의합니다. 0은 이 계정의 사용량 기반 전환만 끄며, 일시정지와 요청 제한 복구는 계속 적용됩니다.",
   "kiroLogin.title": "Kiro에 로그인",
   "kiroLogin.chooseMethod": "로그인 방법 선택",
   "kiroLogin.cli": "Kiro CLI에서 가져오기",
