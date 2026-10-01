@@ -55,6 +55,8 @@ import {
   SUPPORTED_NATIVE_OPENAI_SLUGS,
   RETIRED_NATIVE_OPENAI_MODELS,
   configuredNativeOpenAiModels,
+  discoveredNativeOpenAiModels,
+  discoveredNativeOpenAiRow,
   hasNativeOpenAiCapabilityMetadata,
   isConfiguredNativeOpenAiModel,
   isNativeOpenAiCapabilityAliasModel,
@@ -221,7 +223,9 @@ const PINNED_UPSTREAM_MODELS: Map<string, RawEntry> = new Map(
 );
 
 function pinnedNativeCapabilityEntry(slug: string): RawEntry | undefined {
-  return PINNED_UPSTREAM_MODELS.get(nativeOpenAiCapabilitySourceSlug(slug));
+  const discovered = discoveredNativeOpenAiRow(slug);
+  return discovered ? discoveredNativeCapabilityEntry(discovered)
+    : PINNED_UPSTREAM_MODELS.get(nativeOpenAiCapabilitySourceSlug(slug));
 }
 
 /**
@@ -421,7 +425,7 @@ export function nativeReasoningEfforts(slug: string): string[] {
   const levels = Array.isArray(upstream?.supported_reasoning_levels)
     ? upstream!.supported_reasoning_levels as Array<{ effort?: string }>
     : [];
-  if (levels.length > 0) {
+  if (levels.length > 0 || discoveredNativeOpenAiRow(slug)) {
     // Preserve the exact pinned per-model ladder. In particular, GPT-5.6 Sol and Terra
     // include ultra while Luna intentionally ends at max.
     return levels.flatMap(l => typeof l.effort === "string" ? [l.effort] : []);
@@ -567,6 +571,8 @@ export function applyNativeVisibility(
 }
 
 function upstreamNativeEntryForSlug(slug: string): RawEntry | undefined {
+  const discovered = discoveredNativeOpenAiRow(slug);
+  if (discovered) return discoveredNativeCapabilityEntry(discovered);
   const sourceSlug = nativeOpenAiCapabilitySourceSlug(slug);
   // A self-described native returns its OWN pinned row; the alias-cloning branch below stays
   // reserved for slugs that genuinely borrow another model's identity. The allowlist is explicit
@@ -607,6 +613,14 @@ function upstreamNativeEntryForSlug(slug: string): RawEntry | undefined {
   return alias;
 }
 
+/** Account-specific grants and prompts are projected from entitlement evidence, never a shared row. */
+function discoveredNativeCapabilityEntry(row: RawEntry): RawEntry {
+  const entry = withDerivedBaseInstructions(structuredClone(row));
+  delete entry.available_access_programs;
+  delete entry.availability_nux;
+  return entry;
+}
+
 /**
  * Backfill `base_instructions` from `model_messages.instructions_template` when upstream ships
  * only the latter.
@@ -635,7 +649,7 @@ export const UPSTREAM_NATIVE_ENTRIES: Map<string, RawEntry> = new Map(
   }),
 );
 
-// Configured natives join the three per-slug tables in place: other modules hold these exact
+// Configured and discovered natives join the per-slug tables in place: modules hold these exact
 // objects, so a replacement would go unseen. Built-in ids are never configured, so a removal
 // cannot delete a built-in row.
 subscribeConfiguredNativeOpenAiModels((current, removed) => {
@@ -649,7 +663,11 @@ subscribeConfiguredNativeOpenAiModels((current, removed) => {
     if (pinned) PINNED_NATIVE_CAPABILITY_ENTRIES.set(slug, pinned);
     const upstream = upstreamNativeEntryForSlug(slug);
     if (upstream) UPSTREAM_NATIVE_ENTRIES.set(slug, upstream);
-    NATIVE_OPENAI_CONTEXT_OVERRIDES[slug] = { ...NATIVE_GPT6_CONTEXT };
+    const discovered = discoveredNativeOpenAiRow(slug);
+    const contextWindow = positiveInt(discovered?.context_window) ?? NATIVE_GPT6_CONTEXT.contextWindow;
+    const maxContextWindow = Math.max(contextWindow,
+      positiveInt(discovered?.max_context_window) ?? NATIVE_GPT6_CONTEXT.maxContextWindow);
+    NATIVE_OPENAI_CONTEXT_OVERRIDES[slug] = { contextWindow, maxContextWindow, maxInputTokens: maxContextWindow };
   }
 });
 
@@ -694,6 +712,7 @@ const SELF_AUTHORED_NATIVE_ROWS: ReadonlySet<string> = new Set([NATIVE_GPT6_ASTR
 
 export function shouldUpgradeToUpstreamEntry(entry: RawEntry): boolean {
   if (typeof entry.slug !== "string" || !UPSTREAM_NATIVE_ENTRIES.has(entry.slug)) return false;
+  if (discoveredNativeOpenAiRow(entry.slug)) return true;
   if (entry.display_name === entry.slug) return true;
   // A row this project authored from a guess is not evidence of upstream truth, however genuine
   // its display name looks. Replace it once, from the pin.
@@ -705,7 +724,7 @@ export function nativeOpenAiSlugs(): string[] {
   const live = catalogNativeSlugs();
   const availableGated = cachedAvailableAccountGatedNativeModels();
   const candidates = live.length > 0
-    ? unique([...live, ...DOCUMENTED_NATIVE_OPENAI_ADDITIONS, ...configuredNativeOpenAiModels()])
+    ? unique([...live, ...DOCUMENTED_NATIVE_OPENAI_ADDITIONS, ...configuredNativeOpenAiModels(), ...discoveredNativeOpenAiModels()])
     : NATIVE_OPENAI_MODELS;
   return candidates.filter(slug => (
     !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug) || availableGated.has(slug)
@@ -915,5 +934,5 @@ function catalogNativeSlugs(): string[] {
 export function listCatalogNativeSlugs(): string[] {
   // Ensure documented additions (e.g. gpt-6-astra) appear even when the bundled catalog
   // predates the slug — mirrors nativeOpenAiSlugs() which already merges them for /v1/models.
-  return unique([...catalogNativeSlugs(), ...DOCUMENTED_NATIVE_OPENAI_ADDITIONS, ...configuredNativeOpenAiModels()]);
+  return unique([...catalogNativeSlugs(), ...DOCUMENTED_NATIVE_OPENAI_ADDITIONS, ...configuredNativeOpenAiModels(), ...discoveredNativeOpenAiModels()]);
 }

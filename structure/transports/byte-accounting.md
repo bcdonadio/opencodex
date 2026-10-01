@@ -59,6 +59,10 @@ lifecycle, cancellation races, protocol envelopes, and the real HTTP admission b
 
 ## Stream-buffer accounting
 
+Devin's [Messages ordering buffer](../clients/claude-desktop.md#devin-messages-output-ordering) charges retained
+semantic events consumed from the independently bounded adapter queue to the shared translator
+budget until downstream delivery. Cancellation and overflow release held events before producer shutdown.
+
 `src/web-search/run-turn-loop.ts` charges retained iteration events and generated replay history to
 the request translator budget. Each owner releases its own reservations on completion, error,
 cancellation or consumer closure; a buffer-limit failure terminates without another search.
@@ -110,6 +114,14 @@ accounting shortcuts: only a successful string assignment reaches `Buffer.byteLe
 dedicated loopback companion carries its resolved loopback admission into `src/server/responses/core.ts`.
 
 ## Response-log inspection
+
+`src/lib/redact.ts` scans XML identifying attributes over disjoint tag spans rather than
+searching the remaining suffix from each opening delimiter. Tag terminators are quote-aware,
+so `>` inside a single- or double-quoted attribute cannot hide later credential attributes.
+The decoded and raw passes
+retain the original-offset mapping and mask a credential-bearing element through the rest
+of the input. `tests/lib/redact.test.ts` counts delimiter searches and scanned characters across doubled inputs
+without a machine-speed deadline, as well as malformed and escaped credential coverage.
 
 `src/server/response-log-body.ts` forwards raw response chunks on downstream demand.
 Diagnostic retention is limited to 32 MiB for JSON and an 8 KiB prefix for other

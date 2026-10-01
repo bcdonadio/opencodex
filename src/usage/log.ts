@@ -680,7 +680,8 @@ function normalizeAttemptTierOutcome(raw: unknown): AttemptTierOutcome | null {
     && outcome.wireKind !== null
     && outcome.wireKind !== "service-tier"
     && outcome.wireKind !== "anthropic-speed"
-    && outcome.wireKind !== "cursor-variant") return null;
+    && outcome.wireKind !== "cursor-variant"
+    && outcome.wireKind !== "model-variant") return null;
   if ("wireValue" in outcome && outcome.wireValue !== null && typeof outcome.wireValue !== "string") return null;
   if ("fastDowngradeReason" in outcome
     && (typeof outcome.fastDowngradeReason !== "string"
@@ -700,6 +701,7 @@ function normalizeAttemptTierOutcome(raw: unknown): AttemptTierOutcome | null {
       || outcome.wireKind === "service-tier"
       || outcome.wireKind === "anthropic-speed"
       || outcome.wireKind === "cursor-variant"
+      || outcome.wireKind === "model-variant"
       ? { wireKind: outcome.wireKind }
       : {}),
     ...(outcome.wireValue === null

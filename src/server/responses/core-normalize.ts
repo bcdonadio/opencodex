@@ -40,6 +40,7 @@ import { recordAttemptRequestedEffort } from "../request-log";
 import type { ResolvedFastPolicy } from "../../providers/fastwire";
 import { recordSelectedRoute, recordContextTransformation } from "../transaction-capture";
 import { recordRouteAuth } from "../transaction-auth-capture";
+import { applyXaiOauthFastModel } from "../../providers/xai-fast-model";
 
 export const MAX_FAST_WIRE_CAPABILITY_WARNINGS = 256;
 
@@ -250,6 +251,8 @@ export async function applyFinalRouteRequestNormalization(args: {
     inboundWire,
     fastPolicy,
   );
+  // xAI OAuth Fast is a serving-lane switch: serialize the variant id, keep the logical id for policy.
+  applyXaiOauthFastModel(parsed, route, logCtx);
   if (modelServiceTierSupport === false) {
     logCtx.requestedServiceTier = undefined;
     logCtx.requestedSpeedLabel = undefined;
