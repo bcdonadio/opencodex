@@ -16,6 +16,7 @@ import {
   type RequestPacingObservation,
 } from "../../providers/request-pacing";
 import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
+import { providerTlsFetch } from "../../lib/provider-tls-profile";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 import { configuredOutboundFetch } from "../../lib/proxy-env";
 import { isLoopbackUrl, rewriteUpstream } from "../../plugins/upstream-hooks";
@@ -303,8 +304,10 @@ export function providerFetch(
     { preconnect: globalThis.fetch.preconnect?.bind(globalThis.fetch) },
   ) as typeof globalThis.fetch);
   const base = customExecutor ?? configuredFetch;
+  const transport = options.providerName ? providerTlsFetch(options.providerName, provider, base) : base;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
-    base.preconnect?.(...args);
+    // A TLS profile owns the handshake; a Bun preconnect would open a differently fingerprinted one.
+    if (transport === base) base.preconnect?.(...args);
   };
   // Rebuilt dispatches must use the same physical-send boundary as ordinary HTTP sends.
   // Return the original 3xx so the response owner retains its retry/health/relay contract.
@@ -317,7 +320,7 @@ export function providerFetch(
   // that decided for itself has already marked the init and this pass defers to that decision.
   const dispatch = markEgressTransparentExecutor(Object.assign(
     (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
-      sendWithConnectionPolicy(base, input, init, egressBinding),
+      sendWithConnectionPolicy(transport, input, init, egressBinding),
     { preconnect },
   ) as typeof globalThis.fetch);
   const httpFetch = Object.assign(
@@ -325,13 +328,14 @@ export function providerFetch(
       // Reject malformed or unsupported egress before admission, accounting, or
       // diagnostics can claim that a physical send happened.
       if (options.dispatchOverride) egressFor(input);
-      else providerEgressSendInit(egressBinding, base, input);
+      else providerEgressSendInit(egressBinding, transport, input);
       const dispatchInit = {
         ...withUpstreamHttpVersion(input, init, provider),
         redirect: "manual" as const,
         timeout: 0,
       };
-      options.beforeDispatch?.(new Headers(dispatchInit.headers ?? (input instanceof Request ? input.headers : undefined)));
+      // This hook inspects a copy; the final connection and egress policy belongs to dispatch.
+      options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
       // Recovery may rebuild the destination and body at the dispatch boundary.
       // Observe the executor's arguments so diagnostics describe that actual send.
       const execute = markEgressTransparentExecutor(Object.assign(async (

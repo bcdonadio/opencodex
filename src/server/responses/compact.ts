@@ -1,6 +1,7 @@
 import { transportObserver, recordRequestShape, recordContextTransformation, recordCompletedCompaction } from "../transaction-capture";
 import { recordRouteAuth } from "../transaction-auth-capture";
 import { capturePoolQuotaWriter } from "../../codex/account-store";
+import { previewXaiOauthWireModel } from "./core-normalize";
 import {
   admissionModelDeniedResponse,
   AdmissionModelDeniedError,
@@ -201,6 +202,7 @@ import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel }
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { linkRequestSessionLane, sessionLaneIdFromRequest } from "../request-log-conversation";
 import { recallComboForLane } from "./combo-session-recall";
+import { redactHostedImageDisplayPaths } from "../responses-hosted-image-display";
 
 export const COMPACT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 
@@ -633,6 +635,8 @@ export async function handleResponsesCompact(
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return formatErrorResponse(400, "invalid_request_error", "Invalid compaction request body");
   }
+  // Compaction forwards client history upstream too; keep local artifact paths out of it.
+  redactHostedImageDisplayPaths(body);
   if (!options.compactionRoutingOverride) {
     options = { ...options, compactionRoutingOverride: applyCompactionRoutingOverride(body, req.headers, config, { endpoint: "compact" }) };
   }
@@ -681,7 +685,15 @@ export async function handleResponsesCompact(
     // A compaction override picks the model, not the caller, so the key's scope
     // is applied to what the override resolved to rather than to the selector
     // the client sent.
-    assertRouteAllowedByScope(resolveAdmissionModelScope(config, admission), compactRequestedModel, route);
+    // Routed xAI OAuth compaction must preview its Fast wire model here;
+    // native compact keeps checking the destination it dispatches directly.
+    const callerTier = (raw as Record<string, unknown>).service_tier;
+    assertRouteAllowedByScope(resolveAdmissionModelScope(config, admission), compactRequestedModel, {
+      providerName: route.providerName,
+      modelId: previewXaiOauthWireModel({ options: {
+        serviceTier: compactFastRow ? "priority" : typeof callerTier === "string" ? callerTier : undefined,
+      } }, route, config, "responses"),
+    });
   } catch (err) {
     if (err instanceof AdmissionModelDeniedError) return admissionModelDeniedResponse(err);
     if (err instanceof NoEligiblePolicyCandidateError) {
@@ -702,6 +714,7 @@ export async function handleResponsesCompact(
   logCtx.requestedModel = compactRequestedModel;
   logCtx.model = selectedModelId;
   logCtx.routeDecision = route.routeDecision;
+  logCtx.policyEligibility = route.policyEligibility;
   logCtx.provider = route.codexAccountNamespace
     ? `${route.providerName}-${route.codexAccountNamespace}`
     : route.providerName;

@@ -23,6 +23,7 @@ import type { RequestLogContext } from "../request-log";
 import type { UpstreamHostAdmissionLease } from "../../codex/upstream-host-health";
 import type { AgentTaskRecoveryDeliveryResult } from "./agent-task-recovery";
 import type { AccountLease } from "../../oauth/kiro-account-load";
+import type { PolicyRequestScope } from "./policy-request-scope";
 
 export interface ConsumedComboFailure {
   response: Response;
@@ -61,6 +62,10 @@ export interface ClientEncoderOption {
 }
 
 export interface HandleResponsesOptions {
+  /** Internal request-owned policy authorization; never read from client headers or body. */
+  policyRequestScope?: PolicyRequestScope;
+  /** Internal concrete selector chosen from the original policy evaluation. */
+  policyFallbackCandidate?: { provider: string; model: string };
   /** Internal routed-compaction recovery: one logical request, one emergency target. */
   compactionRecoveryAttempted?: boolean;
   compactionRecoveryPermit?: SingleUseDispatchPermit;
@@ -70,7 +75,7 @@ export interface HandleResponsesOptions {
   /** Physical-send reports already delivered to the shared used setter, including booking settlement. */
   onCompactionRecoverySendsReported?: (count: number) => void;
   /** Private holder for the Kiro serving-account lease. */
-  accountLoad?: { lease: AccountLease | null };
+  accountLoad?: { lease: AccountLease | null; cancelled: boolean };
   /** Internal Claude replay identity; consumed only by the final canonical Go transport. */
   claudeGoAffinity?: { sessionLane?: string };
   /** Validated Claude metadata identity; projected only into final canonical attempt headers. */
@@ -78,6 +83,11 @@ export interface HandleResponsesOptions {
   /** Original live policy owner; separate from caller-specific routing/sidecar snapshots. */
   codexAuthPolicy?: CodexAuthPolicyConfig;
   turnAdmissionLease?: AdmissionLease;
+  /**
+   * A JEV decision-model call issued by a combo. It never carries caller credentials, is never
+   * rewritten by memory or shadow-call routing, and may not dispatch into a JEV combo.
+   */
+  internalDecisionCall?: boolean;
   /**
    * How the caller proved data-plane admission (#1686).
    *
