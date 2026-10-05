@@ -42,6 +42,7 @@ import { markLocalRequestLogRefusal } from "../request-log";
 import { CODEX_POOL_REFRESH_INCOMPLETE_LOG_REASON } from "../../codex/pool-refresh-backoff";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { forceRefreshMainAccountToken } from "../../codex/main-account";
+import { safeCallerSessionId } from "../caller-session-identity";
 
 /** Capture caller-owned credential facts once, before combo/WS request reconstruction. */
 export function captureResponsesIngressCredentialOwnership(
@@ -65,12 +66,17 @@ export function captureResponsesIngressCredentialOwnership(
   };
 }
 
-/** Keep synthesized Claude identity out of request headers reused by policy/combo fallback. */
+/** Normalize caller aliases only on native egress; preserve ingress and fallback identity. */
 export function withClaudeNativeSession(headers: Headers, provider: OcxProviderConfig, sessionId?: string): Headers {
-  if (!sessionId || !isCanonicalOpenAiForwardProvider(provider)
-    || headers.has("session_id") || headers.has("session-id") || headers.has("thread-id")) return headers;
+  // Empty values count as absent, matching materializeCodexUpstreamAuth, so first attempts and
+  // retries rebuilt from caller headers pick the same identity.
+  if (!isCanonicalOpenAiForwardProvider(provider) || headers.get("session_id")) return headers;
+  const alias = ["session-id", "thread-id"].find(name => headers.get(name));
+  const nativeSession = alias ? safeCallerSessionId(headers.get(alias)) : sessionId;
+  // A non-empty invalid alias suppresses weaker metadata identity.
+  if (!nativeSession) return headers;
   const forwarded = new Headers(headers);
-  forwarded.set("session_id", sessionId);
+  forwarded.set("session_id", nativeSession);
   return forwarded;
 }
 
@@ -79,6 +85,10 @@ export type ResponsesAuthResolution =
   | { ok: true; authCtx: CodexAuthContext; headers: Headers; callerAuthHeaders: Headers; substituteMainCredential: boolean }
   | { ok: false; response: Response };
 
+
+export type CodexCredentialOwnershipOptions = Pick<HandleResponsesOptions,
+  "admission" | "callerDirectAuth" | "stripClaudeMainAuthForNoncanonicalForward" | "trustedClaudeMainAuth"
+  | "requestScopedMainCredential" | "authorizationBearerIsProxySecret">;
 
 /**
  * The caller credential the final Codex auth resolution will be given, as far as the ROUTE
@@ -90,15 +100,53 @@ export type ResponsesAuthResolution =
  * an HMAC of exactly this Authorization header. Two copies of this rule would put preview and
  * final auth in different scopes the first time one of them changed.
  */
+/**
+ * The stored native-main credential this process injected itself, when it is the bearer the
+ * resolution will see.
+ *
+ * `handleClaudeMessages` reads `~/.codex/auth.json` and attaches it so OpenAI-backed sidecars stay
+ * reachable on a translated turn. It is OUR credential, not the caller's -- the ingress says so
+ * where it sets `nativeCallerAuth` and `callerDirectAuth` to null for exactly this reason -- and
+ * every reader of the resolution's input headers has to agree about that, or one of them conclud
+ * the request owns a credential that in fact belongs to the Pool.
+ */
+export function injectedClaudeMainBearer(
+  route: Pick<RouteResult, "provider">,
+  options: CodexCredentialOwnershipOptions,
+): { authorization: string; chatgptAccountId?: string } | undefined {
+  return options.stripClaudeMainAuthForNoncanonicalForward === true
+    && isCanonicalOpenAiForwardProvider(route.provider)
+    ? options.trustedClaudeMainAuth : undefined;
+}
+
+function validatedCallerDirectHeaders(
+  config: OcxConfig,
+  route: Pick<RouteResult, "provider">,
+  options: CodexCredentialOwnershipOptions,
+): Headers | undefined {
+  if (!options.callerDirectAuth || !isCanonicalOpenAiForwardProvider(route.provider)) return undefined;
+  const headers = new Headers({ authorization: options.callerDirectAuth.authorization });
+  if (options.callerDirectAuth.chatgptAccountId) headers.set("chatgpt-account-id", options.callerDirectAuth.chatgptAccountId);
+  return captureCallerDirectAuth(headers, config) ? headers : undefined;
+}
+
 export function codexRouteCredentialDomainHeaders(
   req: Request,
   route: RouteResult,
   options: HandleResponsesOptions,
   credentialDomainWasRewritten: boolean,
+  config: OcxConfig,
 ): Headers {
-  const trustedClaudeMainForFinalRoute = options.stripClaudeMainAuthForNoncanonicalForward === true
-    && isCanonicalOpenAiForwardProvider(route.provider)
-    ? options.trustedClaudeMainAuth : undefined;
+  const callerDirect = validatedCallerDirectHeaders(config, route, options);
+  if (callerDirect) {
+    const headers = new Headers(req.headers);
+    headers.set("authorization", callerDirect.get("authorization")!);
+    const accountId = callerDirect.get("chatgpt-account-id");
+    if (accountId) headers.set("chatgpt-account-id", accountId);
+    else headers.delete("chatgpt-account-id");
+    return headers;
+  }
+  const trustedClaudeMainForFinalRoute = injectedClaudeMainBearer(route, options);
   if (trustedClaudeMainForFinalRoute) {
     const claudeMainHeaders = new Headers(req.headers);
     claudeMainHeaders.set("authorization", trustedClaudeMainForFinalRoute.authorization);
@@ -140,8 +188,8 @@ export function codexRouteCredentialDomainHeaders(
 export function codexRouteCredentialOwnership(
   authInputHeaders: Headers,
   config: OcxConfig,
-  route: RouteResult,
-  options: HandleResponsesOptions,
+  route: Pick<RouteResult, "provider" | "codexAccountMode" | "codexAccountId">,
+  options: CodexCredentialOwnershipOptions,
 ): { substituteMainCredential: boolean; requestScopedMainCredential: boolean } {
   const canonicalForwardTransport = isCanonicalOpenAiForwardProvider(route.provider);
   const substituteMainCredential = (
@@ -150,12 +198,15 @@ export function codexRouteCredentialOwnership(
   ) && (route.codexAccountMode !== undefined || canonicalForwardTransport);
   return {
     substituteMainCredential,
-    requestScopedMainCredential: (options.requestScopedMainCredential
-      ?? hasForwardableCodexBearer(authInputHeaders, config)) === true
-      && route.codexAccountMode !== undefined
+    // Internal Claude stored-main enrichment stays Pool-owned; ingress ownership survives retries.
+    requestScopedMainCredential: route.codexAccountMode !== undefined
       && route.codexAccountId === undefined
       && canonicalForwardTransport
       && !substituteMainCredential
+      && (validatedCallerDirectHeaders(config, route, options) !== undefined
+        || injectedClaudeMainBearer(route, options) === undefined)
+      && options.requestScopedMainCredential !== false
+      && hasForwardableCodexBearer(authInputHeaders, config),
   };
 }
 
@@ -178,6 +229,7 @@ export async function resolveResponsesCodexAuth(
       route,
       options,
       credentialDomainWasRewritten,
+      config,
     );
     // A caller-auth transport that is not canonical OpenAI (keyless Cursor) consumes the
     // caller's Authorization as its own upstream token. Keep that contract only for a clean
@@ -198,27 +250,6 @@ export async function resolveResponsesCodexAuth(
         if (dropBearer) scoped.delete("authorization");
         scoped.delete("chatgpt-account-id");
         authInputHeaders = scoped;
-      }
-    }
-    // The caller's own Direct credential may cross an internal route change only to the
-    // canonical OpenAI transport, under a predicate deliberately STRICTER than plain
-    // unchanged-route Direct forwarding: a clean non-proxy bearer whose ChatGPT-domain
-    // marker is valid, with any explicit account header matching that marker. Unchanged
-    // routes keep their legacy rules; sidecar enrichment grants no primary authority.
-    if (options.callerDirectAuth && isCanonicalOpenAiForwardProvider(route.provider)) {
-      const directHeaders = new Headers({
-        authorization: options.callerDirectAuth.authorization,
-        ...(options.callerDirectAuth.chatgptAccountId
-          ? { "chatgpt-account-id": options.callerDirectAuth.chatgptAccountId } : {}),
-      });
-      if (captureCallerDirectAuth(directHeaders, config)) {
-        authInputHeaders = new Headers(authInputHeaders);
-        authInputHeaders.set("authorization", options.callerDirectAuth.authorization);
-        if (options.callerDirectAuth.chatgptAccountId) {
-          authInputHeaders.set("chatgpt-account-id", options.callerDirectAuth.chatgptAccountId);
-        } else {
-          authInputHeaders.delete("chatgpt-account-id");
-        }
       }
     }
     // #1686: a caller that proved admission with a BEARER presented one of our own secrets.

@@ -7,6 +7,7 @@ import {
   readConfigAdmissionSnapshot,
   withConfigMutationLockSync,
 } from "../config";
+import { assertCodexHomeOwner, codexHomeOwnerBlocksCompensation, CodexHomeOwnerRefusal, type CodexHomeOwnerRefusalReason } from "./codex-home-owner";
 import { CodexWriteLockSkipped, withCodexWriteLock } from "./codex-write-lock";
 import {
   localClientSkipMessage,
@@ -135,6 +136,7 @@ function runClientWriteGuard(guard: InjectCodexOptions["beforeClientWrite"]): vo
 
 
 export interface CodexInjectResult {
+  ownershipRefusal?: CodexHomeOwnerRefusalReason;
   success: boolean;
   message: string;
   /** False when injection intentionally preserves configuration owned by another provider. */
@@ -193,8 +195,9 @@ export async function injectCodexConfig(
   if (siblingOfLivePort() !== null) {
     return { success: true, status: "skipped", skippedReason: "sibling", message: siblingSkipMessage() };
   }
-  try { return await injectCodexConfigImpl(port, config, options); }
+  try { assertCodexHomeOwner(getCodexHome()); return await injectCodexConfigImpl(port, config, options); }
   catch (error) {
+    if (error instanceof CodexHomeOwnerRefusal) return { success: false, ownershipRefusal: error.reason, message: error.message };
     if (error instanceof CodexHistoryPreflightRefusal) return { success: false, historyPreflightFailureReason: error.message, message: `Codex config injection refused: ${error.message}. Existing configuration and history were preserved.` };
     if (error instanceof CodexInjectRefusal) return error.result;
     throw error;
@@ -416,6 +419,7 @@ async function injectCodexConfigImpl(
    * flip included — before the result is reported.
    */
   const reconcileAndDerivePlan = (): { plan: CodexInjectionPlanOk; nativeInput: string } => {
+    assertCodexHomeOwner(getCodexHome());
     if (missingConfig) createEmptyCodexConfigInBoundary();
     let nativeInput = rawContent;
     let plan = admittedPlan;
@@ -454,6 +458,7 @@ async function injectCodexConfigImpl(
     beforeHistoryArtifactCommitForTests?.(eligibility.kind);
     plan.historyRelabelRefusal = observeHistoryRefusalOrThrow(plan);
     historyArtifactStageForTests?.("after-preflight");
+    assertCodexHomeOwner(getCodexHome());
     writeJournal({
       currentStateIsNative: journalBaselineIsNative(nativeInput),
       configContent: plan.baselineContent,
@@ -464,6 +469,7 @@ async function injectCodexConfigImpl(
     if (hasUnverifiedJournalBaseline(plan.baselineContent, readCurrentProfile())) throw new Error(unverifiedJournalMessage);
     atomicWriteFile(CODEX_CONFIG_PATH, plan.content);
     historyArtifactStageForTests?.("after-config");
+    assertCodexHomeOwner(getCodexHome());
     atomicWriteFile(CODEX_PROFILE_PATH, plan.profileContent);
     markJournalInjectedState(plan.content, plan.profileContent, {
       // A root override is ours whenever we wrote one and no user-owned value won. That is
@@ -527,6 +533,7 @@ async function injectCodexConfigImpl(
         };
       }
       runClientWriteGuard(options.beforeClientWrite);
+      assertCodexHomeOwner(getCodexHome());
       /*
        * One preimage covers the reconcile and the artifact commit together: a
        * refusal after the feature transition hands back the exact bytes the
@@ -538,6 +545,7 @@ async function injectCodexConfigImpl(
         applyNativeArtifacts(resolved.plan, resolved.nativeInput);
         effectivePlan = resolved.plan;
       } catch (error) {
+        if (codexHomeOwnerBlocksCompensation(getCodexHome(), error)) throw error;
         const restored = restoreCodexPreImages(preImages);
         if (!restored.complete) throw new CodexPartialWriteError(restored.unrestored);
         throw error;
@@ -583,6 +591,7 @@ async function injectCodexConfigImpl(
         // transition or capturing preimages; rejection must not compensate over
         // a disconnect's restored files.
         runClientWriteGuard(options.beforeClientWrite);
+        assertCodexHomeOwner(getCodexHome());
         /*
          * Exact pre-images, captured under the lock and used for compensation.
          *
@@ -631,6 +640,7 @@ async function injectCodexConfigImpl(
           }
           applyNativeArtifacts(resolved.plan, resolved.nativeInput);
         } catch (error) {
+          if (codexHomeOwnerBlocksCompensation(getCodexHome(), error)) throw error;
           // Compensate, then ALWAYS throw. Returning a partial result would let the
           // lock commit a row describing an apply that did not finish.
           const restored = restoreCodexPreImages(preImages);

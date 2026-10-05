@@ -107,14 +107,16 @@ Proxy admission secret в любом provider-заголовке удаляет�
 валиден dedicated proxy admission-header. Это также означает,
 что предупреждение «claude.ai connectors are disabled» с `ocx claude` больше не появляется.
 
-Единственное изменение тела касается идентификаторов вызовов инструментов. `tool_use.id` или `tool_result.tool_use_id`, которые Anthropic отклонил бы (символы вне `a-zA-Z0-9_-` или длина больше 64), например созданные маршрутизируемой моделью раньше в сессии, переписываются в допустимые с сохранением пары вызов/результат. Допустимые идентификаторы отправляются без изменений, а на пустой идентификатор локально возвращается 400.
+В этом пробросе с учётными данными вызывающей стороны изменение тела касается только идентификаторов вызовов инструментов. `tool_use.id` или `tool_result.tool_use_id`, которые Anthropic отклонил бы (символы вне `a-zA-Z0-9_-` или длина больше 64), например созданные маршрутизируемой моделью раньше в сессии, переписываются в допустимые с сохранением пары вызов/результат. Допустимые идентификаторы отправляются без изменений, а на пустой идентификатор локально возвращается 400.
+
+В управляемых нативных запросах с сохранёнными OAuth-данными прокси также согласует имена объявленных пользовательских инструментов в отложенных ссылках и встроенных добавлениях/удалениях. Аргументы, схемы и маркеры кеша сохраняются. Для встроенных изменений в системных сообщениях передавайте `inline-tools-2026-09-15`: при наличии соответствующих типизированных блоков построитель сохраняет этот заголовок для API Anthropic.
 
 Отключается параметром `claudeCode.nativePassthrough: false`; другой адрес задаётся через
 `claudeCode.anthropicBaseUrl`.
 
 ## Режимы Claude Desktop: шлюз (по умолчанию) и first-party
 
-Выберите один из взаимоисключающих режимов в **Claude → Desktop → Режим подключения**
+Выберите один из взаимоисключающих режимов в **Подключение → Claude Desktop → Режим подключения**
 или командой `ocx claude desktop apply --first-party|--gateway`.
 
 ### Шлюз (по умолчанию)
@@ -144,7 +146,7 @@ OpenCodex настройки first-party в `settings.json`; при отсутс
 
 ### First-party для Claude Code CLI
 
-Включите переключатель в Claude → Code или выполните `ocx claude config set --first-party on`; для выключения используйте `off`. Включение отклоняется при недоступном прокси, ошибке подготовки CA, нечитаемых настройках или чужих ключах прокси. Выключение сохраняется и при недоступном прокси. Если активен только first-party Desktop, задайте `NO_PROXY='*'` в оболочке для полностью нативного терминала. Описанный выше риск для аккаунта относится и к CLI.
+Включите переключатель в Подключение → Claude или выполните `ocx claude config set --first-party on`; для выключения используйте `off`. Включение отклоняется при недоступном прокси, ошибке подготовки CA, нечитаемых настройках или чужих ключах прокси. Выключение сохраняется и при недоступном прокси. Если активен только first-party Desktop, задайте `NO_PROXY='*'` в оболочке для полностью нативного терминала. Описанный выше риск для аккаунта относится и к CLI.
 Отключение маршрутизации Claude сохраняет управляемые настройки прокси. Пока listener работает, все запросы Messages пересылаются без изменений; после его остановки обычный `claude` не подключится до запуска OpenCodex или выключения first-party Desktop/CLI. Нативный запуск через `ocx claude` задаёт `NO_PROXY=*` только при управляемых настройках без унаследованного чужого HTTPS-прокси. Иначе он сохраняет чужой прокси и предупреждает, что перехват в настройках остаётся активным: выключите first-party или удалите настройку.
 Интерфейс различает нечитаемые настройки (unknown), URL opencodex с токеном и чужим CA (foreign: исправьте HTTPS_PROXY / NODE_EXTRA_CA_CERTS вручную) и выключенную маршрутизацию Claude при ещё работающем listener, который передаёт запросы без изменений (disabled: выключите first-party до перезапуска). Без listener состояние stopped; с управляемым CA, но неверным портом или токеном — broken. При включённом first-party и недоступном перехвате stopped и broken показывают routingOff: маршрутизация Claude или перехват отключены либо этот компьютер является клиентом другого хаба opencodex; включите перехват здесь или выключите first-party, чтобы удалить настройки. Только если перехват доступен, stopped предлагает запустить opencodex, а broken — выполнить `ocx ensure` или перезапустить его. Включённая CLI без прокси показывает отсутствие применения, один включённый клиент с работающим прокси — общий ретранслятор, оба выключенных при оставшемся прокси — остаточную настройку.
 unknown означает, что opencodex не может определить, указывают ли настройки на его прокси. Прокси без токена на 127.0.0.1 вместе с чужим CA получает состояние local: принадлежность не подтверждена; если он больше не нужен, удалите HTTPS_PROXY из ~/.claude/settings.json. disabled возможно только при совпадении настроек с работающим listener; другой порт или токен даёт broken даже при выключенной маршрутизации.
@@ -163,7 +165,7 @@ first-party Desktop и показывает доступные модели open
 Desktop будет офлайн, пока вы полностью не перезапустите его или не отключите режим picker.
 Проверьте состояние командой `ocx claude desktop picker status`, повторите доверие командой
 `ocx claude desktop picker trust`, а для отключения используйте `ocx claude desktop picker off`.
-В панели управления есть такой же переключатель в **Claude → Desktop**. После выбора профиля picker
+В панели управления есть такой же переключатель в **Подключение → Claude Desktop**. После выбора профиля picker
 полностью закройте и снова откройте Claude Desktop.
 
 Режим picker входит в first-party, поэтому к нему также применяется [риск для аккаунта first-party](#first-party-по-выбору).
@@ -205,7 +207,7 @@ ocx claude desktop bind claude-opus-4-6 native/gpt-6.1-sol
 ocx claude desktop unbind claude-opus-4-6
 ```
 
-или используйте **Claude → Desktop → Привязки моделей вкладки Code** в панели управления. Тогда
+или используйте **Подключение → Claude Desktop → Привязки моделей вкладки Code** в панели управления. Тогда
 выбор **Sonnet 4.6** на вкладке Code обслуживается `xai/grok-4.7`. Селектор сохраняет имя
 Anthropic, а системный промпт Claude Code по-прежнему представляет модель как эту Claude-модель,
 поэтому предпочитайте строки, которыми вы иначе не пользуетесь (записи **More models** — хорошие
@@ -338,7 +340,7 @@ Anthropic сохраняют канонические id в обоих инте�
 - **`false`:** выключено — ни маркеров, ни внедрения окна сжатия
 - **задан устаревший `maxContextTokens`:** автоконтекст неявно отключается
 
-Значение сжатия настраивается на странице Claude. **Предупреждение:** если поднять его выше
+Значение сжатия настраивается в **Подключение → Claude**. **Предупреждение:** если поднять его выше
 реального окна модели, эта модель ломается — чат завершится ошибкой раньше, чем успеет сработать
 резюмирование.
 
@@ -577,16 +579,17 @@ id/name; именованный `tool_choice` без имени.
 
 ## GUI (страница Claude)
 
-В боковой панели дашборда есть отдельная страница **Claude** (под API) и переключатель
-**Claude ON** (надпись намеренно одинакова на всех языках). Страница показывает:
+Откройте **Подключение → Claude** в дашборде, чтобы настроить Claude Code. Все настройки собраны на одной странице; **Claude Desktop** находится на отдельной вкладке в разделе **Подключение**. Элементы идут в следующем порядке:
 
-- Аварийный выключатель входящего трафика (переключатель enabled)
-- Быстрый старт (`ocx claude`) и блок ручной настройки окружения
-- Селектор Fast Mode (Auto / ON / OFF)
-- Переключатель автоконтекста и выпадающий список порога сжатия
-- Переключатель автоматической регистрации подагентов
-- Редактор перехвата моделей (modelMap)
-- Живой предпросмотр алиасов селектора
+1. **First-party для Claude Code CLI** — переключатель режима first-party для CLI.
+2. **Начало работы** — команда `ocx claude` и блок ручной настройки окружения.
+3. **Общие** — Fast Mode, автоконтекст, порог сжатия и автоматическая регистрация подагентов.
+4. **Фоновая вспомогательная модель** — выбор модели для фоновых задач.
+5. **Перехват моделей** — редактор правил `modelMap`.
+6. **Доступные модели** — предпросмотр алиасов селектора `/model`.
+7. **Подключение Claude** — общий переключатель маршрутизации, тот же, что на карточке Claude в обзоре раздела **Подключение**.
+
+Панель сохранения остаётся внизу экрана при прокрутке и показывает **Изменений нет** или **Есть несохранённые изменения**. **Отменить изменения** сбрасывает несохранённые настройки, а **Сохранить** применяет их. Переключатели **Подключение Claude** и **First-party для Claude Code CLI** применяются сразу; **Сохранить** никогда не меняет их состояние.
 
 `GET /api/claude-code` возвращает эффективные значения по умолчанию, конфигурацию, реестр
 контекстных окон, эффективное окружение, доступные id маршрутов, алиасы и порт.
@@ -635,3 +638,17 @@ Responses `web_search_call` в парные блоки Anthropic `server_tool_us
 Параметр `claudeCode.stabilizePromptCache: true` в `config.json` переносит поддерживаемые уведомления Claude в конце системных инструкций в последнее пользовательское сообщение на маршрутах с преобразованием. По умолчанию он выключен (`false`). Включайте его только когда такое изменение роли допустимо для ваших клиентов. Примеры в блоках кода и нераспознанный текст сохраняются; нативная передача Anthropic не меняется. Без метаданных ключ кэша рассчитывается по стабилизированным инструкциям. Идентификатор разговора не создаётся, попадания в кэш не гарантируются.
 
 На всех преобразованных Chat-маршрутах напоминания в истории сохраняют свою позицию в разговоре — после ожидаемых результатов инструментов. Поэтому добавление нового напоминания не переписывает начальный системный промпт, а инструкция из середины разговора не оказывается раньше тех ходов, после которых она была написана. Роль этой позиции определяется отдельно: напоминание отправляется как `system`, если провайдер не записал `foldDeveloperRoleToSystem: false` — эта запись означает, что вышестоящий сервис принимает роль `developer`, и тогда она передаётся в той же позиции. Сервис, который её не принимает, отвечает `400 role 'developer' is not allowed`, и ход не начинается, поэтому незаписанное назначение сворачивается. Это работает независимо от `stabilizePromptCache`; нативная передача Anthropic остаётся прежней. Для повторного использования кэша по-прежнему нужны стабильный идентификатор сессии и доступный кэш провайдера. Изменения прежних инструкций или инструментов и сжатие разговора также могут влиять на попадания в кэш; само сохранение порядка напоминаний не гарантирует повторного использования.
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.
+
+Explicit gateway selectors on a generated agent request take precedence over its legacy `ocx-route` fallback, even if the saved force setting changes after launch. For shell or settings overrides of generated roster agents, use an explicit gateway alias; bare Claude ids retain the older-client fallback behavior. Native aliases restore their bare model before the existing credential and model-map checks. Connected launches validate force targets against a fresh authenticated gateway catalog; failed discovery skips automatic force injection, and cached context windows alone never prove availability.

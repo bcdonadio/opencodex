@@ -371,6 +371,9 @@ export interface PersistedUsageEntry {
   durationMs: number;
   /** TTFT relative to the request start (WP4); unset for non-streaming/tool-only. */
   firstOutputMs?: number;
+  /** Request-relative generation window (#6309): first output item, last output delta. Written as a pair. */
+  genStartMs?: number;
+  lastOutputMs?: number;
   usageStatus: UsageStatus;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -1100,6 +1103,10 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     durationMs: entry.durationMs,
     ...(isNonNegativeFiniteNumber(entry.firstOutputMs)
       ? { firstOutputMs: entry.firstOutputMs }
+      : {}),
+    ...(isNonNegativeFiniteNumber(entry.genStartMs) && isNonNegativeFiniteNumber(entry.lastOutputMs)
+      && entry.lastOutputMs >= entry.genStartMs
+      ? { genStartMs: entry.genStartMs, lastOutputMs: entry.lastOutputMs }
       : {}),
     usageStatus: entry.usageStatus,
     ...(entry.usage ? { usage: normalizeUsageValue(entry.usage) } : {}),

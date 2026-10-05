@@ -475,6 +475,13 @@ function fakeRuntime(responder?: (req: Request, body: unknown) => unknown) {
       const custom = responder?.(req, body);
       if (custom instanceof Response) return custom;
       if (custom !== undefined) return Response.json(custom);
+      if (req.method === "PATCH" && url.pathname === "/api/providers") return Response.json({ success: true, name: url.searchParams.get("name"), disabled: false, hasApiKey: false, catalogRefresh: null });
+      if (req.method === "PUT" && url.pathname === "/api/combos") {
+        const saved = body as { id: string; combo: Record<string, unknown> };
+        const combo = Object.fromEntries(Object.entries(saved.combo).filter(([key, value]) => value !== null || key === "defaultEffort"));
+        return Response.json({ success: true, id: saved.id, model: typeof combo.alias === "string" && combo.alias.trim() ? combo.alias.trim() : `combo/${saved.id}`, combo,
+          catalogRefresh: { status: "committed", changed: true, degraded: false, notices: [] } });
+      }
       return Response.json({ ok: true });
     },
   });
@@ -953,7 +960,8 @@ describe("headless GUI parity CLI", () => {
       if (req.method === "PUT") {
         const update = body as { id: string; combo: Record<string, unknown> };
         persisted = { id: update.id, ...update.combo };
-        return { combo: persisted };
+        return { success: true, id: update.id, model: `combo/${update.id}`, combo: update.combo,
+          catalogRefresh: { status: "committed", changed: true, degraded: false, notices: [] } };
       }
       return undefined;
     });
@@ -1001,15 +1009,19 @@ describe("headless GUI parity CLI", () => {
       sizingModel: "gpt-5.5",
       proposals: [
         { role: "explorer", model: "gpt-5.5", status: "proposed", tier: "fast", effortIntent: "glance", proposedModel: "a/small", proposedEffort: "low" },
-        { role: "worker", model: null, status: "proposed", tier: "standard", effortIntent: "measured", proposedModel: "a/mid", proposedEffort: null },
+        { role: "worker", model: null, status: "proposed", tier: "standard", effortIntent: "measured", rationale: "Use \x1b]52;c;cG9pc29uZWQ=\x07 carefully.", proposedModel: "a/mid", proposedEffort: null },
         { role: "vague", model: null, status: "unsized", reason: "no JSON" },
       ],
     };
     const runtime = fakeRuntime(req => req.method === "POST" ? proposals : { ok: true });
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    let output = "";
     try {
       expect(await handleAgentCommand(["roles", "suggest", "--model", "a/sizer", "--json"], runtime.deps)).toBe(0);
+      expect(JSON.parse(logSpy.mock.calls.flat().join("\n"))).toEqual(proposals);
+      logSpy.mockClear();
       expect(await handleAgentCommand(["roles", "suggest", "--apply"], runtime.deps)).toBe(0);
+      output = logSpy.mock.calls.flat().join("\n");
     } finally {
       logSpy.mockRestore();
     }
@@ -1019,6 +1031,8 @@ describe("headless GUI parity CLI", () => {
       { path: "/api/codex-agent-roles/explorer", method: "PUT", body: { model: "a/small", effort: "low" } },
       { path: "/api/codex-agent-roles/worker", method: "PUT", body: { model: "a/mid" } },
     ]);
+    expect(output).not.toMatch(/[\x07\x1b]/);
+    expect(output).toContain("Use \\x1b]52;c;cG9pc29uZWQ=\\x07 carefully.");
   });
 
   test("agent roles suggest --apply skips proposals that already match the role's pin and says so", async () => {
@@ -1103,13 +1117,20 @@ describe("headless GUI parity CLI", () => {
   test("agent injection suggest prints the proposal, and --apply writes it through PUT /api/injection-model", async () => {
     const suggestion = {
       sizingModel: "gpt-5.5",
-      proposal: { model: "a/big", effort: "high", status: "proposed", tier: "fast", effortIntent: "glance", rationale: "Bounded edits.", moveUpIf: "It crosses modules.", moveDownIf: "Never.", proposedModel: "a/small", proposedEffort: "low", reason: null },
+      proposal: { model: "a/big", effort: "high", status: "proposed", tier: "fast", effortIntent: "glance", rationale: "Bounded\x1b]52;c;payload\x07 edits.", moveUpIf: "It crosses\rmodules.", moveDownIf: "Never\u009b31m.", proposedModel: "a/small", proposedEffort: "low", reason: null },
     };
     const runtime = fakeRuntime(req => req.method === "POST" ? suggestion : { ok: true });
     const logSpy = spyOn(console, "log").mockImplementation(() => {});
     try {
       expect(await handleAgentCommand(["injection", "suggest", "rename", "symbols", "--model", "a/sizer", "--json"], runtime.deps)).toBe(0);
+      expect(JSON.parse(logSpy.mock.calls.flat().join("\n"))).toEqual(suggestion);
+      logSpy.mockClear();
       expect(await handleAgentCommand(["injection", "suggest", "rename symbols", "--apply"], runtime.deps)).toBe(0);
+      const output = logSpy.mock.calls.flat().join("\n");
+      expect(output).not.toMatch(/[\x07\x1b\r\u009b]/);
+      expect(output).toContain("Bounded\\x1b]52;c;payload\\x07 edits.");
+      expect(output).toContain("It crosses\\x0dmodules.");
+      expect(output).toContain("Never\\u009b31m.");
       expect(await handleAgentCommand(["injection", "suggest"], runtime.deps)).not.toBe(0);
     } finally {
       logSpy.mockRestore();

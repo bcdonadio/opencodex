@@ -85,6 +85,26 @@ Shared parsing and streaming follow the [request-copy](../transports/byte-accoun
 
 ## Chat Completions inbound native path
 
+### Droid request defaults
+
+`src/server/droid-reasoning-default.ts` reads the model-scoped
+`x-opencodex-droid-default-effort` preference at Chat ingress for both native and
+translated routes. A canonical value fills `reasoning_effort` only when neither
+that property nor nested `reasoning.effort` is present. A concrete route validates
+the preference against that model's effective reasoning ladder. Combo and policy
+routes retain it as logical request intent until each concrete attempt applies the
+existing target-specific reasoning normalization, so an incompatible first target
+cannot discard it for a compatible fallback. With no configured or metadata ladder,
+the routed catalog's canonical fallback ladder applies; an explicit empty per-model
+ladder stays empty. Unsupported or invalid defaults have no effect; even an explicit
+null or invalid effort suppresses the default and retains the existing request
+semantics. Synthetic effort rows keep their selected effort. Provider headers do
+not forward this internal preference. Existing pins and caps run afterward with
+their usual authority. The [Droid integration](../clients/integrations.md#droid-reasoning-defaults)
+owns the persisted per-model values.
+
+### Route selection
+
 `POST /v1/chat/completions` sends eligible `openai-chat` routes directly to the provider's Chat
 Completions endpoint. Route selection reads the raw Chat body and the native request keeps that body
 as its wire source; a Responses projection is constructed only after the native route is declined
@@ -150,7 +170,7 @@ which also decides which role that slot carries. Regression coverage is in
 `tests/responses/chat-inbound-developer-position.test.ts`, which compares the final upstream body
 on the native Chat route, a combo route and the Responses endpoint.
 
-The direct SSE relay accepts CRLF and arbitrary transport chunk boundaries while retaining at most
+The direct SSE relay accepts CR, LF and CRLF across arbitrary transport chunk boundaries while retaining at most
 one bounded event. EOF with an unterminated event and an event above the translator limit are typed
 upstream failures, never successful partial completions. Provider-controlled structured error
 messages are redacted before either JSON or SSE reaches the client. The native path uses the same
@@ -169,17 +189,35 @@ allowance; comments, role-only frames, empty deltas, and usage alone do not. Dow
 pauses this wait budget. A stall emits a Chat error with `upstream_stall_timeout` and logs 502;
 the non-streaming endpoint returns HTTP 502 rather than a successful partial result.
 
-`src/chat/outbound.ts` collects LF/CRLF, multiline data, and split UTF-8 through the shared SSE
+`src/chat/outbound.ts` collects CR/LF/CRLF, multiline data, and split UTF-8 through the shared SSE
 block buffer and tracks appended output bytes incrementally. A caller cancellation before a native
 terminal returns 499 / `client_cancelled`; an already accepted terminal keeps its result. Reader,
 timer, turn, and translator ownership are released through the existing lifecycle.
+
+## HTTP caller conversation identity
+
+Canonical ChatGPT Responses egress additionally normalizes caller aliases in the selected auth
+headers. A non-empty explicit `session_id` wins; otherwise, the first non-empty alias among
+`session-id`, then `thread-id`, supplies `session_id` if its value is safe, and an invalid
+winning alias suppresses weaker identity. Empty values are dropped before this step on every path
+(`materializeCodexUpstreamAuth` in `src/codex/auth-context.ts` and the Claude Messages and Chat
+Completions bridges), so an empty header counts as absent and an empty `session-id` lets a valid
+`thread-id` win. The Claude metadata-derived session applies only when no non-empty canonical
+header or alias remains. Aliases keep their original names on the wire; their validated raw
+caller values are forwarded like an explicit `session_id`, without principal scoping as used for
+promoted `x-session-id`. Original ingress headers and affinity computation are unchanged, as are
+custom and API-key destinations. No identity or originator is invented for marker-free requests.
+
+`src/server/caller-session-identity.ts` promotes validated `x-session-id` on HTTP Responses and Messages before turn admission in `src/server/index/serve-options.ts`. Explicit `session_id`, `session-id`, or `thread-id` presence wins, including empty values; managed Grok promotion runs first on Responses. The trimmed marker must start with an ASCII letter/digit, contain only letters, digits, dots, underscores, colons or hyphens, and stay within 128 characters. Loopback admission keeps it; authenticated admission scopes it with the trusted credential principal into an opaque SHA-256 identifier and skips promotion without that principal. Bodies and abort signals are preserved, and the original Request owns Bun timeout lookup. This provides continuity, not authorization or guaranteed cache hits. Existing explicit/Grok identities, Chat Completions, WebSocket frames, compact and count_tokens retain their behavior.
 
 ## Chat conversation identity forwarding
 
 `src/server/chat-completions.ts` preserves caller `prompt_cache_key` on the Chat-to-Responses
 bridge. Canonical ChatGPT Responses forwarding preserves `session_id`, `session-id`, `thread-id`
-and per-request `x-client-request-id` under their original names. Missing conversation identity
-stays missing; a shared prefix/cache key is not converted into a session. The direct-mode
+and per-request `x-client-request-id` under their original names, and additionally fills an absent
+`session_id` from the first present alias, `session-id` then `thread-id`, when safe, using the
+[precedence and validation rules above](#http-caller-conversation-identity). Missing conversation
+identity stays missing; a shared prefix/cache key is not converted into a session. The direct-mode
 outbound contract is covered by `tests/responses/chat-conversation-affinity.test.ts`.
 This transport contract does not prove a client's emission, Pool selection stability or cache hits.
 
@@ -265,6 +303,15 @@ Optional Codex transport-hint suppression is scoped to canonical Responses clien
 its defaults and exclusions are owned by [Responses transport](../transports/responses.md).
 
 The provider summary default applies at Responses ingress; native Chat and Anthropic inbound preferences keep their existing handling. Raw content is never renamed to a summary. See [bridge contract](../providers/chat-compat.md).
+
+## Claude context rejection
+
+Claude Messages preserves the classified `context_length_exceeded` error through
+`src/claude/outbound.ts`, `src/protocols/encoders/messages.ts`, and
+`src/server/claude-messages.ts`. Streaming output carries one `invalid_request_error`
+terminal with that code; collected and failed-JSON responses return HTTP 400 without
+a retry hint. This mapping adds no recovery send or context pruning. Unknown upstream
+failures, replay refusal, and local translation-buffer limits retain their distinct handling.
 
 ## Claude affinity at final Go dispatch
 

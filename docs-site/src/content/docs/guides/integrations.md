@@ -3,7 +3,7 @@ title: Integrations
 description: Connect opencodex to OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo, Cline CLI, Kilo and Factory Droid from the dashboard — one switch per client, with a backup taken before every write.
 ---
 
-The **Integrations** tab writes opencodex's provider block into a client's own config
+The **Connect** page writes opencodex's provider block into a client's own config
 file, and removes it again. Seventeen clients work this way, each with a switch:
 
 | Client | Config file | Format | When the change takes effect | Credential |
@@ -15,10 +15,10 @@ file, and removes it again. Seventeen clients work this way, each with a switch:
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON5 | immediately, on a running gateway | `OPENCODEX_OPENCLAW_API_KEY` |
 | Kimi Code | `~/.kimi-code/config.toml` | TOML | on restart, or `/reload` | loopback placeholder |
 | gjc | `~/.gjc/agent/models.yml` | YAML | new sessions, or when you open `/model` |non-secret loopback placeholder |
-| DeepSeek Harness (DSH) | `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`) | YAML | hot reload | non-secret loopback bearer placeholder |
+| DeepSeek Harness (DSH) | `$DSH_HOME/profiles/desktop/cordis.patch.yml` (default `~/.dsh/profiles/desktop/cordis.patch.yml`); `$DSH_HOME/settings.yaml` until DSH Desktop creates that profile | YAML | hot reload | non-secret loopback bearer placeholder |
 | MiniMax Code | `~/.minimax/config.yaml` | YAML | new sessions, or after opening the model picker | loopback placeholder |
 | Prime Agent | `~/.prime/agent/models.json` | JSON | new sessions | loopback placeholder |
-| ZCode | `~/.zcode/v2/config.json` | JSON | on restart | loopback placeholder |
+| ZCode | `~/.zcode/v2/provider_config.json` (schemaVersion 1); legacy fallback: `~/.zcode/v2/config.json` | JSON | on restart | loopback placeholder |
 | Aside | `~/.aside/u/<account>/models.json` | JSON | after fully quitting and reopening Aside | loopback placeholder |
 | Raycast | `~/.config/raycast/ai/providers.yaml` | YAML | immediately on save — Raycast watches the file | none — loopback only |
 | omo (Pi / senpi) | `~/.omo/agent/models.json` | JSON | new sessions | loopback placeholder |
@@ -56,15 +56,42 @@ Keep your chosen `modelProfile.default` to apply it when plain `gjc` starts. The
 GJC models with a supported reasoning-effort ladder export `reasoning: true`, `thinking.levels`, and `compat.supportsReasoningEffort`, so GJC can offer an effort choice. Native Codex models receive their standard ladder even when the catalog omits it. Models without a known ladder omit these fields; `none` and `ultra` are not offered because `none` sends no effort and `ultra` folds to `max` on the wire. Refresh the integration to update these model options.
 
 The managed OpenCode integration owns two fragments: `provider.opencodex` (opencode V1) and
-`providers.opencodex` (opencode V2). Only the V2 block carries the per-model reasoning-effort
-variants, so both are written and kept in sync; they name the same provider and model ids, and
-opencode V2 merges them into one provider entry. Apply, Refresh, Disable, and Restore act on both
-fragments, and your other providers, agents, keybinds, and MCP entries stay untouched.
+`providers.opencodex` (opencode V2). Both carry the same declared per-model reasoning choices and
+defaults — the legacy block spells a model's default in its options and its choices as a variant
+map, the V2 block uses the model's settings and a native variant array — so both are written and
+kept in sync; they name the same provider and model ids, and opencode V2 merges them into one
+provider entry. Apply, Refresh, Disable, and Restore act on both fragments, and your other
+providers, agents, keybinds, and MCP entries stay untouched.
 
-Managed DSH support has a compatibility floor of **DSH 0.1.0-rc.6**. OpenCodex owns only
-`llm-pi-ai.providers.opencodex`; Apply and Refresh replace that fragment, Disable removes only that
-fragment, and Restore puts back a recorded snapshot. DSH hot reloads provider changes. These
-operations do not change the user's default model or the native `deepseek-official` provider.
+Both fragments are built from the effective canonical model metadata — as are the Kilo export and
+the `ocx opencode` launcher. An explicit custom override always wins, and a ladder you cleared to
+empty stays empty; a reasoning ladder or default is never invented for a model that declares none.
+An authoritative context limit is carried with an output budget beside it: a known output value —
+explicit or from catalog metadata — wins, otherwise the schema-required 32000 fallback clamped to
+the context, and without an authoritative context the whole limit block is omitted. Capabilities,
+effort ladders, defaults, and an optional input limit appear only when known; the V2 block's
+native capabilities object requires a known tools value, so when tool support is unknown it is
+omitted entirely rather than written partially, and the legacy modality declarations stand.
+"No ladder invented" still writes the controls, never choices: the V2 block always carries an
+explicit variant array — empty when nothing is declared, because omitting it would make OpenCode
+synthesize low/medium/high — and a model with known fixed reasoning but no adjustable ladder gets
+disabled-only suppression instead of an effort: the legacy OpenCode block and Kilo both disable
+every rung id the client would otherwise generate. Neither adds a selectable effort. The
+selectable variants override the per-model
+default — `none` included, offered only when the model's own declared ladder contains it. Whatever
+the client selects, the proxy's pinned upstream reasoning policy still governs the request that
+leaves it.
+
+Managed DSH support has a compatibility floor of **DSH 0.1.0-rc.6**. DSH 0.1.7+ reads provider
+routes from `[id=llm-pi-ai].config.providers.opencodex` in the Desktop profile patch,
+`$DSH_HOME/profiles/desktop/cordis.patch.yml`, which DSH hot reloads. OpenCodex writes that row when the Desktop profile and its patch exist. If
+`$DSH_HOME/profiles/desktop/package.json` exists but `cordis.patch.yml` is missing, Apply refuses:
+create `cordis.patch.yml` containing `[]` (the empty patch DSH writes for a new profile), then
+enable the integration again. Only when there is no Desktop profile does OpenCodex use
+`llm-pi-ai.providers.opencodex` in `$DSH_HOME/settings.yaml`. OpenCodex owns only that provider
+fragment: Apply and Refresh replace it, Disable removes it, and Restore puts back a recorded
+snapshot. These operations do not change the user's default model or the native
+`deepseek-official` provider.
 The managed DSH integration is currently loopback-only and never writes a real credential.
 
 MiniMax Code follows `MINIMAX_DATA_DIR`, then `MAVIS_DATA_DIR`, before falling
@@ -93,7 +120,7 @@ restart. Aside's block is loopback-only and never carries a real credential.
 
 The managed Raycast integration supports **macOS and Windows**. Custom Providers
 is a **Raycast Pro** feature: on a free plan the file is still written, but
-`ocx integration client status --client raycast` and the Integrations page report
+`ocx integration client status --client raycast` and the **Connect** page report
 a warning, because Raycast will not read it. On macOS or Windows, open Raycast →
 Settings → AI → **Reveal Providers Config** once so the `ai` folder exists.
 On these supported platforms, opencodex uses that folder as its install signal
@@ -228,7 +255,7 @@ Older versions may ignore or discard the option; a valid configuration alone doe
 Hermes sends the header. Conversation isolation, compaction lineage and auxiliary/child requests
 follow Hermes' affinity semantics. This setting does not guarantee a particular cache-hit rate.
 
-For an existing managed integration, open **Integrations → Hermes**, review **Apply**, and confirm
+For an existing managed integration, open **Connect → Hermes**, review **Apply**, and confirm
 the update. Until then, it shows **Update needed** and implicit catalog refresh leaves it unchanged,
 including its model list. Reading the page does not upgrade the configuration. After Apply, normal
 catalog refresh resumes and retains the setting; **Replace** also includes it.
@@ -241,7 +268,7 @@ remain untouched, and the existing snapshot and Restore workflow applies to the 
 
 ## Preview and confirm changes
 
-Apply, Replace, Disable, and Restore now begin with a preview. The dialog shows exactly which
+In the dashboard, Apply, Replace, Disable, and Restore begin with a preview. The dialog shows exactly which
 managed settings will change, including the bounded change paths and whether each change adds,
 updates, or removes a value. Review that plan before confirming.
 
@@ -261,10 +288,11 @@ profiles** remains a separate bulk action and is not bound to one combined previ
 
 **Formatting is generally not preserved.** Applying parses a config and writes it back
 out, so JSON, JSON5 and TOML may be reformatted and comments in JSON5 or TOML are lost.
-OMP, DSH and Hermes are the exceptions: their YAML writers patch only `providers.opencodex` and
-`llm-pi-ai.providers.opencodex`, respectively, preserving
-unrelated provider comments and formatting byte-for-byte. If that exact source range
-cannot be identified safely, the operation refuses instead. For other clients, use
+OMP, DSH and Hermes are the exceptions: OMP and Hermes patch only `providers.opencodex`.
+DSH patches only `[id=llm-pi-ai].config.providers.opencodex` in the Desktop profile patch,
+or `llm-pi-ai.providers.opencodex` in `settings.yaml` when there is no Desktop profile.
+Their YAML writers preserve unrelated provider comments and formatting byte-for-byte. If that exact
+source range cannot be identified safely, the operation refuses instead. For other clients, use
 Restore when you need the previous file bytes: the snapshot is a verbatim copy.
 
 **If a value cannot be rewritten faithfully, the switch refuses instead.** The round
@@ -299,7 +327,9 @@ into any client config.
 **For `ocx opencode`, the launcher's provider blocks win.** That launcher injects
 `provider.opencodex` and `providers.opencodex` through `OPENCODE_CONFIG_CONTENT`, which
 outranks the same entries on disk — the rest of your opencode config still applies as
-usual. The switch here is what matters when you launch `opencode` directly.
+usual. Those blocks are built from the same effective canonical model metadata as the
+exports, so the launcher and the managed integration describe the same models, limits, and
+reasoning choices. The switch here is what matters when you launch `opencode` directly.
 
 ## From the terminal
 
@@ -312,6 +342,84 @@ ocx integration client disable --client hermes
 ocx integration client history --client hermes
 ocx integration client restore --op <opId> [--confirm-drift]
 ```
+
+### Preview and bind a terminal write
+
+The existing direct commands remain supported. To bind a write to a reviewed
+observation, inspect status and save a preview first:
+
+```bash
+ocx integration client preview --help
+ocx integration client status --client hermes --json
+ocx integration client preview --client hermes --operation apply --json > hermes-preview.json
+```
+
+Review `state`, `foreignEdit`, structural `changes`, `canApply` and `willChange`.
+Valid refused and no-op plans exit 0 because inspection succeeded; nothing was
+applied. The plan contains no secret values or full file diff. It uses existing
+passive catalog evidence and never secretly refreshes providers. If unavailable,
+resolve catalog availability separately before requesting a new preview.
+
+Only after reviewing an applicable plan and choosing the write:
+
+```bash
+PLAN_FINGERPRINT="$(jq -er 'select(.canApply == true) | .fingerprint' hermes-preview.json)"
+ocx integration client enable --client hermes --plan-fingerprint "$PLAN_FINGERPRINT" --json
+ocx integration client status --client hermes --json
+```
+
+Fingerprint is concurrency evidence, not authorization. Commit accepts `pN:`
+followed by 32 lowercase hex digits; a refused `pN:unbound` cannot commit. Repeat
+exact client/action/profile/options. Preview `overwrite` maps to enable with
+`--overwrite-conflict`; preview `disable` maps to disable. Stale commit exits 5,
+prints re-preview guidance on stderr and leaves stdout empty. It never adopts a
+replacement fingerprint or retries. Other failures use usage 2, not-found 4,
+runtime/malformed 1, with safe stderr rather than a JSON error envelope.
+
+### Inspect restoration drift before replacing it
+
+Use a real history opId; `op-example` below is fictional:
+
+```bash
+ocx integration client history --client aside --profile 1 --json
+ocx integration client restore --op op-example --client aside --profile 1 --preview --json
+```
+
+If drift is refused, inspect the edits. When replacing them is explicitly intended,
+preview with `--confirm-drift`, review, then bind that same intent:
+
+```bash
+ocx integration client restore --op op-example --client aside --profile 1 --preview --confirm-drift --json > restore-preview.json
+```
+
+After review:
+
+```bash
+RESTORE_FINGERPRINT="$(jq -er 'select(.canApply == true) | .fingerprint' restore-preview.json)"
+ocx integration client restore --op op-example --client aside --profile 1 --confirm-drift --plan-fingerprint "$RESTORE_FINGERPRINT" --json
+ocx integration client status --client aside --profile 1 --json
+```
+
+Aside preview/bound writes require one profile, not an aggregate target. Generic
+restore omits client/profile; the server derives the non-Aside client from opId.
+The returned plan does not contain opId or all original command inputs, so retain
+that context. `--preview` cannot combine with `--plan-fingerprint`.
+
+### Retire an old recovery record
+
+This permanently retires the record and backup; it does not restore or disable
+the integration. After inspecting history and choosing to lose that recovery point:
+
+```bash
+ocx integration client history remove --op op-example --client aside --profile 1 --yes --json
+ocx integration client history --client aside --profile 1 --json
+```
+
+Use the actual selected opId. No selector addresses the global journal; `--client aside`
+addresses aggregate Aside history and optional `--profile` narrows it. Other client
+selectors are refused for deletion. The newest row is protected. A receipt with
+`snapshotRemoved:false` is committed retirement with incomplete cleanup and exit 1;
+it is not rollback and must not trigger repeated deletion. `journal remove` is an alias.
 
 `--overwrite-conflict` is the terminal form of **Replace**:
 
@@ -331,24 +439,24 @@ ocx mcode
 ```
 
 Once connected, `ocx sync` and `POST /api/sync` refresh owned MCode, Pi, Aside,
-Raycast, and omo catalogs with the current model selection, context windows, and
+Raycast, omo, OpenCode, and Kilo catalogs with the current model selection, context windows, and
 reasoning-effort ladders. Proxy startup refreshes an owned Raycast catalog. Changes to
 model visibility, provider selection, or presets also refresh connected Pi, Aside,
-Raycast, and omo catalogs.
+Raycast, omo, OpenCode, and Kilo catalogs.
 Missing, foreign-edited, or unsafe blocks stay untouched, as do previously owned blocks
 you removed manually.
 An enabled Aside profile is an exception to the usual owned-only refresh: if its account
 directory exists and it has never had an owned block, sync may create its first block when
 that slot is empty. A prior Aside connection enables this behavior for all registered
 profiles by default. Sync does not create missing account directories or replace manual blocks.
-A refused or overlapping refresh is reported separately for each client. Start a new Pi
-session or fully quit and reopen Aside to load the updated file.
+A refused or overlapping refresh is reported separately for each client. Start a new Pi,
+OpenCode, or Kilo session or fully quit and reopen Aside to load the updated file.
 Aside refresh requires a [compatible running proxy](#aside-profile-controls).
 
 If Models reports **“Model selection saved”** together with a client-refresh warning, the
 selection is already saved; one or more client files could not be updated. The warning names
 the affected client and Aside profile, when applicable, and explains the refusal. Open
-**Integrations** to inspect that client or profile before starting a new session. Resolve the
+**Connect** to inspect that client or profile before starting a new session. Resolve the
 reported issue, then retry `ocx sync`; an overlapping operation must finish first. If the
 warning includes a backup path or says recovery did not finish, inspect that recovery state
 before retrying. A successful selection save alone does not confirm client-file recovery.
@@ -408,6 +516,20 @@ successful bulk operation and HTTP 207 with `ok: false` if any profile refuses. 
 entry in `results`: successful profiles are not rolled back when another fails. Desired
 settings remain saved, so retry after addressing the affected profile rather than assuming
 the entire change failed. If saving those settings fails, no profile files are changed.
+
+For a targeted refresh of eligible Aside profiles, rather than broad catalog sync:
+
+```bash
+ocx integration client sync --client aside --json
+ocx integration client status --client aside --json
+```
+
+This uses the existing attested Aside owner and has no profile selector or local
+fallback. `{results:[]}` exits 0 and means no eligible profiles, not applied writes.
+Any failed row returns exit 1 while successful profiles remain updated. Preserve
+per-profile refusal, residual and separately labeled redacted backup information;
+inspect the affected profile before retrying. This refresh is separate from each
+profile's preview/bound mutation workflow.
 
 Each profile has separate ownership and history. Existing user edits, unsafe paths and linked
 catalogs are refused; the existing explicit overwrite and drift-confirmation controls remain
@@ -494,7 +616,7 @@ supported by this generated integration; it requires unauthenticated loopback ac
 ## GitHub Copilot App
 
 The GitHub Copilot desktop app can use opencodex as an OpenAI-compatible model provider. This is a
-manual client setup with no Integrations-tab switch, and it is separate from the upstream
+manual client setup with no switch on **Connect**, and it is separate from the upstream
 `github-copilot` provider, which uses a Copilot subscription as a backend for opencodex.
 
 1. Start opencodex and confirm it answers:
@@ -545,7 +667,8 @@ press Save:
 - The same value is written to `codex.agents.<role>.model` in `~/.omo/omo.jsonc`, which
   LazyCodex 5.1.1 and later reads. If that file does not exist it is not created. If it contains
   comments it is left untouched, because saving would remove them; the tab says so, and you can
-  set the value there by hand.
+  set the value there by hand. Symlinks and non-regular files are rejected; on macOS and Linux,
+  a FIFO is rejected without waiting for a writer. A skipped mirror does not undo the role-file save.
 
 Nothing happens until you press Save; syncing or restarting opencodex never changes a role file.
 New Codex sessions pick up the change. The same controls exist on the command line:
@@ -600,14 +723,18 @@ while another candidate conflicts or cannot be parsed; the other candidate is le
 
 The owned fragment is only `provider.opencodex` (OpenCode V1 shape: `npm`, `options`,
 `models`). Kilo's published schema has no OpenCode V2 `providers` key, so that block is
-not emitted. `$schema`, `model`, `enabled_providers`, MCP, and other keys stay
+not emitted; Kilo instead receives the per-model reasoning choices as a variant map inside
+its provider block, built from the same effective canonical metadata as the OpenCode
+export. `$schema`, `model`, `enabled_providers`, MCP, and other keys stay
 user-owned. Select `opencodex/<provider/model>` in Kilo after applying.
 
 Loopback uses `{env:OPENCODEX_KILO_API_KEY}` as `options.apiKey`. A non-loopback bind
 moves admission to `options.headers["x-opencodex-api-key"]` and never serializes a real
 key. Apply rewrites the whole global file as pretty JSON, so comments and trailing
-commas in other keys are not preserved. Kilo is not on the implicit catalog fan-out;
-refresh it explicitly after changing the routed model selection.
+commas in other keys are not preserved. Kilo is on the implicit catalog fan-out: `ocx
+sync`, `POST /api/sync`, and visibility, provider, or preset changes refresh an owned Kilo
+block under the same safe owned-only rules as every other client, and a new Kilo session
+loads the updated file.
 
 ```bash
 ocx integration client enable --client kilo
@@ -622,6 +749,71 @@ Run Droid once to create `~/.factory`, then explicitly enable this integration w
 Chat Completions endpoint. Choose a row from Droid's `/model` picker. Disable
 removes the managed rows; Undo restores the exact saved file. Other settings and
 custom models remain yours.
+If Droid normalizes a `customModels` row by adding `id` or `index`, OpenCodex ignores those two
+client fields when checking ownership so saved reasoning defaults remain available.
+
+Open **Connect → Factory Droid** (`/#integrations/droid`) to set a reasoning
+default for each connected model. Choose from the model's supported efforts,
+review the changes, then confirm. **No default** clears that model's draft setting;
+use **Save / review changes** and confirm to apply the removal.
+Models without a declared effort list show that no default is available.
+
+The CLI supports the same defaults in Droid apply/overwrite. For example, replace
+the fictional model below with an exact connected ID and supported effort:
+
+```bash
+ocx integration client preview --client droid --operation apply --reasoning-default example/model-a=high --json > droid-preview.json
+```
+
+After reviewing the applicable plan and choosing the write:
+
+```bash
+DROID_FINGERPRINT="$(jq -er 'select(.canApply == true) | .fingerprint' droid-preview.json)"
+ocx integration client enable --client droid --reasoning-default example/model-a=high --plan-fingerprint "$DROID_FINGERPRINT" --json
+ocx integration client status --client droid --json
+```
+
+Repeat `--reasoning-default MODEL=EFFORT` to submit the complete replacement map.
+The last equals sign separates model and effort; case and exact IDs are preserved.
+Duplicate model keys refuse. Omitted flags preserve defaults;
+`--clear-reasoning-defaults` explicitly sends an empty map. To clear, preview with
+that flag and repeat it in the matching enable command. Clear and entries cannot
+combine. These flags are Droid-only and do not apply to disable/restore. Repeat
+the same map in preview and commit; the server validates model-specific efforts
+and refuses stale binding rather than silently accepting a changed map.
+
+For an intended complete clear, preview that separate action:
+
+```bash
+ocx integration client preview --client droid --operation apply --clear-reasoning-defaults --json > droid-clear-preview.json
+```
+
+After reviewing and choosing it:
+
+```bash
+DROID_CLEAR_FINGERPRINT="$(jq -er 'select(.canApply == true) | .fingerprint' droid-clear-preview.json)"
+ocx integration client enable --client droid --clear-reasoning-defaults --plan-fingerprint "$DROID_CLEAR_FINGERPRINT" --json
+```
+
+The default applies only when Droid omits an effort from its request. An explicit
+request effort takes precedence over this default; existing OpenCodex pins and
+caps still apply. Droid may continue to display **Dynamic** even when OpenCodex
+applies the configured default. Requests without the Droid default header are
+unaffected; the header is a request preference, not proof of client identity.
+For combos and routing policies, each concrete target checks the preference
+against its own effort list, so an incompatible first target does not remove it
+from a compatible fallback.
+
+A saved default that the routed model no longer supports is ignored for requests.
+If the connected model's declared effort list no longer includes the saved value,
+it is omitted from the panel's defaults and removed from the managed row on refresh.
+Reviewing without editing lets OpenCodex preserve the remaining supported defaults.
+
+Refresh preserves defaults while the exact `provider/model` selector remains
+connected and declares the saved effort. Renaming a provider, model, or combo alias replaces that managed row
+and clears its default; choose a default for the renamed row again. Disable
+removes the defaults with the managed model rows, and Undo restores the saved
+rows and their defaults together.
 
 Models whose IDs or display names contain `,` or `]` are skipped because the
 managed selector cannot address them safely; export and managed settings show

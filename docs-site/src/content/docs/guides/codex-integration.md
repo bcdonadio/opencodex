@@ -8,7 +8,7 @@ opencodex makes Codex route through the proxy by editing its config
 through the protocol at `GET /v1/models`; it does not pin Codex to the generated local catalog file.
 Every config edit is idempotent and reversible.
 
-The **Integrations** overview has a Codex switch for this native integration. Its switch shows
+The **Connect** overview has a Codex switch for this native integration. Its switch shows
 the latest saved desired state from OpenCodex's configuration, including immediately after a toggle, while the badge reports whether Codex is
 currently observed using the proxy; during cleanup those can briefly differ while the badge
 continues to report the observed state. Disabling names the effective Codex config
@@ -253,7 +253,9 @@ Remote and generic API clients retain the provider's hosted response format.
 Partial previews and URL-only results are not rendered by this compatibility layer.
 Artifacts use the existing retention limit, so save images you want to keep before
 older files are pruned. An invalid image or a failed local write produces a visible
-failure message instead of a broken image link.
+failure message instead of a broken image link. Display batches reject duplicate image
+identities, oversized routing metadata, and output that exceeds the display byte limit;
+these failures return HTTP 502 before streaming or a failed terminal event after it starts.
 
 ### Built-in image generation (`image_gen`)
 
@@ -962,8 +964,22 @@ and exit status. The command also works with the standalone `ocx` shipped in des
 packages: both the installation probe and the installed wrapper use that executable,
 without requiring a separate Bun installation or a source checkout.
 
-Use `ocx codex-shim status` to inspect it and `ocx codex-shim uninstall` to restore
-the saved Codex launcher.
+On macOS and Linux, activate the private wrapper in your current shell after other PATH setup.
+With the default OpenCodex home, run:
+
+```sh
+. "$HOME/.opencodex/codex-shell-env.sh"
+```
+
+With a custom `OPENCODEX_HOME`, use the quoted path printed by `ocx codex-shim install`.
+Add that source line after other PATH setup in your shell startup file to activate future shells.
+OpenCodex does not edit that file or change the parent shell. Legacy in-place Unix shims are not
+auto-migrated; run `ocx codex-shim install` explicitly to migrate them.
+
+Use `ocx codex-shim status` to inspect it. On macOS and Linux, `ocx codex-shim uninstall`
+removes the private overlay files and leaves native Codex intact. Windows keeps in-place
+script wrappers; uninstall restores the saved launcher. See the
+[CLI lifecycle reference](/reference/cli/lifecycle/#ocx-codex-shim-installstatusuninstallremove).
 
 ## Routed models during Codex reserve mode
 

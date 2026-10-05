@@ -59,6 +59,7 @@ import {
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../../codex/catalog/native-models";
 import { isRequestExecutionBudget } from "../../lib/request-execution-budget";
 import type { SingleUseDispatchPermit } from "../../lib/request-execution-budget";
+import { codexRouteCredentialOwnership, type CodexCredentialOwnershipOptions } from "./core-auth";
 import { bindRouteReasoningReplayScope } from "./core-replay";
 import {
   conversationStateBindingFromAuth,
@@ -362,7 +363,7 @@ export interface CodexPoolAccountRetryArgs {
   route: Pick<RouteResult, "providerName" | "modelId" | "provider" | "staticPolicy">;
   parsed: OcxParsedRequest;
   logCtx: RequestLogContext;
-  options: {
+  options: CodexCredentialOwnershipOptions & {
     admission?: DataPlaneAdmission;
     codexAuthPolicy?: CodexAuthPolicyConfig;
     visionDescribeTerminal?: boolean;
@@ -547,7 +548,9 @@ export async function retryCodexPoolOnAlternateAccount(
   } = args;
   const inboundWire = options.inboundWire ?? "responses";
   const entitlementResolver = options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements;
-  const requestScopedMainCredential = options.requestScopedMainCredential === true;
+  const requestScopedMainCredential = codexRouteCredentialOwnership(callerAuthHeaders, config, {
+    provider: route.provider, codexAccountMode: "pool",
+  }, options).requestScopedMainCredential;
   let retryAuthCtx: CodexAuthContext | undefined;
   // A transient 5xx must record even when this request cannot move: the ordinary terminal
   // recorder only fires for an OK event-stream body, so a pre-stream refusal would otherwise
@@ -648,6 +651,7 @@ export async function retryCodexPoolOnAlternateAccount(
         "pool",
         {
           excludeAccountId: firstAuthCtx.accountId,
+          signal: options.abortSignal,
           admission: options.admission,
           codexAuthPolicy: options.codexAuthPolicy,
           modelId: route.modelId,

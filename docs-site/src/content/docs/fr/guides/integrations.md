@@ -3,7 +3,7 @@ title: Intégrations
 description: Connectez opencodex à OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, gjc, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside, Raycast, omo, Cline CLI, Kilo et Factory Droid depuis le tableau de bord — un commutateur par client, avec une sauvegarde avant chaque écriture.
 ---
 
-L'onglet **Intégrations** écrit le bloc fournisseur d'opencodex dans le fichier de configuration du client,
+L'onglet **Connexion** écrit le bloc fournisseur d'opencodex dans le fichier de configuration du client,
 puis peut le retirer. Dix-sept clients fonctionnent ainsi, chacun avec son propre commutateur :
 
 | Client | Fichier de configuration | Format | Prise d'effet de la modification | Identifiant |
@@ -15,10 +15,10 @@ puis peut le retirer. Dix-sept clients fonctionnent ainsi, chacun avec son propr
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON5 | immédiatement, sur une passerelle en cours d'exécution | `OPENCODEX_OPENCLAW_API_KEY` |
 | Kimi Code | `~/.kimi-code/config.toml` | TOML | au redémarrage ou avec `/reload` | valeur fictive de bouclage |
 | gjc | `~/.gjc/agent/models.yml` | YAML | dans les nouvelles sessions ou à l'ouverture de `/model` |non-secret loopback placeholder |
-| DeepSeek Harness (DSH) | `$DSH_HOME/settings.yaml` (`~/.dsh/settings.yaml` par défaut) | YAML | rechargement à chaud | jeton porteur fictif et non secret pour le bouclage |
+| DeepSeek Harness (DSH) | `$DSH_HOME/profiles/desktop/cordis.patch.yml` (`~/.dsh/profiles/desktop/cordis.patch.yml` par défaut) ; `$DSH_HOME/settings.yaml` tant que DSH Desktop n’a pas créé ce profil | YAML | rechargement à chaud | jeton porteur fictif et non secret pour le bouclage |
 | MiniMax Code | `~/.minimax/config.yaml` | YAML | dans les nouvelles sessions ou après l’ouverture du sélecteur de modèles | valeur fictive de bouclage |
 | Prime Agent | `~/.prime/agent/models.json` | JSON | dans les nouvelles sessions | valeur fictive de bouclage |
-| ZCode | `~/.zcode/v2/config.json` | JSON | au redémarrage | valeur fictive de bouclage |
+| ZCode | `~/.zcode/v2/provider_config.json` (schemaVersion 1) ; repli historique : `~/.zcode/v2/config.json` | JSON | au redémarrage | valeur fictive de bouclage |
 | Aside | `~/.aside/u/<account>/models.json` | JSON | après avoir quitté complètement puis rouvert Aside | valeur fictive de bouclage |
 | Raycast | `~/.config/raycast/ai/providers.yaml` | YAML | immédiatement à l'enregistrement — Raycast surveille le fichier | aucun — bouclage uniquement |
 | omo | `~/.omo/agent/models.json` | JSON | nouvelles sessions | espace réservé de bouclage |
@@ -28,12 +28,7 @@ puis peut le retirer. Dix-sept clients fonctionnent ainsi, chacun avec son propr
 
 Les modèles GJC dotés d'une échelle d'effort de raisonnement prise en charge exportent `reasoning: true`, `thinking.levels` et `compat.supportsReasoningEffort`, afin que GJC propose le choix de l'effort. Les modèles Codex natifs reçoivent leur échelle standard même si le catalogue l'omet. Ces champs sont absents sans échelle connue ; `none` n'envoie pas d'effort et `ultra` devient `max` sur le réseau. Actualisez l'intégration pour mettre à jour ces options.
 
-La prise en charge gérée de DSH exige au minimum **DSH 0.1.0-rc.6**. OpenCodex ne possède que le fragment
-`llm-pi-ai.providers.opencodex` : **Appliquer** et **Actualiser** remplacent ce fragment, **Désactiver** ne
-supprime que ce fragment, et **Restaurer** rétablit un instantané enregistré. DSH recharge à chaud les
-modifications de fournisseurs. Ces opérations ne changent ni le modèle par défaut de l'utilisateur ni le
-fournisseur natif `deepseek-official`. L'intégration DSH gérée est actuellement limitée au bouclage et
-n'écrit jamais de véritable identifiant.
+La prise en charge gérée de DSH exige au minimum **DSH 0.1.0-rc.6**. Avec **DSH 0.1.7 et versions ultérieures**, DSH lit les routes dans le patch du profil Desktop, `$DSH_HOME/profiles/desktop/cordis.patch.yml`, qu’il recharge à chaud. Lorsque le profil Desktop et son patch existent, OpenCodex y écrit uniquement `[id=llm-pi-ai].config.providers.opencodex`. Si `$DSH_HOME/profiles/desktop/package.json` existe mais que `cordis.patch.yml` manque, Appliquer refuse : créez `cordis.patch.yml` contenant `[]` (le patch vide que DSH écrit pour un nouveau profil), puis activez à nouveau l’intégration. En l’absence du profil Desktop, il utilise uniquement `llm-pi-ai.providers.opencodex` dans `$DSH_HOME/settings.yaml` comme solution de repli. **Appliquer** et **Actualiser** remplacent ce fragment, **Désactiver** ne supprime que ce fragment, et **Restaurer** rétablit un instantané enregistré. Ces opérations ne changent ni le modèle par défaut de l’utilisateur ni le fournisseur natif `deepseek-official`. L’intégration DSH gérée est actuellement limitée au bouclage et n’écrit jamais de véritable identifiant.
 
 MiniMax Code recherche d’abord `MINIMAX_DATA_DIR`, puis `MAVIS_DATA_DIR`, avant de se rabattre sur
 `~/.minimax`. Son bloc géré ne possède que `custom_provider.opencodex`. Il ne modifie ni `defaultModel`, ni
@@ -45,7 +40,7 @@ qui appartient à la session MCode, est préservé.
 
 Raycast a deux prérequis. Les fournisseurs personnalisés (Custom Providers) sont une fonctionnalité
 **Raycast Pro** : avec un forfait gratuit, le fichier est tout de même écrit, mais
-`ocx integration client status --client raycast` et la page Intégrations signalent un avertissement,
+`ocx integration client status --client raycast` et la page **Connexion** signalent un avertissement,
 car Raycast ne le lira pas. Et Raycast ne crée son dossier `ai` que lorsque vous ouvrez une fois
 Raycast → Settings → AI → **Reveal Providers Config** ; opencodex utilise ce dossier comme signal
 d'installation et indique que le client n'est pas installé tant qu'il n'existe pas. Raycast lit
@@ -162,9 +157,7 @@ tous les profils** reste une action groupée distincte et n'est pas liée à un 
 
 **Le formatage n'est généralement pas préservé.** L'application analyse une configuration avant de la
 réécrire ; JSON, JSON5 et TOML peuvent donc être reformatés, et les commentaires JSON5 ou TOML sont perdus.
-OMP et DSH font exception : leurs outils d'écriture YAML ne modifient que `providers.opencodex` et
-`llm-pi-ai.providers.opencodex`, respectivement, tout en préservant octet par octet les commentaires et le
-formatage des fournisseurs sans rapport. Si la plage source exacte ne peut pas être identifiée de manière
+OMP et DSH font exception : leurs outils d’écriture YAML ne modifient que le fragment géré. Pour OMP, il s’agit de `providers.opencodex` ; pour DSH, de `[id=llm-pi-ai].config.providers.opencodex` dans le patch Desktop, ou de `llm-pi-ai.providers.opencodex` dans `settings.yaml` uniquement si le profil Desktop est absent. Ils préservent octet par octet les commentaires et le formatage des fournisseurs sans rapport. Si la plage source exacte ne peut pas être identifiée de manière
 sûre, l'opération est refusée. Pour les autres clients, utilisez **Restaurer** lorsque vous avez besoin des
 octets précédents du fichier : l'instantané en est une copie exacte.
 
@@ -198,7 +191,10 @@ une configuration cliente.
 
 **Pour `ocx opencode`, le bloc fournisseur du lanceur l'emporte.** Le lanceur injecte
 `provider.opencodex` par `OPENCODE_CONFIG_CONTENT`, qui est prioritaire sur la même entrée enregistrée sur
-le disque ; le reste de votre configuration opencode continue de s'appliquer normalement. Le commutateur
+le disque ; le reste de votre configuration opencode continue de s'appliquer normalement. Ces blocs sont
+construits à partir des mêmes métadonnées canoniques effectives que les exports : capacités, choix de
+raisonnement et limites connues sont repris tels quels, la limite de sortie recourant au besoin au
+repli de 32000 exigé par le schéma, borné au contexte. Le commutateur
 décrit ici est celui qui compte lorsque vous lancez directement `opencode`.
 
 ## Depuis le terminal
@@ -231,10 +227,12 @@ ocx mcode
 ```
 
 Une fois l’intégration connectée, `ocx sync` et `POST /api/sync` actualisent les catalogues MCode,
-Pi, Aside, Raycast et omo gérés. Le démarrage du proxy actualise aussi le catalogue Raycast géré.
-Les changements de visibilité, de fournisseur ou de préréglage actualisent Pi, Aside, Raycast et omo.
-Les blocs absents, modifiés par un tiers, non sûrs ou supprimés manuellement restent intacts ;
-réactivez explicitement l’intégration lorsque vous souhaitez la reconnecter.
+Pi, Aside, Raycast, omo, OpenCode et Kilo gérés. Le démarrage du proxy actualise aussi le
+catalogue Raycast géré. Les changements de visibilité, de fournisseur ou de préréglage actualisent
+Pi, Aside, Raycast, omo, OpenCode et Kilo. Les blocs absents, modifiés par un tiers, non sûrs ou
+supprimés manuellement restent intacts ; réactivez explicitement l’intégration lorsque vous
+souhaitez la reconnecter. Démarrez une nouvelle session Pi, OpenCode ou Kilo pour charger le
+fichier actualisé.
 
 Le CLI distinct de la plateforme MiniMax (`mmx`) n’est pas une intégration à commutateur de fichier. Ses
 commandes textuelles utilisent le point de terminaison compatible avec Anthropic de MiniMax ; OpenCodex
@@ -304,7 +302,7 @@ ocx integration client restore --op <operation-id>
 
 ## Kilo
 
-Kilo n’écrit que `provider.opencodex` dans le premier fichier global existant sous `~/.config/kilo` (`XDG_CONFIG_HOME` déplace ce répertoire ; `kilo.jsonc` est créé si aucun candidat n’existe). Si un autre fichier candidat définit aussi `provider.opencodex`, l’état signale un conflit et Appliquer refuse. Les autres clés restent inchangées. Appliquer réécrit tout le fichier ; commentaires et virgules finales ne sont pas conservés. Sélectionnez `opencodex/<modèle>` dans Kilo.
+Kilo n’écrit que `provider.opencodex` dans le premier fichier global existant sous `~/.config/kilo` (`XDG_CONFIG_HOME` déplace ce répertoire ; `kilo.jsonc` est créé si aucun candidat n’existe). Si un autre fichier candidat définit aussi `provider.opencodex`, l’état signale un conflit et Appliquer refuse. Les autres clés restent inchangées. Les choix de raisonnement par modèle sont écrits sous forme de carte de variantes dans le bloc fournisseur, à partir des mêmes métadonnées canoniques effectives que l’export OpenCode. `ocx sync` et `POST /api/sync` actualisent un bloc Kilo possédé par OpenCodex ; démarrez une nouvelle session Kilo pour charger le fichier actualisé. Appliquer réécrit tout le fichier ; commentaires et virgules finales ne sont pas conservés. Sélectionnez `opencodex/<modèle>` dans Kilo.
 
 Désactiver peut retirer le bloc appartenant à OpenCodex du fichier enregistré même si un autre candidat est en conflit ou ne peut pas être analysé ; cet autre fichier reste intact.
 

@@ -126,7 +126,7 @@ claude.ai girişinizi ve bağlayıcılarını da devre dışı bırakır. İkisi
 hangisini istediğiniz opencodex'in bakabileceği bir şeye bağlıdır, bu nedenle
 varsayılan olarak bunu yapar.
 
-**Claude → Claude Code** altında **Kimlik doğrulama modu**'nu **Otomatik**
+**Bağlantı → Claude** altında **Kimlik doğrulama modu**'nu **Otomatik**
 (varsayılan) olarak bırakın; opencodex her başlatmada karar verir:
 
 | Ne bulur? | Ne yapar? |
@@ -153,7 +153,7 @@ görüntüdür; `ocx claude` ise her zaman canlı olarak çözümler.
 
 ## Claude Desktop modları: ağ geçidi (varsayılan) ve first-party
 
-Birbirini dışlayan modlardan birini **Claude → Desktop → Bağlantı modu** bölümünden veya
+Birbirini dışlayan modlardan birini **Bağlantı → Claude Desktop → Bağlantı modu** bölümünden veya
 `ocx claude desktop apply --first-party|--gateway` komutuyla seçin.
 
 ### Ağ geçidi (varsayılan)
@@ -183,7 +183,7 @@ vekilin ayarları üzerine yazılmaz. Mod değiştirince Desktop'ı tamamen kapa
 
 ### Claude Code CLI first-party
 
-Claude → Code bölümünde CLI anahtarını açın veya `ocx claude config set --first-party on` çalıştırın; kapatmak için `off` kullanın. Yerel vekil kullanılamıyorsa, CA hazırlanamazsa, ayarlar okunamazsa veya anahtarlar başka bir programa aitse açma isteği reddedilir. Kapatma yine de kaydedilir. Yalnız Desktop first-party açıkken terminalde tamamen yerel bağlantı için kabukta `NO_PROXY='*'` ayarlayın. Yukarıdaki hesap riski CLI için de geçerlidir.
+Bağlantı → Claude bölümünde CLI anahtarını açın veya `ocx claude config set --first-party on` çalıştırın; kapatmak için `off` kullanın. Yerel vekil kullanılamıyorsa, CA hazırlanamazsa, ayarlar okunamazsa veya anahtarlar başka bir programa aitse açma isteği reddedilir. Kapatma yine de kaydedilir. Yalnız Desktop first-party açıkken terminalde tamamen yerel bağlantı için kabukta `NO_PROXY='*'` ayarlayın. Yukarıdaki hesap riski CLI için de geçerlidir.
 Claude yönlendirmesini kapatmak yönetilen vekil ayarlarını korur. Dinleyici çalışırken tüm Messages istekleri değiştirilmeden iletilir; durduğunda OpenCodex çalışana veya Desktop/CLI first-party kapatılana kadar doğrudan `claude` bağlanamaz. `ocx claude` yerel başlatması `NO_PROXY=*` değerini yalnızca yönetilen ayarlar varken ve yabancı bir HTTPS vekili miras alınmamışken ayarlar. Aksi halde yabancı vekili korur ve ayarlardaki kesmenin sürdüğünü bildirir: first-party özelliğini kapatın veya ayarı kaldırın.
 Arayüz okunamayan ayarları (unknown), opencodex belirteçli URL ile yabancı CA birleşimini (foreign: HTTPS_PROXY / NODE_EXTRA_CA_CERTS değerlerini elle düzeltin) ve Claude yönlendirmesi kapalıyken dinleyicinin istekleri değiştirmeden iletmeye devam etmesini (disabled: yeniden başlatmadan önce first-party modunu kapatın) ayırt eder. Dinleyici yoksa stopped; yönetilen CA ile port veya belirteç uyuşmuyorsa broken durumudur. First-party açıkken kesme kullanılamıyorsa stopped ve broken, routingOff uyarısını gösterir: Claude yönlendirmesi veya kesme kapalı ya da bu makine başka bir opencodex merkezinin istemcisidir; bu makinede yeniden etkinleştirin veya ayarları kaldırmak için first-party modunu kapatın. Kesme kullanılabilirken stopped opencodex uygulamasını başlatmayı, broken ise `ocx ensure` ya da yeniden başlatmayı önerir. Yalnız CLI açık ama vekil yoksa uygulanmadı, tek istemci açık ve vekil çalışıyorsa paylaşılan iletim, iki istemci kapalıyken vekil kalmışsa artık ayar uyarısı görünür.
 unknown, ayarların hâlâ opencodex vekiline işaret edip etmediğinin belirlenemediği anlamına gelir. Yabancı CA ile birlikte 127.0.0.1 üzerindeki belirteçsiz vekil local durumudur: sahipliği doğrulanamaz; artık kullanmıyorsanız ~/.claude/settings.json içindeki HTTPS_PROXY değerini kaldırın. disabled yalnızca ayarlar çalışan dinleyiciyle eşleşiyorsa geçerlidir; port veya belirteç farklıysa yönlendirme kapalı olsa bile broken görünür.
@@ -202,7 +202,7 @@ komutunu çalıştırın.
 Picker modu açıkken Claude Desktop ağa OpenCodex üzerinden çıkar. OpenCodex durursa Desktop, tamamen yeniden
 başlatılana veya picker modu kapatılana kadar çevrimdışı kalır. Durumu `ocx claude desktop picker status`
 ile görün, güven adımını `ocx claude desktop picker trust` ile tekrarlayın veya `ocx claude desktop picker off`
-ile kapatın. Aynı açma-kapama denetimi **Claude → Desktop** kontrol panelinde de bulunur. Picker profili
+ile kapatın. Aynı açma-kapama denetimi **Bağlantı → Claude Desktop** kontrol panelinde de bulunur. Picker profili
 seçildikten sonra Claude Desktop'ı tamamen kapatıp yeniden açın.
 
 Picker modu first-party'nin parçasıdır; bu nedenle [first-party hesap riski](#first-party-isteğe-bağlı)
@@ -214,7 +214,7 @@ Bu profil yalnızca ağ geçidi modunda Desktop'a yazılır.
 
 Claude Desktop, Claude Code'dan ayrı bir profil kullanır. Mevcut her rotayı dört
 aileden birine (Opus, Fable, Sonnet veya Haiku) yerleştirmek için kontrol
-panelinde **Claude → Desktop** sayfasını açın. Tüm rotalar yeni bir profilde
+panelinde **Bağlantı → Claude Desktop** sayfasını açın. Tüm rotalar yeni bir profilde
 Opus ile başlar. İlk Opus rotası genel varsayılan olur ve boş olmayan her
 ailenin her zaman bir aile varsayılanı vardır.
 
@@ -281,7 +281,7 @@ ocx claude desktop bind claude-opus-4-6 native/gpt-6.1-sol
 ocx claude desktop unbind claude-opus-4-6
 ```
 
-veya kontrol panelinde **Claude → Desktop → Code sekmesi model bağlantıları**'nı kullanın. Bundan
+veya kontrol panelinde **Bağlantı → Claude Desktop → Code sekmesi model bağlantıları**'nı kullanın. Bundan
 sonra Code sekmesinde **Sonnet 4.6** seçildiğinde istek `xai/grok-4.7` tarafından sunulur. Seçicide
 Anthropic etiketi görünmeye devam eder ve Claude Code'un sistem istemi modelin kendisine hâlâ o
 Claude modeli olduğunu söyler; bu yüzden normalde kullanmadığınız satırları tercih edin
@@ -789,17 +789,18 @@ hemen temizler.
 
 ## GUI (Claude sayfası)
 
-Kontrol paneli kenar çubuğunda özel bir **Claude** sayfası (API altında) ve bir
-**Claude ON** geçiş anahtarı (etiket kasıtlı olarak her dilde aynıdır) bulunur.
-Sayfa şunları gösterir:
+Kontrol panelinde **Bağlantı → Claude**, Claude Code ayarlarını tek sayfada gösterir. **Claude Desktop**, **Bağlantı** altında ayrı bir sekmedir. Bağlantı genel görünümündeki Claude kartında da aynı bağlantı anahtarı bulunur.
+Sayfadaki denetimler yukarıdan aşağıya şu sıradadır:
 
-- Gelen acil durdurma anahtarı (etkinleştirme geçişi)
-- Hızlı başlangıç (`ocx claude`) ve manuel ortam bloğu
-- Hızlı Mod seçici (Otomatik / AÇIK / KAPALI)
-- Otomatik bağlam geçişi ve sıkıştırma eşiği açılır menüsü
-- Alt ajan otomatik kayıt geçişi
-- Model müdahale (modelMap) düzenleyicisi
-- Seçici takma adlarının canlı önizlemesi
+- **Claude Code CLI first-party** anahtarı.
+- **Başlarken**: `ocx claude` ve manuel ortam bloğu.
+- **Genel**: Hızlı Mod, otomatik bağlam, sıkıştırma eşiği ve alt ajan otomatik kayıt ayarları.
+- **Arka plan yardımcı modeli**: sohbet özetleri ve konu tespiti gibi arka plan işleri için model seçimi.
+- **Model yakalama**: belirli model isteklerini başka modellere yönlendiren `modelMap` düzenleyicisi.
+- **Kullanılabilir modeller**: `/model` menüsündeki takma adların canlı önizlemesi.
+- **Claude bağlantısı** anahtarı.
+
+Sayfanın altında kaydırırken görünür kalan kaydetme çubuğu, **Değişiklik yok** veya **Kaydedilmemiş değişiklikler** durumunu gösterir. **Geri al**, kaydedilmemiş ayar değişikliklerini geri alır; **Kaydet**, düzenlenen ayarları kaydeder. **Claude bağlantısı** ve **Claude Code CLI first-party** anahtarları hemen uygulanır; **Kaydet** bu iki anahtarın durumunu hiçbir zaman değiştirmez.
 
 `GET /api/claude-code`, geçerli varsayılanları, yapılandırmayı, bağlam penceresi
 kayıt defterini, geçerli ortamı, kullanılabilir rota kimliklerini, takma adları
@@ -860,3 +861,17 @@ Dönüştürülen tüm Chat rotalarında zaman çizelgesi hatırlatmaları, bekl
 ### `anthropicAccountPool.routes`
 
 Havuz açıkken `anthropicAccountPool.routes` kuralları ilk eşleşen model için ilk seçimi ve 429 yeniden denemelerini kayıtlı hesaplarla sınırlar. Uygun hesap yoksa istek yerel olarak reddedilir; `fallback: true` normal havuza izin verir. Kurallar model erişimini kanıtlamaz.
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.
+
+Explicit gateway selectors on a generated agent request take precedence over its legacy `ocx-route` fallback, even if the saved force setting changes after launch. For shell or settings overrides of generated roster agents, use an explicit gateway alias; bare Claude ids retain the older-client fallback behavior. Native aliases restore their bare model before the existing credential and model-map checks. Connected launches validate force targets against a fresh authenticated gateway catalog; failed discovery skips automatic force injection, and cached context windows alone never prove availability.

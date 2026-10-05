@@ -219,6 +219,8 @@ export interface OcxClaudeCodeConfig {
    * definition. Unset inherits the parent session effort.
    */
   subagentEffort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** Optional roster-style model forced on subagents at the next routed Claude Code launch. */
+  subagentModelForce?: string;
   /** Claude-originated web-search override. Unset fields inherit the global sidecar settings. */
   webSearchSidecar?: { backend?: "openai" | "anthropic" | "xai" | "gemini" | "exa"; model?: string };
   /** Claude-originated vision override. Unset fields inherit the global sidecar settings. */
@@ -750,6 +752,8 @@ export interface OcxConfig {
   modelPinnedEfforts?: Record<string, string>;
   compactionRouting?: {
     model: string;
+    /** Incoming model allowlist: exact selectors or provider/*; omitted means all models. */
+    sourceModels?: string[];
     reasoningEffort?: string;
     /** Compaction triggers this override covers; omission means `["manual"]`. */
     triggers?: ("manual" | "auto")[];
@@ -1218,6 +1222,8 @@ export interface OcxConfig {
    */
   anthropicAccountPool?: {
     enabled?: boolean;
+    /** Preserve native Claude Messages while the pool is enabled. Default true; false selects legacy translation. */
+    nativeMessages?: boolean;
     /** Usage % threshold for new-session auto-pick. Default 80. 0 = disabled (affinity/active only). */
     autoSwitchThreshold?: number;
     /** New-session rotation strategy. Default quota (today's behaviour). */

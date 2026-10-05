@@ -144,13 +144,15 @@ varsayılan olarak `OCX_DEBUG=1`'den gelir (eski `OCX_DEBUG_FRAMES=1` de
 
 ### `ocx access <key|endpoints|models|test> ...`
 
-OpenCodex kabul API anahtarlarını yönetin ve harici uç noktaları ile modelleri
-inceleyin. `ocx api-key <list|create|remove> ...`, `ocx access key`'in bir takma
-adıdır.
+OpenCodex erişim API anahtarlarının listesini, harici uç noktaları ve modelleri inceleyin. `ocx api-key`, `ocx access key` komut ailesinin takma adıdır.
+
+Anahtar oluşturma ve anahtar yenilemeyi başlatma işlemleri, hem metin hem de JSON çıktısında yalnızca bir kez gösterilen açık metin kimlik bilgisi döndürür. Ajanlar bu adımları, ajan oturumu dışında bir insanın doğrudan kullandığı terminale bırakmalıdır. Anahtarın kendisini sohbette istemeyin; yalnızca yapılandırmanın ve bağlantı testinin tamamlandığına dair onayı ve gizli olmayan anahtar ile yenileme kimliklerini alın.
 
 ```bash
-ocx access key create deployment
+ocx access key list --json
 ```
+
+Yeni anahtarın yapılandırılıp doğrulanması, eski anahtarı iptal etme izni değildir. Yenilemeyi kesinleştirmek veya eski anahtarı silmek için o anahtarın iptaline yönelik ayrıca açık izin gerekir. İzin verilen işlemden sonra listeyi yeniden kontrol edin. Doğrudan API çağrılarıyla bu süreci aşmaya çalışmayın.
 
 ## İstemci entegrasyonları
 
@@ -278,8 +280,7 @@ diğer sağlayıcıları, ajanları ve MCP girdilerini yok eder.
 :::
 
 Hiçbir anahtar asla serileştirilmez. Yapılandırmalar belgelenmiş bir ortam
-referansı veya gizli olmayan bir geri döngü yer tutucusu taşır. Bir geri döngü
-proxy'si (`127.0.0.1`, varsayılan) hiçbir kabul anahtarı gerektirmez. Referans
+referansı veya gizli olmayan bir geri döngü yer tutucusu taşır. Geri döngü adresi (`127.0.0.1`) tek başına anahtarsız erişimi kanıtlamaz; hedefin politikasını ve uç noktasını kontrol edin. Seçili anahtarla model/ses CLI komutları geri döngüde de açık anahtar girişi gerektirir. Referans
 verilen bir değişkeni yalnızca istemci şeması desteklediğinde ve proxy geri
 döngünün ötesine bağlandığında ayarlayın; kabul anahtarlarının nasıl verildiğini
 görmek için [Uzaktan erişim](/tr/reference/configuration/server/#uzaktan-erişim)
@@ -330,8 +331,22 @@ Sınırlı okuma boyunca yerel tanıtıcılar üst dizinleri ve dosyaları açı
 
 Kimlik veya özet yalnızca gözlem anındaki dosyaları tanımlar; kalıcı güncelleme izni değildir. Seçilen çalışma zamanını, geçmiş yükleyiciyi, etkin npm yapılandırmasını veya araçların gerçekliğini kanıtlamaz. Verilen Node yalnızca gözlemlenir; başlatıcının onu seçeceği kanıtlanmaz. Hiçbir hedef çalıştırılmaz; kayıt deposu isteği, kurulum, yapılandırma yazımı veya süreç denetimi yapılmaz. Mevcut Windows `check`, aday veya yapılandırma dosya sistemi G/Ç işlemlerini hâlâ yapmaz.
 
-### `ocx config <show|get|set|unset|validate|export|import> ...`
+### `ocx config [show|get|set|unset|validate|export|import] ...`
+
+`ocx config [show] [--json] [--source]`, çalışan bir proxy olmadan yerel yapılandırmayı gösterir. `show` atlandığında bayraklardan biri veya ikisi herhangi bir sırayla kullanılabilir. `--source`, tanılama kaynağını, hataları ve uyarıları içerir ve yalnızca görüntüleme için kabul edilir. `--json`, açıkça belirtilen bir eylemden önce gelebilir; çalıştırılan eylemi değiştirmez. Yinelenen `--json` veya `--source` bayrakları ve bilinmeyen bağımsız değişkenler reddedilir.
 
 Doğrulanmış OpenCodex yapılandırmasını inceleyin ve güvenle değiştirin. `show`
 ve `get` sırları maskeler. İçe aktarma yazmadan önce doğrular ve `--yes`
 gerektirir.
+
+### Forced Claude Code subagent model
+
+The Subagents page offers **Force all subagents onto one model**, off by default. Select an exposed roster-style id, such as `combo/tev-auto`, then enable the switch. The roster is offered first; unavailable saved roster entries cannot be force targets.
+
+`ocx agent subagents force combo/tev-auto` sets `claudeCode.subagentModelForce`; `ocx agent subagents force -` clears it. `ocx agent status` reports the setting. `GET /api/subagent-models` returns `force`, `forceAvailable`, and `forceStatus`; `PUT` accepts `{ "force": "combo/tev-auto" }` or `{ "force": null }` without changing the roster. Omitting `force` leaves it unchanged. Invalid or unexposed targets are rejected on write; stale targets are reported and skipped at launch.
+
+This takes effect on the **next routed `ocx claude` launch**, injecting `CLAUDE_CODE_SUBAGENT_MODEL` as an explicit proxy alias (with `[1m]` only for an authoritative million-token window; native Claude targets use a reversible native alias) and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1`. Each nonempty shell-exported variable independently wins. Native launches inject neither variable; plain `claude` is not affected. No plugin files or `settings.json` are modified by this setting.
+
+Claude Code **2.1.257 or newer** is required for FORCE. Plugin and built-in agents (including Explore/Plan) and per-call model arguments are overridden. Forks and subagent skills with `model: inherit` keep the main conversation model. The main loop and Haiku/small-fast sidecars are unaffected. Existing roster files remain available.
+
+The dashboard warns about old or unknown CLI versions, unavailable targets, and either variable already present in `settings.json` → `env` (which overrides launch env). Detection is read-only and server-local: it cannot inspect another launch shell, another machine, or project-local settings. An unknown result is not proof of force support.

@@ -24,7 +24,7 @@ validation-pending. Import alone supplies no entitlement evidence for the model 
 
 ## Shared catalog
 
-Static policy and observed catalog evidence are separate authorities.
+Static policy and observed catalog evidence are separate authorities. Antigravity grouping and selection projection follow the [discovered effort-family contract](providers-and-adapters.md#antigravity-effort-families).
 `src/providers/resolved-model-policy.ts` resolves and freezes only registry/operator static facts,
 hard wire pins, aliases, and explicit false/empty declarations. Discovery responses, generated
 metadata, cache freshness, availability, credentials, account state, quota and health never enter
@@ -105,7 +105,7 @@ explicit observed-state merge policy and restore native priorities from the once
 backup rather than from a catalog whose priorities may already have been rewritten. A configured
 custom catalog remains the native metadata/template authority even when a bundled-catalog memo is
 warm. Both paths may use an admitted matching bundled memo only as installed-runtime capability
-evidence to remove unsupported reasoning efforts; convergence never probes Codex itself. The default-on scheduler in `src/codex/catalog-auto-refresh.ts` settles bundled runtime and authenticated Codex roster observations before admission, using dynamic imports, a 15-second source wait and the loader's bounded synchronous probes. Source failure uses existing evidence, while a stopped generation cannot start the next source or converge. A changed set records `reloadRequired` through `src/codex/catalog-refresh-status.ts` for observed running app-servers and logs one content-free restart hint; a no-op keeps it while processes remain stale or the restart observation is unknown and clears it when they are fresh or gone. Automatic refresh never restarts processes. `tests/codex-integration/catalog-auto-refresh-scheduler.test.ts` covers these boundaries.
+evidence to remove unsupported reasoning efforts; convergence never probes Codex itself. The default-on scheduler in `src/codex/catalog-auto-refresh.ts` settles bundled runtime and authenticated Codex roster observations before admission, using dynamic imports, a 15-second source wait and the loader's bounded synchronous probes. Source failure uses existing evidence, while a stopped generation cannot start the next source or converge. A changed set records `reloadRequired` through `src/codex/catalog-refresh-status.ts` for observed running app-servers and logs one content-free restart hint; a no-op keeps it while processes remain stale or the restart observation is unknown and clears it when they are fresh or gone. Automatic refresh never restarts processes. `tests/codex-integration/catalog-auto-refresh-scheduler.test.ts` covers these boundaries. `src/codex/catalog/bundled.ts` and `src/codex/runtime.ts` prefer the recorded native `launcherPath` from validated schema-2 PATH-overlay state within their shim candidates, retaining legacy candidates and other priorities. `src/codex/features.ts` follows that backing only when the selected wrapper matches validated state; it never probes unrelated installations. Overlay state and activation follow [the runtime lifecycle contract](runtime.md#lifecycle).
 
 Custom Astra and Daybreak rows acquire native identity -- Responses Lite, multi-agent, context
 windows, display names -- only through the canonical `openai` forward destination and explicit
@@ -280,6 +280,8 @@ Older proxies without `/readyz` fail closed as unreachable. `/healthz` remains t
 liveness contract.
 
 ## Entry shape
+
+Client exports consume effective model metadata without rewriting custom-model editor overrides. `src/server/management/model-row-export-metadata.ts` resolves inheritance from the gathered catalog and registry-enriched configuration; the [export contract](clients/integrations.md#owned-catalog-convergence) separates declared defaults from picker preferences and preserves cleared effort ladders.
 
 Routed entries keep Codex-required metadata such as reasoning levels, shell type, API support flags,
 base instructions, modalities, auto-compact fields, and strict parser booleans. The public slug uses
@@ -591,8 +593,8 @@ Subagent account previews and live routing share the [priority failback](provide
 
 ## Reasoning metadata refresh
 
-Startup and explicit catalog synchronization in `src/codex/sync.ts` refresh the optional
+The sync result in `src/codex/sync.ts` preserves the catalog owner's optional refreshOutcome even when config injection reports applied; injection success alone does not prove catalog convergence. [Provider CLI receipts](cli-management.md#provider-live-operations-and-bounded-editor-input) keep that distinction. Startup and explicit catalog synchronization refresh the optional
 `src/providers/reasoning-metadata.ts` effort snapshot for supported destinations before catalog
 gathering. Each sync waits at most two seconds for a fresh or shared fetch, then continues with the existing snapshot; the fetch retains its own abort deadline. Routed effort reads in
 `src/reasoning-effort.ts` use a snapshot immediately and request a best-effort background refresh
-only when an existing snapshot answers with an expired ladder. Missing or corrupt snapshots do not fetch on the request path; catalog sync owns their bootstrap.
+only when an existing snapshot answers with an expired ladder. Missing or corrupt snapshots do not fetch on the request path; catalog sync owns their bootstrap. Automatic account exhaustion and recovery use the [spendable Codex credit evidence contract](providers/openai-tiers.md#spendable-codex-credits), including independent freshness, upstream refusal, and reset-ticket separation.
