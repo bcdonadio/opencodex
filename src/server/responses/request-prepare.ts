@@ -51,6 +51,7 @@ import {
   codexPoolAffinityKey,
   previewCodexPoolLineage,
   applyCodexAuthContextToProvider,
+  releaseCodexAuthContextProbeLease,
   hasCallerCodexBearer,
   requestOwnedMainPinState,
   requestOwnedMainCredentialIsLive,
@@ -64,6 +65,7 @@ import {
   previousResponseProviderState,
 } from "../../responses/state";
 import { formatErrorResponse } from "../../bridge";
+import { mapCodexAuthContextErrorToResponse } from "./codex-auth-error";
 import type { OcxParsedRequest } from "../../types";
 import { buildToolBridgeMaps } from "./collaboration";
 import { parseRequest } from "../../responses/parser";
@@ -1584,7 +1586,15 @@ export async function prepareResponsesRequest(
     substituteMainCredential = finalAuth.substituteMainCredential;
   }
 
-  route.provider = applyCodexAuthContextToProvider(route.provider, admissionState.authCtx, route.codexAccountMode);
+  try {
+    route.provider = applyCodexAuthContextToProvider(route.provider, admissionState.authCtx, route.codexAccountMode);
+  } catch (error) {
+    releaseCodexAuthContextProbeLease(admissionState.authCtx);
+    if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
+    const mapped = mapCodexAuthContextErrorToResponse(error, { now: Date.now(), accountSelector: route.codexAccountNamespace });
+    if (mapped) return mapped;
+    throw error;
+  }
   applyCodexAccountGatedWireNormalization(parsed, route, logCtx);
   try {
     recordPolicyPreparedDestination(policyScope, route.providerName, parsed._wireModelOverride ?? parsed.modelId);

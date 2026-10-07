@@ -46,10 +46,15 @@ import { cancelBodyOnAbort, signalWithTimeout } from "../lib/abort";
 import { sidecarEnter } from "../lib/sidecar-tracker";
 import { hardenSecretPath } from "../lib/windows-secret-acl";
 import type { OcxConfig } from "../types";
-import { resolveFirstUsableOpenAiSidecar, selectOpenAiImagesProvider } from "../providers/openai-sidecar";
+import {
+  resolveCallerOwnedOpenAiSidecar,
+  resolveFirstUsableOpenAiSidecar,
+  selectOpenAiImagesProvider,
+} from "../providers/openai-sidecar";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential, type DataPlaneAdmission } from "./auth-cors";
 import { admissionScopeDenial } from "./admission-model-scope";
 import { observeRequestTransport, type RequestLogContext } from "./request-log";
+import { nativeLiveCalls } from "./live-native-calls";
 import { codexLogAccountId } from "./responses";
 import type { AdmissionLease } from "../lib/admission";
 import { codexAccountSelectionForTurn } from "./lifecycle";
@@ -615,6 +620,12 @@ async function readRequestBodyCapped(req: Request, maxBytes: number): Promise<Ar
 export interface LiveScopeDestination {
   admission?: DataPlaneAdmission;
   model: string | undefined;
+  /**
+   * The call a sideband join attaches to. When this process did not create it (no entry in
+   * `nativeLiveCalls`), the client created it with its own ChatGPT login — a V3 `existingCall` —
+   * and the join is authenticated as that caller instead of a Pool-selected account.
+   */
+  callerOwnedCallId?: string;
 }
 
 /**
@@ -693,10 +704,15 @@ export async function resolveLiveRelay(
   let forwardAuthError: Response | undefined;
   if (candidates.forwardCandidates.length > 0) {
     try {
-      forward = await resolveFirstUsableOpenAiSidecar(candidates.forwardCandidates, req.headers, config, {
-        modelId: destination?.model,
-        beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
-      });
+      const joinsForeignCall = destination?.callerOwnedCallId !== undefined
+        && !nativeLiveCalls.has(destination.callerOwnedCallId);
+      forward = (joinsForeignCall
+        ? resolveCallerOwnedOpenAiSidecar(candidates.forwardCandidates, req.headers, config)
+        : undefined)
+        ?? await resolveFirstUsableOpenAiSidecar(candidates.forwardCandidates, req.headers, config, {
+          modelId: destination?.model,
+          beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
+        });
       if (forward) {
         logCtx.provider = formatCodexProviderForLog(
           forward.providerName,
@@ -759,7 +775,8 @@ export async function resolveLiveRelay(
       providerBaseUrl: provider.baseUrl,
       usesBackendShape: isChatGptBackendBaseUrl(provider.baseUrl),
       keyed: false,
-      recordOutcome: status => forward.recordOutcome?.(status),
+      // A caller-owned or Direct credential selected no Pool account, so there is nothing to record.
+      ...(forward.recordOutcome ? { recordOutcome: (status: number | "timeout" | "connect_error") => forward.recordOutcome?.(status) } : {}),
     };
   }
   if (forwardAuthError) return forwardAuthError;
@@ -871,6 +888,11 @@ export async function handleLive(
       detachBodyGuard();
     }
     if (payload instanceof Response) return payload;
+    // Remember the calls this proxy created, so their joins keep the Pool account that created
+    // them while a join for any other call is authenticated as its caller (`resolveLiveRelay`).
+    if (upstreamResponse.status >= 200 && upstreamResponse.status < 300) {
+      nativeLiveCalls.record(upstreamResponse.headers.get("location"));
+    }
     const relayHeaders: Record<string, string> = {};
     for (const name of LIVE_RELAY_HEADERS) {
       const value = upstreamResponse.headers.get(name);
@@ -909,6 +931,7 @@ export async function resolveLiveSidebandUpgrade(
   const relay = await resolveLiveRelay(req, config, logCtx, turnAdmissionLease, {
     admission,
     model: liveSidebandModel(target),
+    ...("callId" in target ? { callerOwnedCallId: target.callId } : {}),
   });
   if (relay instanceof Response) return relay;
   return {

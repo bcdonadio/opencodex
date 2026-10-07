@@ -42,6 +42,7 @@ import { markLocalRequestLogRefusal } from "../request-log";
 import { CODEX_POOL_REFRESH_INCOMPLETE_LOG_REASON } from "../../codex/pool-refresh-backoff";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { forceRefreshMainAccountToken } from "../../codex/main-account";
+import { rebindPoolCreditPolicy } from "../../codex/pool-credit-policy";
 import { safeCallerSessionId } from "../caller-session-identity";
 
 /** Capture caller-owned credential facts once, before combo/WS request reconstruction. */
@@ -223,6 +224,7 @@ export async function resolveResponsesCodexAuth(
   credentialDomainWasRewritten = false,
   retainAccountForUploadedFiles = false,
 ): Promise<ResponsesAuthResolution> {
+  let authCtx: CodexAuthContext | undefined;
   try {
     let authInputHeaders = codexRouteCredentialDomainHeaders(
       req,
@@ -287,7 +289,6 @@ export async function resolveResponsesCodexAuth(
     if (route.codexAccountMode === "direct" && !substituteMainCredential) {
       validateForwardAdmissionCredential(authInputHeaders, config);
     }
-    let authCtx: CodexAuthContext;
     if (route.codexAccountMode) {
       authCtx = await resolveCodexAuthContext(authInputHeaders, config, route.codexAccountMode, {
         admission: options.admission,
@@ -370,6 +371,7 @@ export async function resolveResponsesCodexAuth(
       substituteMainCredential,
     };
   } catch (err) {
+    releaseCodexAuthContextProbeLease(authCtx);
     if (options.abortSignal?.aborted || req.signal.aborted) {
       return { ok: false, response: clientCancelledResponse() };
     }
@@ -508,6 +510,9 @@ export async function refreshPoolForwardAuth(args: {
       generation: refreshed.generation,
       poolQuotaWriter: capturePoolQuotaWriter(authCtx.accountId, refreshed),
     };
+    // The spread dropped the WeakMap-bound credit policy: without the live binding a hold or
+    // opt-out landing during the refresh await would go unchecked on every no-override path.
+    rebindPoolCreditPolicy(authCtx, refreshedAuthCtx);
     const provider = applyCodexAuthContextToProvider(
       stripCodexRuntimeProviderFields(route.provider),
       refreshedAuthCtx,
@@ -530,6 +535,18 @@ export async function refreshPoolForwardAuth(args: {
         response: formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication"),
       };
     }
+    if (options.abortSignal?.aborted || req.signal.aborted) {
+      return { ok: false, quarantine: false, response: clientCancelledResponse() };
+    }
+    // The credential itself refreshed; a policy refusal raised afterwards (a credit hold or an
+    // opt-out that landed during the await) is not a refresh failure. Map it the same way the
+    // admission path does — a reset-bound 429, never a 503 telling the caller to sign in — and
+    // never quarantine a valid account for a policy refusal.
+    const policyResponse = mapCodexAuthContextErrorToResponse(error, {
+      accountSelector: route.codexAccountNamespace,
+      now: Date.now(),
+    });
+    if (policyResponse) return { ok: false, quarantine: false, response: policyResponse };
     return {
       ok: false,
       quarantine: false,
