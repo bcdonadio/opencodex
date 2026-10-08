@@ -487,7 +487,7 @@ Every exchange also leaves a content-free stage record (`CodexWsStageRecord`, #4
 Eligible complete-input creates can retain a canonical upstream socket within
 one selected account, credential, thread and turn. Model/tier and immutable
 handshake headers and the selected outbound proxy must also match. Turn-state and turn-metadata headers are
-projected into their same-name per-frame metadata slots; explicit body values win.
+projected into their same-name per-frame metadata slots; explicit body values win. Thread/turn identity can come from the original frame's `x-codex-turn-metadata` JSON when direct ids are absent; malformed or conflicting ids refuse retention, and projected handshake metadata cannot supply fallback identity.
 The pool retains at most 32 sockets, expires idle sockets after 30 seconds, and
 retires a socket after five minutes or 32 successful exchanges (after active work
 finishes). Cancellation, errors, idle unsolicited frames and shutdown dispose it.

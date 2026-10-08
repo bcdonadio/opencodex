@@ -257,8 +257,8 @@ export function resolveFastPolicy(
 /**
  * Fold a caller's service tier onto a canonical fast marker.
  *
- * `ultrafast` is recognised as INTENT even though no shipped catalog advertises it and
- * `DEFAULT_SERVICE_TIER_FAST_WIRE` has no wire mapping for it. That asymmetry is
+ * `ultrafast` is recognised as INTENT, while `DEFAULT_SERVICE_TIER_FAST_WIRE`
+ * has no wire mapping for it. That asymmetry is
  * deliberate: a caller who sends `ultrafast` (which #3429's reporter did, via their own
  * catalog edit) was previously folded to `undefined`, which made `fastIntent` false and
  * recorded `fastOutcome: "not-requested"` — the log asserting the user asked for nothing.
@@ -371,7 +371,7 @@ export function createAdapterTierMetadata(
   const effectiveFastRequested = context.capability === true
     && context.fastWire !== null
     && (context.demandDecision === "force-fast"
-      || (context.demandDecision === "inherit" && callerCanonicalFast));
+      || (context.demandDecision === "inherit" && callerFastFamilyIntent));
   // Known-unsupported routes still need a downgrade when the caller/config expressed Fast intent,
   // but they are deliberately outside the effective-demand calculation above.
   const fastIntent = context.demandDecision === "force-fast"
@@ -397,6 +397,8 @@ export function createAdapterTierMetadata(
   const responseCanConfirmFast = effectiveFastRequested
     && context.eligibility === "eligible"
     && wireValue !== null
+    // An unmapped forwarded tier proves neither Priority delivery nor a missing wire.
+    && canonicalFromWire(context.fastWire, wireValue) === "priority"
     // A destination whose echo is not authoritative can neither confirm nor deny Fast. The
     // ChatGPT-internal Codex backend echoes "default" on priority-scheduled turns, so believing
     // it reported every Fast request as `response-declined` (#2558).
@@ -486,8 +488,8 @@ export function decideTier(
     if (typeof value === "string" && value.length > 0) return { kind: "set", value };
     // A canonical marker with NO wire mapping is not a reason to drop the tier.
     //
-    // `ultrafast` is recognised as intent but deliberately unmapped, because no wire
-    // advertises it. Dropping here would have made recognition strictly worse than not
+    // `ultrafast` is recognised as intent but unmapped by the default declaration.
+    // Dropping here would have made recognition strictly worse than not
     // recognising it at all: before, `ultrafast` was a foreign tier and
     // `foreignCallerTiers: "verbatim"` forwarded it untouched. Falling through keeps that
     // behavior, so an operator-supplied tier still reaches the provider.

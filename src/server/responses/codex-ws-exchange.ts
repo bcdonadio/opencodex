@@ -136,6 +136,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     let detachOwner = () => {};
     let detachSteering = () => {};
     let continuationBase: Record<string, unknown> | undefined;
+    let controlSent = false;
     // Liveness while waiting for the first response event (metadata path only): the
     // silence timer is re-armed by every inbound frame or pong; the pinger runs on a fixed
     // interval so a peer that answers pings can never trip the silence bound while alive.
@@ -419,6 +420,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
               }
               beforeDispatch?.(new Headers(headers));
               if (frame.type === "response.create") continuationBase = prepared.outgoing;
+              controlSent = true;
+              correlation?.finish();
               try { ws.send(prepared.text); } catch {
                 // A send failure has unknown delivery. Never replay or fall back.
                 failStream("Native steering send failed; delivery is unknown", "transport_error");
@@ -534,8 +537,15 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         rejectedCorrelation = false;
         firstResponseAt ??= Date.now();
         try {
+          if (!controlSent) correlation?.accept(normalized.payload);
+          const response = normalized.payload.response;
+          if (controlSent && type === "response.created" && record(response)
+            && typeof response.id === "string" && session.hasCompleted(response.id)) {
+            rejectedCorrelation = true;
+            observe({ kind: "mismatch" });
+            throw new Error("codex websocket response identity mismatch");
+          }
           if (nativeControl) steeringEnded = nativeControl.observe(normalized.payload);
-          else correlation?.accept(normalized.payload);
         } catch (error) { failStream(error, "protocol_error"); return; }
         if (!rejectedCorrelation) observe({ kind: "event", payload: normalized.payload, bytes: rawEncodedText.byteLength });
         // Correlation must run first: a reused socket's foreign-stream error settles as a
@@ -581,7 +591,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       }
       if (!controlFrame) relayedEvents += 1;
       if (nativeControl ? steeringEnded : (type === "response.completed" || type === "response.failed" || type === "response.incomplete" || type === "error")) {
-        const completedId = correlation?.completed(normalized.payload) ?? null;
+        const completedId = controlSent ? null : correlation?.completed(normalized.payload) ?? null;
         terminal = true;
         cleanup();
         try { controller.close(); } catch { /* already closed */ }

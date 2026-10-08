@@ -25,7 +25,7 @@ function digest(input: unknown): string {
 }
 
 /** Identity comes from the selected outgoing request, never a model label or caller hint. */
-export function codexWsReuseIdentity(url: string, headers: Record<string, string>, frameText: string, proxy?: string, dialUrl?: string): CodexWsReuseIdentity | null {
+export function codexWsReuseIdentity(url: string, headers: Record<string, string>, frameText: string, proxy?: string, dialUrl?: string, frameTurnMetadata?: unknown): CodexWsReuseIdentity | null {
   if (url !== CODEX_RESPONSES_HTTP_URL) return null;
   let body: unknown;
   try { body = JSON.parse(frameText); } catch { return null; }
@@ -35,13 +35,28 @@ export function codexWsReuseIdentity(url: string, headers: Record<string, string
   if (body.previous_response_id != null || Object.hasOwn(body, "stream_id")
     || Object.hasOwn(body, "generate") || body.background === true) return null;
   const metadata = body.client_metadata;
-  const bodyThread = metadata.thread_id;
+  let turnMetadata: Record<string, unknown> = {};
+  if (frameTurnMetadata !== undefined) {
+    if (typeof frameTurnMetadata !== "string" || frameTurnMetadata.length > 16 * 1024) return null;
+    try {
+      const parsed: unknown = JSON.parse(frameTurnMetadata);
+      if (!record(parsed)) return null;
+      turnMetadata = parsed;
+    } catch { return null; }
+  }
+  for (const field of ["thread_id", "turn_id"] as const) {
+    if (metadata[field] !== undefined && !value(metadata[field])) return null;
+    const nested = turnMetadata[field];
+    if (nested !== undefined && (!value(nested)
+      || (metadata[field] !== undefined && metadata[field] !== nested))) return null;
+  }
+  const bodyThread = metadata.thread_id ?? turnMetadata.thread_id;
   const headerThread = headers["thread-id"];
   if (bodyThread !== undefined && !value(bodyThread)) return null;
   if (headerThread !== undefined && !value(headerThread)) return null;
   if (bodyThread !== undefined && headerThread !== undefined && bodyThread !== headerThread) return null;
   const thread = bodyThread ?? headerThread;
-  const turn = metadata.turn_id;
+  const turn = metadata.turn_id ?? turnMetadata.turn_id;
   const account = headers["chatgpt-account-id"];
   const authorization = headers.authorization;
   if (![thread, turn, account, authorization, body.model].every(value)) return null;

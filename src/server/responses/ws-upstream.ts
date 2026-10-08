@@ -212,14 +212,15 @@ export function codexWsUpstreamFetch(
   }
   let session: CodexWsSession;
   try {
-    // Steering keeps a private physical connection across successor responses; it
-    // must never enter the idle-socket pool or move to a different credential.
+    // Injection keeps a private physical connection. Dormant steering may lease
+    // a same-turn socket; a physical control send makes that exchange one-shot.
     // Plugin rewrite runs per exchange, before the pool lookup. The dialled destination, its
     // headers and its proxy are all part of the reuse identity, so a pooled socket is never
     // reused for a different destination or with stale plugin headers.
     const dial = planCodexWsDial(wsUrl, headers, proxy);
     if (!dial) return sseFallback(url, init);
-    const identity = control ? null : codexWsReuseIdentity(url, dial.headers, frameText, dial.proxy, dial.url);
+    const identity = control && control.kind !== "steering" ? null
+      : codexWsReuseIdentity(url, dial.headers, frameText, dial.proxy, dial.url, prepared.frameTurnMetadata);
     session = (identity ? codexWsPool.acquire(identity, dial.url, dial.headers, dial.proxy) : null)
       ?? new CodexWsSession(dial.url, dial.headers, false, undefined, dial.proxy);
     if (!session.busy && !session.reserve()) {

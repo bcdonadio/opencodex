@@ -91,9 +91,10 @@ function matchesRequirement(item: Frame, stub: Frame): boolean {
 }
 
 /**
- * One downstream turn owns one dedicated native upstream socket, including all
- * automatic successors and required-input continuations. Never registered by a
- * caller-supplied response ID in global state; never lent to another account.
+ * One downstream turn owns an exclusive native upstream socket lease, including
+ * all successors and required-input continuations. An ordinary completion may
+ * return a dormant-control lease to the same-account/thread/turn socket pool.
+ * Never registered by a caller-supplied response ID or lent to another account.
  *
  * Opt-in single-lane implementation. Continuations may supply saved tool results and new user messages
  * and validated generation overrides, but cannot change routing or tools. General new turns still use normal dispatch.

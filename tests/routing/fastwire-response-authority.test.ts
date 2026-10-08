@@ -31,7 +31,7 @@ function config(provider: OcxProviderConfig): OcxConfig {
   return { port: 0, defaultProvider: "relay", providers: { relay: provider } };
 }
 
-async function drive(provider: OcxProviderConfig, stream: boolean, responseTier: unknown) {
+async function drive(provider: OcxProviderConfig, stream: boolean, responseTier: unknown, callerTier = "priority") {
   const sent: Record<string, unknown>[] = [];
   const upstream = {
     id: "resp_tier", object: "response", status: "completed", model: "gpt-5.6-sol",
@@ -51,13 +51,13 @@ async function drive(provider: OcxProviderConfig, stream: boolean, responseTier:
   const response = await handleResponses(new Request("http://localhost/v1/responses", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: "relay/gpt-5.6-sol", input: "ping", stream, service_tier: "priority",
+      model: "relay/gpt-5.6-sol", input: "ping", stream, service_tier: callerTier,
     }),
   }), config(provider), log, {});
   const downstream = await response.text();
   expect(response.status).toBe(200);
   expect(sent).toHaveLength(1);
-  expect(sent[0]?.service_tier).toBe("priority");
+  expect(sent[0]?.service_tier).toBe(callerTier);
   expect(sent[0]).not.toHaveProperty("responseTierAuthoritative");
   if (typeof responseTier === "string") {
     expect(downstream).toContain(`"service_tier":"${responseTier}"`);
@@ -66,6 +66,18 @@ async function drive(provider: OcxProviderConfig, stream: boolean, responseTier:
 }
 
 describe("response-tier authority on the final Responses route", () => {
+  test.each([true, false])("Ultrafast serialization and persistence retain uncertainty, stream=%s", async stream => {
+    const log = await drive({ ...gateway, responseTierAuthoritative: false }, stream, "default", "ultrafast");
+    let entry: RequestLogEntry | undefined;
+    addFinalRequestLog("ocx-ultrafast", Date.now(), log, 200, undefined, value => { entry = value; });
+    const restored = normalizeUsageEntryForTest(JSON.parse(JSON.stringify(entry)));
+    expect(restored.tierOutcome).toEqual({
+      wireKind: "service-tier", wireValue: "ultrafast", fastOutcome: "unknown",
+      confirmation: "unknown", responseTierAuthoritative: false, responseServiceTier: "default",
+    });
+    expect(restored.attempts?.[0]?.tierOutcome).toEqual(restored.tierOutcome);
+  });
+
   const routes = [
     { name: "declared relay", provider: { ...gateway, responseTierAuthoritative: false }, authoritative: false },
     { name: "unconfigured relay", provider: gateway, authoritative: true },

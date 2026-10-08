@@ -7,6 +7,9 @@ import { transportObserver } from "../../src/server/transaction-capture";
 import { beginRequestAttempt, type RequestLogContext } from "../../src/server/request-log";
 import { createResponsesPassthroughAdapter } from "../../src/adapters/openai-responses";
 import { withTestTranslatorBudget } from "../helpers/translator-budget";
+import { NativeSteeringChannel } from "../../src/server/responses/native-steering";
+import { NativeSteeringReplay } from "../../src/server/responses/native-steering-replay";
+import { NativeInjectionChannel } from "../../src/server/responses/native-injection";
 
 const URL = "https://chatgpt.com/backend-api/codex/responses";
 const realWebSocket = globalThis.WebSocket;
@@ -15,6 +18,7 @@ let savedProxyEnv: Record<string, string | undefined>;
 let sequence = 0;
 
 class Socket extends EventTarget {
+  static readonly OPEN = 1;
   static all: Socket[] = [];
   static onSend: (socket: Socket, frame: Record<string, unknown>) => void = (socket) => socket.complete();
   readyState = 0;
@@ -66,7 +70,8 @@ test("review: reused socket stale created frame cannot populate the next transac
     response: { id: "response-1", model: "stale-model", usage: { input_tokens: 9, output_tokens: 4 } } }));
   const ctx: RequestLogContext = { provider: "test", model: "test" };
   const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", undefined, undefined, undefined, transportObserver(ctx));
-  await expect(response.text()).rejects.toThrow("identity mismatch");
+  expect(response.status).toBe(502);
+  expect(await response.text()).toContain("identity mismatch");
   expect(ctx.diagnostics?.correlationMismatch).toBe(true);
   expect(ctx.diagnostics?.upstreamResponseId).toBeUndefined();
   expect(ctx.diagnostics?.responseModel).toBeUndefined();
@@ -176,6 +181,161 @@ test("same account/thread/turn reuses one socket without trimming either HTTP in
   expect(Socket.all).toHaveLength(1);
   expect(Socket.all[0]!.frames.map(frame => frame.input)).toEqual(["first full input", "second full input"]);
   expect(Socket.all[0]!.frames.every(frame => !Object.hasOwn(frame, "previous_response_id"))).toBe(true);
+});
+
+test("per-frame turn metadata reuses a socket when the direct turn id is absent", async () => {
+  const options = bodyWith({ client_metadata: {
+    "x-codex-turn-metadata": JSON.stringify({ thread_id: "fixture-thread", turn_id: "fixture-turn" }),
+  } });
+  await drain(options); await drain(options);
+  expect(Socket.all).toHaveLength(1);
+  expect(Socket.all[0]!.frames).toHaveLength(2);
+});
+
+test.each([
+  "not-json", JSON.stringify({ turn_id: "" }), JSON.stringify({ turn_id: 1 }),
+  JSON.stringify({ thread_id: "other-thread", turn_id: "fixture-turn" }),
+  JSON.stringify({ turn_id: "other-turn" }),
+])("malformed or conflicting per-frame turn metadata remains one-shot: %s", async metadata => {
+  const options = bodyWith({ client_metadata: {
+    thread_id: "fixture-thread", turn_id: "fixture-turn", "x-codex-turn-metadata": metadata,
+  } });
+  await drain(options); await drain(options);
+  expect(Socket.all).toHaveLength(2);
+});
+
+test("handshake turn metadata cannot authorize retention of a frame without a turn id", async () => {
+  const options = bodyWith({ client_metadata: {} });
+  const headers = new Headers(options.headers);
+  headers.set("x-codex-turn-metadata", JSON.stringify({ thread_id: "fixture-thread", turn_id: "fixture-turn" }));
+  await drain({ ...options, headers }); await drain({ ...options, headers });
+  expect(Socket.all).toHaveLength(2);
+});
+
+test("enabling steering reuses completed ordinary requests with fresh detached owners", async () => {
+  const contexts: RequestLogContext[] = [];
+  const controls: NativeSteeringChannel[] = [];
+  for (let index = 0; index < 2; index++) {
+    const options = init(`full-${index}`);
+    const control = new NativeSteeringChannel(JSON.parse(options.body as string));
+    const ctx: RequestLogContext = { model: "test", provider: "test" };
+    await (await codexWsUpstreamFetch(URL, options, fallback, "1.4.0", undefined,
+      undefined, undefined, transportObserver(ctx), control)).text();
+    contexts.push(ctx); controls.push(control);
+  }
+  expect(Socket.all).toHaveLength(1);
+  expect(Socket.all[0]!.frames.map(frame => frame.input)).toEqual(["full-0", "full-1"]);
+  expect(contexts.map(ctx => ctx.diagnostics?.connectionReused)).toEqual([false, true]);
+  expect(contexts.map(ctx => ctx.diagnostics?.upstreamRequestSequenceOnConnection)).toEqual([1, 2]);
+  expect(controls.every(control => control.attached && control.ended)).toBe(true);
+  expect(() => controls[0]!.steer({ type: "response.steer", previous_response_id: "response-1", input: "late" }))
+    .toThrow("No active native WebSocket steering transport");
+  expect(Socket.all[0]!.frames).toHaveLength(2);
+});
+
+test("a steering send owns the warm socket until its successor finishes and then retires it", async () => {
+  await drain();
+  Socket.onSend = (socket, frame) => {
+    if (frame.type === "response.create") queueMicrotask(() => socket.emit({
+      type: "response.created", response: { id: "active-response" },
+    }));
+  };
+  const options = init();
+  const control = new NativeSteeringChannel(JSON.parse(options.body as string));
+  const response = await codexWsUpstreamFetch(URL, options, fallback, "1.4.0", undefined,
+    undefined, undefined, undefined, control);
+  const socket = Socket.all[0]!;
+  control.steer({ type: "response.steer", previous_response_id: "active-response", input: "update" });
+  socket.emit({ type: "response.steer.accepted", steer: { id: "steer-1", previous_response_id: "active-response" } });
+  socket.emit({ type: "response.completed", response: { id: "active-response", status: "completed", output: [] } });
+  expect(socket.readyState).toBe(1);
+  expect(codexWsPool.snapshot().active).toBe(1);
+  socket.emit({ type: "response.created", response: { id: "successor", previous_response_id: "active-response" } });
+  socket.emit({ type: "response.completed", response: { id: "successor", status: "completed", output: [] } });
+  expect(await response.text()).toContain("successor");
+  expect(socket.frames).toHaveLength(3);
+  expect(socket.readyState).toBe(3);
+  expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
+});
+
+test("warm steering rejects stale response identity before the new replay journal observes it", async () => {
+  await drain();
+  Socket.onSend = socket => queueMicrotask(() => {
+    socket.emit({ type: "response.created", response: { id: "response-1", model: "stale-model" } });
+    socket.emit({ type: "response.completed", response: { id: "response-1", status: "completed", output: [] } });
+  });
+  const options = init();
+  const control = new NativeSteeringChannel(JSON.parse(options.body as string));
+  const remembered: unknown[] = [];
+  control.replayFactory = () => new NativeSteeringReplay([], (_input, response) => remembered.push(response));
+  const ctx: RequestLogContext = { model: "test", provider: "test" };
+  const response = await codexWsUpstreamFetch(URL, options, fallback, "1.4.0", undefined,
+    undefined, undefined, transportObserver(ctx), control);
+  expect(response.status).toBe(502);
+  expect(await response.text()).toContain("identity mismatch");
+  expect(remembered).toHaveLength(0);
+  expect(ctx.diagnostics?.correlationMismatch).toBe(true);
+  expect(ctx.diagnostics?.upstreamResponseId).toBeUndefined();
+  expect(ctx.diagnostics?.responseModel).toBeUndefined();
+  expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
+});
+
+test("a warm steering abort retires its socket and detaches the owner", async () => {
+  await drain();
+  Socket.onSend = socket => queueMicrotask(() => socket.emit({ type: "response.created", response: { id: "active-response" } }));
+  const abort = new AbortController();
+  const options = init("active", abort.signal);
+  const control = new NativeSteeringChannel(JSON.parse(options.body as string));
+  const response = await codexWsUpstreamFetch(URL, options, fallback, "1.4.0", undefined,
+    undefined, undefined, undefined, control);
+  abort.abort();
+  await expect(response.text()).rejects.toThrow();
+  expect(Socket.all).toHaveLength(1);
+  expect(Socket.all[0]!.readyState).toBe(3);
+  expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
+  expect(() => control.steer({ type: "response.steer", previous_response_id: "active-response", input: "late" }))
+    .toThrow("No active native WebSocket steering transport");
+});
+
+test("a steering successor cannot reuse a response id completed by a prior socket lease", async () => {
+  await drain();
+  Socket.onSend = (socket, frame) => {
+    if (frame.type === "response.create") queueMicrotask(() => socket.emit({
+      type: "response.created", response: { id: "active-response" },
+    }));
+  };
+  const options = init();
+  const control = new NativeSteeringChannel(JSON.parse(options.body as string));
+  const remembered: string[] = [];
+  control.replayFactory = () => new NativeSteeringReplay([], (_input, response) => remembered.push(String(response.id)));
+  const ctx: RequestLogContext = { model: "test", provider: "test" };
+  const response = await codexWsUpstreamFetch(URL, options, fallback, "1.4.0", undefined,
+    undefined, undefined, transportObserver(ctx), control);
+  const socket = Socket.all[0]!;
+  control.steer({ type: "response.steer", previous_response_id: "active-response", input: "update" });
+  socket.emit({ type: "response.steer.accepted", steer: { id: "steer-1", previous_response_id: "active-response" } });
+  socket.emit({ type: "response.completed", response: { id: "active-response", status: "completed", output: [] } });
+  socket.emit({ type: "response.created", response: { id: "response-1", model: "stale-model" } });
+  socket.emit({ type: "response.completed", response: { id: "response-1", status: "completed", output: [] } });
+  await expect(response.text()).rejects.toThrow("identity mismatch");
+  expect(remembered).toEqual(["active-response"]);
+  expect(ctx.diagnostics?.correlationMismatch).toBe(true);
+  expect(ctx.diagnostics?.upstreamResponseId).toBe("active-response");
+  expect(ctx.diagnostics?.responseModel).toBeUndefined();
+  expect(socket.readyState).toBe(3);
+  expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
+});
+
+test("injection keeps a private socket even when its ordinary response completes", async () => {
+  const options = bodyWith({ multi_agent: { enabled: true } });
+  for (let index = 0; index < 2; index++) {
+    const control = new NativeInjectionChannel(JSON.parse(options.body as string));
+    await (await codexWsUpstreamFetch(URL, options, fallback, "1.4.0", undefined,
+      undefined, undefined, undefined, control)).text();
+  }
+  expect(Socket.all).toHaveLength(2);
+  expect(Socket.all.every(socket => socket.readyState === 3)).toBe(true);
+  expect(codexWsPool.snapshot()).toEqual({ size: 0, active: 0, timer: false });
 });
 
 test.each(["authorization", "chatgpt-account-id", "originator", "x-client-request-id", "x-custom-policy"])(

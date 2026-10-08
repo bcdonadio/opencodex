@@ -345,9 +345,10 @@ route, an eligible Bun runtime, and a supporting model/execution mode. HTTP fall
 translated/sidecar/Combo paths do not gain steering. Plaintext V2
 restoration is excluded because it is not a transparent native event stream.
 
-`src/server/responses/native-steering.ts` owns one downstream turn and one private physical
+`src/server/responses/native-steering.ts` owns one downstream turn and one exclusive physical
 upstream connection. The connection remains bound to the credential selected by the ordinary
-dispatch path and never enters the idle reuse pool. The normal authentication, admission,
+dispatch path. Ordinary completion can return a dormant steering lease to the same-turn pool;
+any physical control send retires it after the chain. The normal authentication, admission,
 quota observation and pre-dispatch guard remain in force. `response.steer` accepts user-only
 input, preserves its target response ID, and cannot select another account or lane.
 A steering owner is installed only after turn admission; warmup and capacity refusal leave

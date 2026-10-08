@@ -18,6 +18,8 @@ export interface PreparedCodexWsRequest {
   /** Original HTTP body/framing/options with only the canonical routing hint re-derived. */
   httpInit: RequestInit;
   canonical: boolean;
+  /** Original per-frame identity metadata, before handshake headers are projected. */
+  frameTurnMetadata?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -62,6 +64,8 @@ export function prepareCodexWsRequest(url: string, init: RequestInit): PreparedC
     const parsed: unknown = JSON.parse(init.body);
     if (!isRecord(parsed)) return null;
     const body = { ...parsed };
+    const frameTurnMetadata = isRecord(parsed.client_metadata)
+      ? parsed.client_metadata["x-codex-turn-metadata"] : undefined;
     const canonical = url === CODEX_RESPONSES_HTTP_URL;
     const httpHeaders = new Headers(init.headers);
     if (canonical) {
@@ -83,7 +87,7 @@ export function prepareCodexWsRequest(url: string, init: RequestInit): PreparedC
         ? headers["openai-beta"]
         : `${headers["openai-beta"]}, ${WS_BETA}`
       : WS_BETA;
-    return { frameText, headers, httpInit, canonical };
+    return { frameText, headers, httpInit, canonical, frameTurnMetadata };
   } catch {
     return null;
   }

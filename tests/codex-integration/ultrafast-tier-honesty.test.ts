@@ -183,3 +183,46 @@ describe("the Fast toggle does not claim to have suppressed a different tier", (
     expect(outcome?.callerTierDropped).toBe(true);
   });
 });
+
+describe("forwarded Ultrafast is not an unavailable wire", () => {
+  const policy = {
+    capability: true,
+    eligibility: "eligible",
+    adapter: "openai-responses",
+    fastWire: {
+      kind: "service-tier",
+      canonicalToWire: { priority: "priority" },
+      foreignCallerTiers: "verbatim",
+    },
+    forwardCallerTier: true,
+  } as const;
+
+  test.each([false, true])("unmapped Ultrafast stays unknown with response authority %s", authoritative => {
+    const decision = decideTier(policy, undefined, "ultrafast");
+    expect(decision).toEqual({ kind: "forward-caller" });
+    const tracker = createAdapterTierMetadata(
+      tierObservationContext(policy, undefined, "ultrafast", authoritative),
+      decision, "service-tier", "ultrafast",
+    )!;
+    tracker.observeResponseServiceTier("default");
+    expect(tracker.outcome).toEqual({
+      wireKind: "service-tier", wireValue: "ultrafast",
+      fastOutcome: "unknown", confirmation: "unknown",
+      responseTierAuthoritative: authoritative, responseServiceTier: "default",
+    });
+    tracker.markResponseUnparseable();
+    expect(tracker.outcome.fastDowngradeReason).toBeUndefined();
+    expect(tracker.outcome.canonical).toBeUndefined();
+  });
+
+  test("Ultrafast with no emitted tier still reports unavailable", () => {
+    const tracker = createAdapterTierMetadata(
+      tierObservationContext(policy, undefined, "ultrafast", false),
+      { kind: "drop" }, null, null,
+    )!;
+    expect(tracker.outcome).toMatchObject({
+      wireValue: null, fastOutcome: "downgraded", confirmation: "downgraded",
+      fastDowngradeReason: "wire-unavailable", callerTierDropped: true,
+    });
+  });
+});

@@ -33,6 +33,11 @@ that model, even when another account is selected. Explicit account selectors re
 bound to their account. Disabling the setting or losing upstream entitlement removes
 stale Ultrafast metadata.
 
+Logs record the emitted `service_tier` separately from delivery confirmation. A forwarded
+`ultrafast` tier can show `fastOutcome: "unknown"` and `confirmation: "unknown"` when the
+proxy has no scheduling classification for that tier. The ChatGPT route's `default` response
+echo does not prove a downgrade; `wire-unavailable` means the proxy could not emit a usable tier.
+
 The Codex Auth account cards show light-blue `daybreak-blue`, `daybreak-red` and
 `ultrafast` pills beside Pause when that account’s current cached roster confirms
 access. These display indicators do not grant access or change account selection.
@@ -131,6 +136,14 @@ is a `POST` to the canonical Responses URL or a configured WebSocket route, and 
 `stream` to `true` at the root. Everything else stays on SSE over HTTP, and an eligible turn still
 falls back to it when the request cannot be prepared, the `response.create` frame exceeds its size
 limit, or the proxy route cannot carry the socket.
+
+Eligible complete-input requests in the same thread and turn reuse an upstream socket when
+the selected account, credential, model, tier, and handshake settings match. Turn identity
+can come from direct frame metadata or its `x-codex-turn-metadata` JSON. Missing or conflicting
+identity prevents reuse. Idle sockets expire after 30 seconds; changing turns requires a new socket.
+Enabling native steering also permits reuse for ordinary completed requests. Once a steering
+or continuation frame is sent, that socket stays exclusive to its response chain and is retired
+when the chain ends; native injection keeps its separate connection lifecycle.
 
 To keep the built-in ChatGPT provider on HTTP/SSE, set `providers.openai.upstreamWebsocket`
 to `false` in `~/.opencodex/config.json` and restart the proxy. Merge this field into the
