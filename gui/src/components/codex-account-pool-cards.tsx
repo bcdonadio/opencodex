@@ -6,6 +6,7 @@ import { displayAccountId } from "../lib/privacy";
 import AccountPriorityControl, { AccountPriorityBadge } from "./AccountPriorityControl";
 import { DEFAULT_ACCOUNT_PRIORITY, normalizeAccountPriority } from "../account-priority";
 import AccountAutoSwitchControl from "./AccountAutoSwitchControl";
+import CodexAccountEntitlementBadges from "./CodexAccountEntitlementBadges";
 import { AccountCreditsToggle, CreditsOnBadge } from "./CodexCreditSpend";
 import type { CodexAccountEntry } from "./codex-account-pool-types";
 import type { CodexAccountModeState } from "../codex-multi-state";
@@ -163,6 +164,7 @@ export function CodexAccountPoolCards({
                 saving={pauseUpdatingId === a.id}
               />
             </button>
+            <CodexAccountEntitlementBadges entitlements={a.entitlements} />
             {/*
               Rarely used actions fold into a labelled disclosure (aria-expanded from the
               native details; controls revealed inline, DOM tab order — not a menu role).

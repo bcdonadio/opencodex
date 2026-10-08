@@ -436,6 +436,7 @@ export interface CodexAccountModelMetadata {
 
 export type CodexCyberAccessProgram = "standard" | "daybreak_blue" | "daybreak_red";
 export type CodexAvailableAccessPrograms = Readonly<Record<string, readonly string[]>> | null;
+export type CodexAccountDisplayEntitlement = "daybreak-blue" | "daybreak-red" | "ultrafast";
 
 export type CodexModelEntitlementState = "granted" | "denied" | "unknown";
 
@@ -1690,6 +1691,31 @@ export function cachedAvailableAccountGatedNativeModels(
       ) === "granted"
     ))
   )));
+}
+
+/** The latest roster for one stored account, projected without I/O to upstream. */
+export function cachedCodexAccountEntitlements(
+  accountId: string,
+  now = Date.now(),
+): CodexAccountDisplayEntitlement[] {
+  if (accountId.startsWith(DIRECT_CALLER_ACCOUNT_PREFIX)) return [];
+  const identity = currentCredentialIdentity(accountId);
+  if (!identity) return [];
+  let latest: CachedAccountModels | undefined;
+  for (const [key, entry] of accountModelsCache) {
+    if (accountIdOfCacheKey(key) === accountId && entry.credentialIdentity === identity) latest = entry;
+  }
+  // Map insertion order records the newest observation across client versions. A later failed
+  // or expired observation cannot resurrect an older tier claim from a different version.
+  if (!latest?.confirmed || latest.expiresAt <= now) return [];
+  const grants = new Set<CodexAccountDisplayEntitlement>();
+  for (const modelId of latest.models) {
+    const cyber = latest.metadataByModel.get(modelId)?.available_access_programs?.cyber;
+    if (cyber?.includes("daybreak_blue")) grants.add("daybreak-blue");
+    if (cyber?.includes("daybreak_red")) grants.add("daybreak-red");
+    if (latest.ultrafastTierByModel?.has(modelId)) grants.add("ultrafast");
+  }
+  return (["daybreak-blue", "daybreak-red", "ultrafast"] as const).filter(grant => grants.has(grant));
 }
 
 export function isCodexModelEntitlementSnapshotCurrent(snapshot: CodexModelEntitlementSnapshot): boolean {

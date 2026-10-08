@@ -53,6 +53,7 @@
 - `.badge-green`: 성공, 연결됨, 활성
 - `.badge-amber`: 경고, 다음 적용, 주의 필요
 - `.badge-muted`: 중립 메타데이터
+- `.codex-entitlement-badge`: 계정 카드의 Pause 오른쪽에 표시하는 승인된 Codex 권한 (`daybreak-blue`, `daybreak-red`, `ultrafast`). `.badge` 형태와 `--blue`/`--blue-soft` 색을 사용한다.
 - `.notice-ok/.notice-err/.notice-warn`: 한 줄 이상의 상태 메시지
 
 배지는 핵심 본문을 대신하지 않는다. 매우 작은 `.text-micro`는 짧은 상태 문자열에만 허용한다.

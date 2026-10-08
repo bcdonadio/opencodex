@@ -1,0 +1,5 @@
+.codex-entitlement-badge {
+  color: var(--blue);
+  background: var(--blue-soft);
+  white-space: nowrap;
+}

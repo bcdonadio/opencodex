@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { IconLock, IconPause, IconPlay, IconPlus, IconRefresh, IconTicket } from "../icons";
 import AccountPriorityControl, { AccountPriorityBadge } from "./AccountPriorityControl";
 import AccountAutoSwitchControl from "./AccountAutoSwitchControl";
+import CodexAccountEntitlementBadges from "./CodexAccountEntitlementBadges";
 import { AccountCreditsToggle, CreditsOnBadge } from "./CodexCreditSpend";
 import QuotaBars from "./QuotaBars";
 import CodexCreditsRow from "./CodexCreditsRow";
@@ -175,6 +176,7 @@ export function CodexAccountPoolMainCard({
             />
           </button>
         )}
+        <CodexAccountEntitlementBadges entitlements={main?.entitlements} />
         {/* Same disclosure as the pool cards' "more" actions; the main login only carries its
             credits switch there. */}
         {main?.hasCredential && onToggleCreditsAfterLimit && (

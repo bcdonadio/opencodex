@@ -7,6 +7,7 @@ import { useKeyedClientResource } from "../client-resource";
 import { extractAutoSwitchThresholdPayload } from "../codex-auto-switch";
 import { quotaAutoRefreshAvailability, type AccountQuota } from "../codex-quota-utils";
 import { accountNeedsReauth } from "../oauth-health-display";
+import { normalizeCodexAccountEntitlements, type CodexAccountEntitlement } from "../codex-account-entitlements";
 import {
   codexAccountMutationCompletion,
   type CodexAccountMutationCompletion,
@@ -65,6 +66,8 @@ export interface CodexAccountEntry {
   /** Stable non-PII identity shared with Logs and per-account usage aggregation. */
   logLabel?: string;
   plan?: string;
+  /** Confirmed roster grants, projected by the account API for display only. */
+  entitlements?: CodexAccountEntitlement[];
   /** Required, not optional: the API always distinguishes the app-login row. */
   isMain: boolean;
   /** Persisted routing exclusion. Paused accounts remain visible but cannot be selected. */
@@ -328,6 +331,7 @@ export function useCodexAccountPool(apiBase: string, enabled = true): CodexAccou
               const available = quotaAutoRefreshAvailability(account.quota);
               return {
                 ...account,
+                entitlements: normalizeCodexAccountEntitlements(account.entitlements),
                 ...(logLabel ? { logLabel } : {}),
                 priority: normalizeAccountPriority(account.priority),
                 autoSwitchThresholdOverride: normalizeAccountAutoSwitchThreshold(

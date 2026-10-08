@@ -157,6 +157,34 @@ function switchAction(scope: ParentNode): HTMLButtonElement | null {
   return scope.querySelector<HTMLButtonElement>("button.codex-account-switch");
 }
 
+test("account entitlement pills follow Pause on their own main and pool cards", async () => {
+  await mountPool(makeController({ accounts: [
+    { ...mainAccount, entitlements: ["daybreak-blue", "ultrafast"] },
+    { ...account, entitlements: ["daybreak-red"] },
+    { ...account, id: "pool-2", email: "none@example.test" },
+  ] }));
+
+  for (const [email, expected] of [
+    ["main@example.test", ["daybreak-blue", "ultrafast"]],
+    ["pool@example.test", ["daybreak-red"]],
+    ["none@example.test", []],
+  ] as const) {
+    const head = cardFor(email).querySelector(".card-head")!;
+    const pause = head.querySelector("button.codex-auth-action-btn")!;
+    const pills = [...head.querySelectorAll(".codex-entitlement-badge")];
+    expect(pills.map(pill => pill.textContent)).toEqual([...expected]);
+    if (expected.length) expect(pause.nextElementSibling).toBe(pills[0]);
+  }
+});
+
+test("entitlement pills discard duplicate and unknown API values", async () => {
+  await mountPool(makeController({ accounts: [
+    mainAccount,
+    { ...account, entitlements: ["ultrafast", "ultrafast", "unsupported"] as CodexAccountEntry["entitlements"] },
+  ] }));
+  expect([...cardFor("pool@example.test").querySelectorAll(".codex-entitlement-badge")].map(pill => pill.textContent)).toEqual(["ultrafast"]);
+});
+
 test("a pinned pool account says so, and only on its own card", async () => {
   await mountPool(makeController({ activeId: "pool-1", activePinnedId: "pool-1" }));
 

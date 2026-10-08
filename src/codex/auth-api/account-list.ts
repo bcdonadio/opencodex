@@ -33,6 +33,7 @@ import { fetchMainAccountInfoAttempt, EMPTY_MAIN_ACCOUNT_INFO, mainResetCreditsF
 import { fetchPoolAccountQuota, PoolQuotaProbeBusyError, POOL_QUOTA_REFRESH_CONCURRENCY } from "./pool-quota-probe";
 import type { PoolQuotaResult } from "./pool-quota-probe";
 import { getRuntimeConfig, configuredPoolAccount, mapWithConcurrency } from "./runtime-config";
+import { cachedCodexAccountEntitlements, type CodexAccountDisplayEntitlement } from "../model-entitlements";
 
 export function quotaForPlan<T extends Omit<StoredAccountQuota, "updatedAt"> | StoredAccountQuota | null>(
   quota: T,
@@ -138,6 +139,7 @@ export function poolAccountDto(
     ...(plan !== undefined ? { plan } : {}),
     logLabel: codexAccountLogLabel(account),
     isMain: false,
+    entitlements: hasCredential ? cachedCodexAccountEntitlements(account.id) : [],
     paused,
     priority,
     autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(config, account.id),
@@ -163,6 +165,8 @@ export interface CodexAuthAccountDto {
   plan?: string | null;
   logLabel?: string;
   isMain: boolean;
+  /** Current authenticated roster grants for display on this account's card. */
+  entitlements?: CodexAccountDisplayEntitlement[];
   paused: boolean;
   /** Selection order; higher is used earlier. Always present, 0 when unset. */
   priority: number;
@@ -342,7 +346,7 @@ export async function listCodexAuthAccountsSnapshot(
       maskEmails,
     )];
   });
-  const projectSnapshot = (mainRefreshRefused = false): CodexAuthAccountsSnapshot => {
+  const projectSnapshot = (mainRefreshRefused = false, mainRosterReadable = false): CodexAuthAccountsSnapshot => {
     const fetchedMainGeneration = mainResult.identityGeneration ?? captureMainAccountIdentityGeneration();
     const mainSnapshotLive = isMainAccountIdentityGenerationLive(fetchedMainGeneration);
     // An ordinary same-account return can be parsed after its credential was replaced.
@@ -378,6 +382,8 @@ export async function listCodexAuthAccountsSnapshot(
       ...(liveQuotaRefresh ? { quotaRefresh: liveQuotaRefresh } : {}),
       logLabel: "main",
       isMain: true,
+      entitlements: mainRosterReadable && mainSnapshotLive && hasMainCredential
+        ? cachedCodexAccountEntitlements(MAIN_CODEX_ACCOUNT_ID) : [],
       paused: isCodexAccountPaused(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
       mainAccountHardLock: { ...getMainAccountHardLockStatus(runtimeConfig),
         externalUsage: getMainAccountExternalUsageWarning(getObservedMainQuotaIdentityKey()) },
@@ -405,7 +411,7 @@ export async function listCodexAuthAccountsSnapshot(
   const projectionLease = tryAcquireNativeMainProfileClaim();
   if (!projectionLease) return projectSnapshot();
   try {
-    return await withNativeMainCredentialClaim(async () => projectSnapshot(isMainAccountRefreshGrantRejected()));
+    return await withNativeMainCredentialClaim(async () => projectSnapshot(isMainAccountRefreshGrantRejected(), true));
   } catch (error) {
     if (isNativeMainClaimUnavailable(error)) return projectSnapshot();
     throw error;

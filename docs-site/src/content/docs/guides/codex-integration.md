@@ -33,6 +33,10 @@ that model, even when another account is selected. Explicit account selectors re
 bound to their account. Disabling the setting or losing upstream entitlement removes
 stale Ultrafast metadata.
 
+The Codex Auth account cards show light-blue `daybreak-blue`, `daybreak-red` and
+`ultrafast` pills beside Pause when that account’s current cached roster confirms
+access. These display indicators do not grant access or change account selection.
+
 The proxy exposes one bare `openai` Codex-login route with Pool(default) and Direct account modes,
 plus `openai-apikey/<model>` for the configured API key. Pool includes main plus added accounts;
 Direct uses only the caller/main bearer. The routes do not fall back to one another. Shipped v1

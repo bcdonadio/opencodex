@@ -411,6 +411,7 @@
   "codex-model-entitlement-admission.test.ts": "codex-integration",
   "codex-model-entitlement-service-tiers.test.ts": "codex-integration",
   "codex-model-entitlements-program-shape.test.ts": "codex-integration",
+  "codex-account-entitlement-badges.test.ts": "codex-integration",
   "codex-native-availability-nux.test.ts": "codex-integration", "codex-model-entitlements.test.ts": "codex-integration",
   "codex-models-cache-invalidate.test.ts": "codex-integration", "codex-native-residue.test.ts": "codex-integration",
   "codex-pin-drain-projection.test.ts": "codex-integration", "codex-plan.test.ts": "codex-integration",

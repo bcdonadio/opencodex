@@ -333,6 +333,8 @@ The credits module beside `src/codex/quota-types.ts` retains validated WHAM cred
 
 `src/codex/auth-api/account-list.ts` exposes optional `credits` only when `showCodexCredits === true` and the current identity has an observation. Decimal balances remain strings; boolean flags and approximate local/cloud message ranges are allowlisted. Credits never enter persisted quota, routing, reset-credit recovery, or `/api/provider-quotas`, and are never logged. The [config surface](../config.md#config-surface) owns the display switch.
 
+Account DTOs expose display-only `entitlements` (`daybreak-blue`, `daybreak-red`, `ultrafast`) from fresh, confirmed, identity-matching cached rosters. The projection performs no discovery or refresh; absent, expired, unconfirmed or replaced-credential evidence supplies no pills.
+
 ## Quota history publication identity
 
 `src/codex/account-store.ts` assigns each explicit pool credential publication a private random `quotaHistoryIdentity`. Same-account token refresh preserves it, including each alias record's own identity; replacement or deletion retires it. A refresh CAS with a changed upstream account identity rotates the tag and does not propagate that changed identity to old aliases. Credential-only projections omit this metadata.
