@@ -2426,7 +2426,7 @@ export const tr: Record<TKey, string> = {
   "codexAuth.mainHardLockMonitoring": "Koruma açık · izleniyor",
   "codexAuth.mainExternalUsageWarning": "opencodex dışında kullanım olabilir. Engel, kotanın tükenmesini önlemeyebilir.",
   "codexAuth.mainHardLockManage": "Koruma ayarını göster",
-  "codexAuth.ultraFastDesc": "Kendi yapılandırdığınız ultrafast hizmet katmanının katalog yeniden oluşturulurken silinmesini önler ve istek günlüklerinde bu katmanın adını yazar. Ultra Fast’i model seçicisine eklemez: üst kaynak yalnızca Fast duyurur, bu yüzden bir satır eklemek hattın veremeyeceği bir hızı seçtirmek olurdu.",
+  "codexAuth.ultraFastDesc": "Kimliği doğrulanmış bir hesap kataloğu erişimi doğruladığında Ultra Fast’i gösterir ve yönlendirilen modeller için sağladığınız katman meta verilerini korur. Bu ayar erişim hakkı vermez. Havuzdaki modeller, uygun bir hesap bu katmana erişebiliyorsa katmanı gösterebilir; Ultra Fast seçildiğinde başka bir hesap seçili olsa bile istek uygun hesaba yönlendirilir.",
   "codexAuth.ultraFastLoadFailed": "Ultra Fast ayarı okunamadı.",
   "codexAuth.ultraFastEnabled": "Ultra Fast katmanı etkinleştirildi",
   "codexAuth.ultraFastDisabled": "Ultra Fast katmanı devre dışı bırakıldı",

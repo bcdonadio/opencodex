@@ -59,6 +59,7 @@ Native Spark membership and its model-specific request/tool exceptions are remov
   exact rejection and fresh grant before each later send; otherwise ordinary eligible-account
   failover applies.
 
+- Native Pool requests selecting `service_tier: "ultrafast"` use confirmed per-model Ultrafast roster evidence to exclude unentitled accounts, overriding ordinary active-account preferences. Account-qualified bindings stay exact and Direct remains caller-owned; lack of a grant fails closed. Initial selection and bounded alternate-account retries apply the same tier filter.
 - The account-gated set is `gpt-daybreak-blue-latest` and `gpt-6-astra-minor`. Neither has a
   shipped catalog row, so roster absence is the only evidence available for either. Astra Minor
   borrows `gpt-6-astra` capability metadata for catalog rows only; it has no wire normalization, so

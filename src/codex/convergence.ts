@@ -76,7 +76,7 @@ import { suppressedSyntheticMaxCatalogSlugs } from "./catalog/model-hints";
 import { codexRuntimeStatePath, peekCodexRuntimeProcessCache } from "./runtime";
 import { codexAccountNamespaceEntries, isMainCodexAccountTarget } from "./account-namespaces";
 import { MAIN_CODEX_ACCOUNT_ID } from "./main-account";
-import { applyNativeAccessPrograms } from "./catalog/access-programs";
+import { applyNativeAccessPrograms, applyNativeUltraFastTier } from "./catalog/access-programs";
 import { applyAccountModelMetadata } from "./catalog/account-model-metadata";
 import {
   availableAccountGatedNativeModels,
@@ -419,6 +419,7 @@ function prepareCatalog(
   catalog.models = enforceCatalogSlugUniqueness(mergedModels, false);
   applyAccountModelMetadata(catalog.models, modelEntitlements, accountTargets, bareEligibleAccountIds);
   applyNativeAccessPrograms(catalog.models, modelEntitlements, accountTargets);
+  applyNativeUltraFastTier(catalog.models, modelEntitlements, accountTargets, config.ultraFastTier === true, bareEligibleAccountIds);
   return catalog;
 }
 

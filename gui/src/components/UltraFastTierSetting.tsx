@@ -5,17 +5,7 @@ import { createBoundedFetch } from "../bounded-fetch";
 
 type Feedback = { tone: "ok" | "err"; message: string } | null;
 
-/**
- * Opt-in Ultra Fast service tier.
- *
- * The description deliberately says what this does NOT do. PR #2994 added an `ultrafast`
- * row to the shipped catalog and was closed because the picker gained a choice the wire
- * could not honor — upstream advertises only `priority`. This switch does not bring that
- * row back. It keeps a tier the operator configured themselves from being stripped on
- * regeneration, and it is why the request logs name the tier instead of recording that no
- * fast tier was asked for. A toggle that implied a speed it cannot deliver would be the
- * same defect in a new place.
- */
+/** Opt-in publication of entitled native Ultra Fast tiers, preserving routed metadata. */
 export default function UltraFastTierSetting({ apiBase }: { apiBase: string }) {
   const t = useT();
   const [enabled, setEnabled] = useState(false);

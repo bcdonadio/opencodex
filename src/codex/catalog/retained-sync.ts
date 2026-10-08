@@ -14,7 +14,7 @@ import { providerCodexAccountMode } from "../../providers/registry";
 import { COMBO_NAMESPACE } from "../../combos";
 import { codexAccountNamespaceEntries, isMainCodexAccountTarget } from "../account-namespaces";
 import { MAIN_CODEX_ACCOUNT_ID } from "../main-account";
-import { applyNativeAccessPrograms } from "./access-programs";
+import { applyNativeAccessPrograms, applyNativeUltraFastTier } from "./access-programs";
 import {
   availableAccountGatedNativeModels,
   codexModelEntitlementStateForAccount,
@@ -554,6 +554,7 @@ function writeRetainedCatalogSync({
     bareEligibleAccountIds,
   );
   applyNativeAccessPrograms(catalog.models, modelEntitlements, accountTargets);
+  applyNativeUltraFastTier(catalog.models, modelEntitlements, accountTargets, config.ultraFastTier === true, bareEligibleAccountIds);
 
   const added = goEntries.length + accountBoundEntries.length;
   const content = `${JSON.stringify(catalog, null, 2)}\n`;

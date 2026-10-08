@@ -61,6 +61,7 @@ import {
   entitledCodexAccountIdsForModel,
   isCodexModelEntitlementSnapshotCurrent,
   isDirectCallerEntitledToCodexModel,
+  isDirectCallerEntitledToCodexUltrafast,
   resolveCodexModelEntitlements,
 } from "./model-entitlements";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS, NATIVE_RESERVE_MODEL } from "./catalog/native-models";
@@ -93,6 +94,7 @@ import type { DataPlaneAdmission } from "../server/auth-cors";
 import { getMainReserveAuthorization, isMainReserveAuthorizationLive, nativeUserIdClaims, type MainReserveAuthorization } from "./reserve-availability";
 import { UpstreamRetryEvidenceError } from "../lib/upstream-retry";
 import { getEffectiveCodexAutoSwitchThreshold } from "./account-auto-switch";
+import { canonicalFastTierMarker } from "../providers/fastwire";
 
 /**
  * A request-owned bearer cannot inspect the physical main credential for its plan, but cached
@@ -981,6 +983,8 @@ export interface ResolveCodexAuthContextOptions {
   accountId?: string;
   /** Final native model selected for this request, used to select its quota group. */
   modelId?: string;
+  /** Effective final-route tier, after Fast policy and wire normalization. */
+  serviceTier?: string;
   /** Short reservation converted to turn ownership before native `__main__` token materialization. */
   beginCodexAccountSelection?: () => CodexAccountSelectionAdmission | undefined;
   /** Test-only native credential read seams. */
@@ -1000,6 +1004,8 @@ export interface ResolveCodexAuthContextOptions {
   requestScopedMainCredential?: boolean;
   /** Test seam for a Direct request's own forwarded ChatGPT credential. */
   isDirectCallerEntitledToCodexModel?: (headers: Headers, modelId: string) => Promise<boolean>;
+  /** Test seam for the request-owned credential's authenticated Ultrafast roster. */
+  isDirectCallerEntitledToCodexUltrafast?: (headers: Headers, modelId: string) => Promise<boolean>;
   /**
    * This request's conversation carries live uploaded-file references (#4778). Retains the bound
    * account across a VOLUNTARY quota move; involuntary release is untouched.
@@ -1059,6 +1065,13 @@ export async function resolveCodexAuthContext(
     throw new CodexReserveUnavailableError();
   }
   const fixedAccountId = reserve ? MAIN_CODEX_ACCOUNT_ID : options.accountId;
+  const ultrafastRequested = canonicalFastTierMarker(options.serviceTier) === "ultrafast" && options.modelId !== undefined;
+  const callerHasUltrafast = async (): Promise<boolean> => !ultrafastRequested || await (
+    options.isDirectCallerEntitledToCodexUltrafast ?? isDirectCallerEntitledToCodexUltrafast
+  )(headers, options.modelId!);
+  const unsupportedTier = () => new CodexModelAvailabilityError(
+    "unsupported", "The selected ChatGPT account does not support Ultrafast for this model",
+  );
   const quotaScope = codexQuotaScopeForModel(options.modelId);
   // Pool pins and fallback must not resurrect an observed main credential that is cooling
   // down. Unrelated caller-owned credentials and explicit Direct keep their own policy.
@@ -1116,6 +1129,7 @@ export async function resolveCodexAuthContext(
           );
         }
       }
+      if (!await callerHasUltrafast()) throw unsupportedTier();
       if (callerMatchesObservedMain(headers)) assertMainAccountPolicy(policy);
       assertCallerOwnedMainPoolNotCooled();
       return { kind: "main", accountId: null };
@@ -1139,14 +1153,19 @@ export async function resolveCodexAuthContext(
       }
       if (isMainAccountHardLockEnabled(policy)) reconcileMainCodexAccountRuntimeState();
       assertMainAccountPolicy(policy);
-      if (options.modelId && ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)) {
-        const entitled = entitledCodexAccountIdsForModel(
-          await (options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements)(config, {
+      if (options.modelId && (ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId) || ultrafastRequested)) {
+        const snapshot = await (options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements)(config, {
             signal: options.signal,
             nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
-          }),
-          options.modelId,
-        )?.has(MAIN_CODEX_ACCOUNT_ID) === true;
+          });
+        if (ultrafastRequested && !isCodexModelEntitlementSnapshotCurrent(snapshot)) {
+          throw new CodexPoolAuthenticationError("Codex account credentials changed during model entitlement discovery");
+        }
+        const entitled = ultrafastRequested
+          ? snapshot.confirmedAccountIds.has(MAIN_CODEX_ACCOUNT_ID)
+            && snapshot.modelsByAccount.get(MAIN_CODEX_ACCOUNT_ID)?.has(options.modelId) === true
+            && snapshot.ultrafastTierByAccount?.get(MAIN_CODEX_ACCOUNT_ID)?.has(options.modelId) === true
+          : entitledCodexAccountIdsForModel(snapshot, options.modelId)?.has(MAIN_CODEX_ACCOUNT_ID) === true;
         if (!entitled) {
           throw new CodexModelAvailabilityError(
             "unsupported",
@@ -1167,10 +1186,10 @@ export async function resolveCodexAuthContext(
   // later admission-secret substitution cannot silently replace it with stored auth.
   if (preserveRequestOwnedMainPin()) {
     const callerEntitled = !options.modelId
-      || !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)
-      || await (
+      || ((!ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)
+        || await (
         options.isDirectCallerEntitledToCodexModel ?? isDirectCallerEntitledToCodexModel
-      )(headers, options.modelId);
+      )(headers, options.modelId)) && await callerHasUltrafast());
     if (callerEntitled && preserveRequestOwnedMainPin()) {
       const context: CodexAuthContext = { kind: "main", accountId: null };
       selectedCallerMainContexts.add(context);
@@ -1242,7 +1261,7 @@ export async function resolveCodexAuthContext(
       ? new Set([MAIN_CODEX_ACCOUNT_ID])
       : undefined;
     const mainModelGrantUnobserved = excludeAccountIds?.has(MAIN_CODEX_ACCOUNT_ID) === true;
-    const entitlementSnapshot = options.modelId && ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId)
+    const entitlementSnapshot = options.modelId && (ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(options.modelId) || ultrafastRequested)
       ? await (options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements)(config, {
         excludeAccountIds,
         signal: options.signal,
@@ -1252,15 +1271,23 @@ export async function resolveCodexAuthContext(
     if (entitlementSnapshot && !isCodexModelEntitlementSnapshotCurrent(entitlementSnapshot)) {
       throw new CodexPoolAuthenticationError("Codex account credentials changed during model entitlement discovery");
     }
-    const entitledAccountIds = entitlementSnapshot
-      ? entitledCodexAccountIdsForModel(entitlementSnapshot, options.modelId)
-      : undefined;
+    const entitledAccountIds = ultrafastRequested && entitlementSnapshot
+      ? new Set([...entitlementSnapshot.confirmedAccountIds].filter(candidate =>
+          entitlementSnapshot.modelsByAccount.get(candidate)?.has(options.modelId!) === true
+          && entitlementSnapshot.ultrafastTierByAccount?.get(candidate)?.has(options.modelId!) === true))
+      : entitlementSnapshot
+        ? entitledCodexAccountIdsForModel(entitlementSnapshot, options.modelId)
+        : undefined;
     const modelEligibleAccountIds = entitledAccountIds
       ? new Set([...entitledAccountIds].filter(candidate => !excludeAccountIds?.has(candidate)))
       : undefined;
+    if (ultrafastRequested && requestScopedMainCredential && await callerHasUltrafast()) {
+      modelEligibleAccountIds?.add(MAIN_CODEX_ACCOUNT_ID);
+    }
     if (entitlementSnapshot && !isCodexModelEntitlementSnapshotCurrent(entitlementSnapshot)) {
       throw new CodexPoolAuthenticationError("Codex account credentials changed during model entitlement discovery");
     }
+    if (ultrafastRequested && modelEligibleAccountIds?.size === 0) throw unsupportedTier();
     const selectionChangedWhileAwaiting = admittedSelection.active !== config.activeCodexAccountId
       || admittedSelection.pinned !== config.activeCodexAccountPinned;
     // #4768: the flagships stay visible and never fail closed, so this is evidence routing may

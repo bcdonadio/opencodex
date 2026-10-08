@@ -58,6 +58,7 @@ import {
   CodexPoolAccountCreditsOffError,
 } from "../../codex/auth-context";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../../codex/catalog/native-models";
+import { canonicalFastTierMarker } from "../../providers/fastwire";
 import { isRequestExecutionBudget } from "../../lib/request-execution-budget";
 import type { SingleUseDispatchPermit } from "../../lib/request-execution-budget";
 import { codexRouteCredentialOwnership, type CodexCredentialOwnershipOptions } from "./core-auth";
@@ -600,7 +601,11 @@ export async function retryCodexPoolOnAlternateAccount(
       releaseCodexAuthContextProbeLease(firstAuthCtx);
       throw error;
     }
-    if (entitledCodexAccountIdsForModel(refreshed, route.modelId)?.has(firstAuthCtx.accountId)) {
+    if (entitledCodexAccountIdsForModel(refreshed, route.modelId)?.has(firstAuthCtx.accountId)
+      && (canonicalFastTierMarker(parsed.options.serviceTier) !== "ultrafast"
+        || (firstAuthCtx.accountId !== null
+          && refreshed.confirmedAccountIds.has(firstAuthCtx.accountId)
+          && refreshed.ultrafastTierByAccount?.get(firstAuthCtx.accountId)?.has(route.modelId) === true))) {
       // The authenticated roster still grants this exact model. Retry on the same account:
       // upstream shards can briefly disagree during a gated-model rollout, but a pre-stream 400
       // proves no output was committed and keeps this replay bounded.
@@ -656,6 +661,7 @@ export async function retryCodexPoolOnAlternateAccount(
           admission: options.admission,
           codexAuthPolicy: options.codexAuthPolicy,
           modelId: route.modelId,
+          serviceTier: parsed.options.serviceTier,
           requestScopedMainCredential,
           beginCodexAccountSelection: codexAccountSelectionForTurn(options.turnAdmissionLease),
           resolveCodexModelEntitlements: entitlementResolver,

@@ -571,12 +571,9 @@ export interface OcxConfig {
   /**
    * Opt-in Ultra Fast service tier, default off.
    *
-   * This does NOT synthesize an `ultrafast` row: `src/codex/data/upstream-models.json`
-   * advertises only `priority`, and PR #2994 was closed precisely because a catalog row
-   * the wire cannot honor is a picker entry that lies. What the flag turns on is honesty
-   * about a tier the operator supplies themselves — the catalog stops stripping an
-   * `ultrafast` the user configured, and the request path names it instead of recording
-   * "no fast tier was requested".
+   * Publish validated Ultrafast declarations from authenticated native account rosters.
+   * This grants no entitlement: each model/account must advertise the tier upstream.
+   * Routed catalogs also retain operator-supplied Ultrafast metadata when enabled.
    */
   ultraFastTier?: boolean;
   /**

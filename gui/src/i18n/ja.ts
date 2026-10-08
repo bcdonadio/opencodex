@@ -2297,7 +2297,7 @@ export const ja: Record<TKey, string> = {
   "codexAuth.mainHardLockMonitoring": "保護有効・監視中",
   "codexAuth.mainExternalUsageWarning": "opencodex以外で使用量が増えた可能性があります。制限しても上限に達する場合があります。",
   "codexAuth.mainHardLockManage": "保護設定を表示",
-  "codexAuth.ultraFastDesc": "自分で設定した ultrafast サービスティアがカタログ再生成時に削除されないようにし、リクエストログにそのティア名を記録します。モデルピッカーに Ultra Fast は追加しません。アップストリームは Fast しか公開しておらず、ピッカーに項目を出すと実際には出せない速度を選ばせることになるためです。",
+  "codexAuth.ultraFastDesc": "認証済みアカウントのカタログで利用権が確認された場合に Ultra Fast を表示し、ルーティング対象モデルに指定したティアのメタデータも保持します。この設定で利用権が付与されることはありません。利用可能なアカウントがプールにあれば、プールのモデルにこのティアが表示されます。Ultra Fast を選ぶと、別のアカウントを選択中でも、利用可能なアカウントへリクエストを振り分けます。",
   "codexAuth.ultraFastLoadFailed": "Ultra Fast 設定を読み取れませんでした。",
   "codexAuth.ultraFastEnabled": "Ultra Fast ティアを有効にしました",
   "codexAuth.ultraFastDisabled": "Ultra Fast ティアを無効にしました",

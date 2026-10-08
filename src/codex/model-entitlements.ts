@@ -1,3 +1,4 @@
+import { parseCodexUltrafastTier, type CodexUltrafastTier } from "./catalog/ultrafast-tier";
 import { createHash } from "node:crypto";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import type { CodexAccountCredentialRecord, OcxConfig } from "../types";
@@ -410,6 +411,7 @@ interface CachedAccountModels {
   readonly models: ReadonlySet<string>;
   readonly metadataByModel: ReadonlyMap<string, CodexAccountModelMetadata>;
   readonly accessProgramsByModel?: ReadonlyMap<string, CodexAvailableAccessPrograms>;
+  readonly ultrafastTierByModel?: ReadonlyMap<string, CodexUltrafastTier>;
   readonly availabilityNuxByModel?: ReadonlyMap<string, { message: string }>;
   readonly confirmed: boolean;
   readonly provenance?: CodexModelEntitlementProvenance;
@@ -420,6 +422,7 @@ export interface CodexModelEntitlementSnapshot {
   /** Validated, non-sensitive fields from each authenticated account roster. */
   readonly metadataByAccount?: ReadonlyMap<string, ReadonlyMap<string, CodexAccountModelMetadata>>;
   readonly accessProgramsByAccount?: ReadonlyMap<string, ReadonlyMap<string, CodexAvailableAccessPrograms>>;
+  readonly ultrafastTierByAccount?: ReadonlyMap<string, ReadonlyMap<string, CodexUltrafastTier>>;
   readonly availabilityNuxByAccount?: ReadonlyMap<string, ReadonlyMap<string, { message: string }>>;
   readonly clientVersionByAccount: ReadonlyMap<string, string>;
   readonly confirmedAccountIds: ReadonlySet<string>;
@@ -668,11 +671,13 @@ function parseAccountModels(text: string): {
   models: ReadonlySet<string>;
   metadataByModel: ReadonlyMap<string, CodexAccountModelMetadata>;
   accessProgramsByModel: ReadonlyMap<string, CodexAvailableAccessPrograms>;
+  ultrafastTierByModel: ReadonlyMap<string, CodexUltrafastTier>;
   availabilityNuxByModel: ReadonlyMap<string, { message: string }>;
 } | null {
   try {
     const payload = JSON.parse(text) as { models?: unknown };
     if (!Array.isArray(payload.models)) return null;
+    const ultrafastTierByModel = new Map<string, CodexUltrafastTier>();
     const metadataByModel = new Map<string, CodexAccountModelMetadata>();
     const accessProgramsByModel = new Map<string, CodexAvailableAccessPrograms>();
     const availabilityNuxByModel = new Map<string, { message: string }>();
@@ -685,8 +690,12 @@ function parseAccountModels(text: string): {
         model_specialty?: unknown;
         available_access_programs?: unknown;
         availability_nux?: unknown;
+        service_tiers?: unknown;
+        additional_speed_tiers?: unknown;
       };
       if (typeof row.slug !== "string" || row.supported_in_api !== true || row.visibility === "hide") return [];
+      const tier = parseCodexUltrafastTier(row);
+      if (tier) ultrafastTierByModel.set(row.slug, tier);
       const metadata: CodexAccountModelMetadata = {};
       if (row.model_specialty === "cyber") metadata.model_specialty = "cyber";
       const nux = row.availability_nux;
@@ -716,7 +725,7 @@ function parseAccountModels(text: string): {
       if (Object.keys(metadata).length > 0) metadataByModel.set(row.slug, metadata);
       return [row.slug];
     });
-    return { models: new Set(models), metadataByModel, accessProgramsByModel, availabilityNuxByModel,
+    return { models: new Set(models), metadataByModel, accessProgramsByModel, availabilityNuxByModel, ultrafastTierByModel,
       discoveredRows: validateDiscoveredNativeRows(payload.models) };
   } catch {
     return null;
@@ -789,7 +798,7 @@ async function fetchAccountModels(
     // account asked under too old a client version answers with no gated rows, and treating
     // that as authoritative is exactly how 2.36.0 denied sol/terra/luna to accounts that own
     // them (#3022). No usable rows means unconfirmed, on the 15s failure TTL, asked again.
-    const { models, metadataByModel, accessProgramsByModel, availabilityNuxByModel } = parsed;
+    const { models, metadataByModel, accessProgramsByModel, availabilityNuxByModel, ultrafastTierByModel } = parsed;
     const usable = models.size > 0;
     if (!usable) {
       return unconfirmedAccountModels(credential, clientVersion, now, { kind: "parsed-empty" });
@@ -816,6 +825,7 @@ async function fetchAccountModels(
       metadataByModel,
       accessProgramsByModel,
       availabilityNuxByModel,
+      ultrafastTierByModel,
       confirmed: true,
     };
   } catch (error) {
@@ -1384,6 +1394,10 @@ export async function resolveCodexModelEntitlements(
       result.confirmed && result.availabilityNuxByModel
         ? [[credential.accountId, result.availabilityNuxByModel] as const] : []
     ))),
+    ultrafastTierByAccount: new Map(results.flatMap(({ credential, result }) => (
+      result.confirmed && result.ultrafastTierByModel
+        ? [[credential.accountId, result.ultrafastTierByModel] as const] : []
+    ))),
     clientVersionByAccount: new Map(results.map(({ credential, result }) => (
       [credential.accountId, result.clientVersion]
     ))),
@@ -1445,6 +1459,27 @@ export async function isDirectCallerEntitledToCodexModel(
     result.clientVersion,
     modelId,
   ) === "granted";
+}
+
+/** Require a confirmed model and Ultrafast declaration from the caller's own roster. */
+export async function isDirectCallerEntitledToCodexUltrafast(
+  headers: Headers,
+  modelId: string,
+  options: Pick<CodexModelEntitlementResolveOptions, "fetcher" | "now" | "clientVersion"> = {},
+): Promise<boolean> {
+  const credential = directCallerCredential(headers);
+  if (!credential) return false;
+  const clientVersion = resolveCodexEntitlementClientVersion(options.clientVersion);
+  const result = await modelsForCredential(
+    credential,
+    options.fetcher ?? fetch,
+    options.now ?? Date.now(),
+    clientVersion,
+    clientVersion,
+  );
+  return result.confirmed
+    && result.models.has(modelId)
+    && result.ultrafastTierByModel?.has(modelId) === true;
 }
 
 export function entitledCodexAccountIdsForModel(

@@ -23,7 +23,6 @@ Accounts added through the [Orca import](codex-home.md#orca-source-owned-account
 validation-pending. Import alone supplies no entitlement evidence for the model catalog.
 
 ## Shared catalog
-
 Static policy and observed catalog evidence are separate authorities. Antigravity grouping and selection projection follow the [discovered effort-family contract](providers-and-adapters.md#antigravity-effort-families).
 `src/providers/resolved-model-policy.ts` resolves and freezes only registry/operator static facts,
 hard wire pins, aliases, and explicit false/empty declarations. Discovery responses, generated
@@ -73,6 +72,7 @@ provider-wide fallback. Exact model output limits precede the provider default o
 - applies exact provider/model compatibility exclusions after live discovery and metadata
   augmentation, so upstream-advertised but uncallable rows—including retired aliases retained in
   generated metadata for historical accounting—never enter dashboard or Codex pickers;
+- publishes authenticated per-account Ultrafast declarations only with `ultraFastTier: true`: `src/codex/catalog/ultrafast-tier.ts` bounds the declaration, `src/codex/model-entitlements.ts` retains confirmed evidence, and `src/codex/catalog/access-programs.ts` projects it in convergence, retained sync and live Codex discovery. Bare Pool rows advertise confirmed grants from any eligible account; Direct and selector rows stay account-bound. Missing evidence or opt-out clears stale native tiers; API-key, combo and alias rows receive no grant, while Fast and operator-owned routed tiers remain intact;
 - strips native-only service tier and WebSocket metadata unless the final routed provider/model
   explicitly enables the verified OpenAI-compatible service tier;
 - backs up the pristine catalog once per catalog: the copy is keyed by a hash of the catalog path

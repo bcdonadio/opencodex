@@ -54,7 +54,7 @@ import {
 import { resolveAdmittedCodexModelEntitlements } from "../../codex/model-entitlement-admission";
 import { CatalogGatherBusyError } from "../../codex/catalog/provider-fetch";
 import { applyAccountModelMetadata } from "../../codex/catalog/account-model-metadata";
-import { applyNativeAccessPrograms } from "../../codex/catalog/access-programs";
+import { applyNativeAccessPrograms, applyNativeUltraFastTier } from "../../codex/catalog/access-programs";
 import {
   registerCodexWebSocket,
   tryReserveCodexWebSocket,
@@ -1108,6 +1108,7 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           );
           applyAccountModelMetadata(entries, modelEntitlements, accountTargets, bareEligibleAccountIds);
           applyNativeAccessPrograms(entries, modelEntitlements, accountTargets);
+          applyNativeUltraFastTier(entries, modelEntitlements, accountTargets, config.ultraFastTier === true, bareEligibleAccountIds);
           return jsonResponse({
             models: applyNativeVisibility(
               entries,

@@ -1578,6 +1578,7 @@ export async function prepareResponsesRequest(
       options,
       credentialDomainWasRewritten,
       conversationCarriesUploadedFiles(parsed._rawBody),
+      parsed.options.serviceTier,
     );
     if (!finalAuth.ok) return finalAuth.response;
     admissionState.authCtx = finalAuth.authCtx;

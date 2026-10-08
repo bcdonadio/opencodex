@@ -22,6 +22,17 @@ models use their selected account. Refreshing the integration updates these rows
 changes the account's access programs.
 OpenCodex carries the logged-in main account's live model availability prompt onto bare native model rows.
 
+With **Ultra Fast** enabled (`ultraFastTier: true`), OpenCodex publishes Ultrafast
+for native models whose authenticated account roster advertises that tier, including
+`gpt-6-astra` and `gpt-6.1-sol`. Existing Fast metadata is preserved. Bare Pool
+models advertise a tier when an eligible pool account grants it. Direct models and
+account selectors use their own account's entitlement; API-key routes and combos do
+not inherit it.
+In Pool mode, selecting Ultrafast routes to a pool account that grants the tier for
+that model, even when another account is selected. Explicit account selectors remain
+bound to their account. Disabling the setting or losing upstream entitlement removes
+stale Ultrafast metadata.
+
 The proxy exposes one bare `openai` Codex-login route with Pool(default) and Direct account modes,
 plus `openai-apikey/<model>` for the configured API key. Pool includes main plus added accounts;
 Direct uses only the caller/main bearer. The routes do not fall back to one another. Shipped v1

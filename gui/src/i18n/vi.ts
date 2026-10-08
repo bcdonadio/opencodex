@@ -2430,7 +2430,7 @@ export const vi: Record<TKey, string> = {
   "codexAuth.mainHardLockMonitoring": "Bảo vệ đang bật · đang theo dõi",
   "codexAuth.mainExternalUsageWarning": "Có thể có sử dụng ngoài opencodex. Việc chặn có thể không ngăn hết hạn mức.",
   "codexAuth.mainHardLockManage": "Xem thiết lập bảo vệ",
-  "codexAuth.ultraFastDesc": "Ngăn không cho dịch vụ cấp độ Ultra Fast mà bạn đã thiết lập bị loại bỏ khi catalog được tạo lại, và đưa tên nó vào các request log. Nó không thêm Ultra Fast vào bộ chọn model: upstream chỉ quảng cáo Fast, do đó mục chọn sẽ đưa ra tốc độ mà đường truyền không thể đáp ứng.",
+  "codexAuth.ultraFastDesc": "Hiển thị Ultra Fast khi danh mục đã xác thực của tài khoản xác nhận quyền truy cập, đồng thời giữ lại siêu dữ liệu cấp độ bạn cung cấp cho các model được định tuyến. Tùy chọn này không cấp quyền truy cập. Model trong pool có thể hiển thị cấp độ này nếu một tài khoản đủ điều kiện có quyền; chọn Ultra Fast sẽ chuyển yêu cầu sang tài khoản đủ điều kiện, ngay cả khi bạn đang chọn tài khoản khác.",
   "codexAuth.ultraFastLoadFailed": "Không thể đọc thiết lập Ultra Fast.",
   "codexAuth.ultraFastEnabled": "Cấp độ Ultra Fast đã bật",
   "codexAuth.ultraFastDisabled": "Cấp độ Ultra Fast đã tắt",

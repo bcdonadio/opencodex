@@ -2449,7 +2449,7 @@ export const pt: Record<TKey, string> = {
   "codexAuth.mainHardLockMonitoring": "Proteção ativa · monitorando",
   "codexAuth.mainExternalUsageWarning": "Possível uso fora do opencodex. O bloqueio pode não impedir o esgotamento.",
   "codexAuth.mainHardLockManage": "Ver configuração de proteção",
-  "codexAuth.ultraFastDesc": "Impede que um nível de serviço ultrarrápido configurado por você seja removido quando o catálogo é regenerado e o nomeia nos logs de requisição. Não adiciona o Ultra Fast ao seletor de modelos: o upstream anuncia apenas o Fast, então uma linha no seletor ofereceria uma velocidade que a conexão não consegue entregar.",
+  "codexAuth.ultraFastDesc": "Exibe Ultra Fast quando o catálogo autenticado de uma conta confirma o acesso e preserva os metadados de nível que você fornece para modelos roteados. Isso não concede acesso. Modelos do pool podem exibir esse nível se uma conta elegível tiver acesso; ao selecionar Ultra Fast, a solicitação é direcionada a uma conta elegível, mesmo que outra conta esteja selecionada.",
   "codexAuth.ultraFastLoadFailed": "Não foi possível ler a configuração do Ultra Fast.",
   "codexAuth.ultraFastEnabled": "Nível Ultra Fast ativado",
   "codexAuth.ultraFastDisabled": "Nível Ultra Fast desativado",

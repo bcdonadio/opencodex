@@ -2475,7 +2475,7 @@ export const en = {
   "codexAuth.mainHardLockMonitoring": "Protection on · monitoring",
   "codexAuth.mainExternalUsageWarning": "Possible usage outside opencodex. The lock may not prevent exhaustion.",
   "codexAuth.mainHardLockManage": "View protection setting",
-  "codexAuth.ultraFastDesc": "Keeps an ultrafast service tier you configured yourself from being stripped when the catalog is regenerated, and names it in the request logs. It does not add Ultra Fast to the model picker: upstream advertises only Fast, so a picker row would offer a speed the wire cannot deliver.",
+  "codexAuth.ultraFastDesc": "Publishes Ultra Fast when an authenticated account roster confirms access, and preserves tier metadata you supply for routed models. This does not grant access. Pool models may show the tier when an eligible account has it; selecting Ultra Fast routes the request to an eligible account, even if another account is selected.",
   "codexAuth.ultraFastLoadFailed": "Could not read the Ultra Fast setting.",
   "codexAuth.ultraFastEnabled": "Ultra Fast tier enabled",
   "codexAuth.ultraFastDisabled": "Ultra Fast tier disabled",

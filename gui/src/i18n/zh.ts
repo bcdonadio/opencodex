@@ -1881,7 +1881,7 @@ export const zh: Record<TKey, string> = {
   "codexAuth.mainHardLockMonitoring": "保护已开启 · 监测中",
   "codexAuth.mainExternalUsageWarning": "可能存在 opencodex 之外的使用。阻止可能无法避免额度耗尽。",
   "codexAuth.mainHardLockManage": "查看保护设置",
-  "codexAuth.ultraFastDesc": "让你自己配置的 ultrafast 服务层级在重新生成目录时不被删除，并在请求日志中记录该层级名称。它不会把 Ultra Fast 加入模型选择器：上游只公布 Fast，选择器中出现该项等于让用户选择一个实际无法提供的速度。",
+  "codexAuth.ultraFastDesc": "只有经过验证的账户目录确认有权限时才会显示 Ultra Fast，并保留你为路由模型提供的层级元数据。此设置不会授予权限。如果池中有符合条件的账户可用该层级，池模型就会显示它；选择 Ultra Fast 后，请求会转到符合条件的账户，即使当前选中了其他账户。",
   "codexAuth.ultraFastLoadFailed": "无法读取 Ultra Fast 设置。",
   "codexAuth.ultraFastEnabled": "已启用 Ultra Fast 层级",
   "codexAuth.ultraFastDisabled": "已禁用 Ultra Fast 层级",

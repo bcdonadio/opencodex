@@ -223,6 +223,7 @@ export async function resolveResponsesCodexAuth(
   options: HandleResponsesOptions,
   credentialDomainWasRewritten = false,
   retainAccountForUploadedFiles = false,
+  serviceTier?: string,
 ): Promise<ResponsesAuthResolution> {
   let authCtx: CodexAuthContext | undefined;
   try {
@@ -295,6 +296,7 @@ export async function resolveResponsesCodexAuth(
         codexAuthPolicy: options.codexAuthPolicy,
         accountId: route.codexAccountId,
         modelId: route.modelId,
+        serviceTier,
         substituteMainCredentialForDirect: substituteMainCredential,
         requestScopedMainCredential,
         beginCodexAccountSelection: codexAccountSelectionForTurn(options.turnAdmissionLease),

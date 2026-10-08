@@ -1908,7 +1908,7 @@ export const ko: Record<TKey, string> = {
   "codexAuth.mainHardLockMonitoring": "보호 켜짐",
   "codexAuth.mainExternalUsageWarning": "opencodex 밖에서 사용량이 늘었을 수 있습니다. 차단해도 한도를 소진할 수 있습니다.",
   "codexAuth.mainHardLockManage": "차단 설정 보기",
-  "codexAuth.ultraFastDesc": "직접 설정한 ultrafast 서비스 티어가 카탈로그를 다시 만들 때 지워지지 않게 하고, 요청 로그에 그 티어 이름을 남깁니다. 모델 피커에 Ultra Fast를 추가하지는 않습니다. 업스트림은 Fast만 알리기 때문에, 피커에 칸을 만들면 실제로 낼 수 없는 속도를 고르게 하는 셈입니다.",
+  "codexAuth.ultraFastDesc": "인증된 계정 카탈로그에서 액세스가 확인되면 Ultra Fast를 표시하고, 라우팅 모델에 직접 지정한 티어 메타데이터도 보존합니다. 이 설정은 액세스 권한을 부여하지 않습니다. 풀에 사용 가능한 계정이 있으면 풀 모델에 이 티어가 표시될 수 있습니다. Ultra Fast를 선택하면 다른 계정을 선택 중이어도 사용 가능한 계정으로 요청을 보냅니다.",
   "codexAuth.ultraFastLoadFailed": "Ultra Fast 설정을 읽지 못했습니다.",
   "codexAuth.ultraFastEnabled": "Ultra Fast 티어를 켰습니다",
   "codexAuth.ultraFastDisabled": "Ultra Fast 티어를 껐습니다",

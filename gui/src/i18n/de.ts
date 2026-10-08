@@ -1864,7 +1864,7 @@ export const de: Record<TKey, string> = {
   "codexAuth.mainHardLockMonitoring": "Schutz aktiv · Überwachung",
   "codexAuth.mainExternalUsageWarning": "Mögliche Nutzung außerhalb von opencodex. Die Sperre verhindert möglicherweise keine Erschöpfung.",
   "codexAuth.mainHardLockManage": "Schutzeinstellung anzeigen",
-  "codexAuth.ultraFastDesc": "Verhindert, dass ein selbst konfigurierter ultrafast-Diensttarif beim Neuaufbau des Katalogs entfernt wird, und benennt ihn in den Anfrageprotokollen. Ultra Fast wird nicht in die Modellauswahl aufgenommen: Upstream kündigt nur Fast an, ein Eintrag würde also eine Geschwindigkeit anbieten, die die Leitung nicht liefern kann.",
+  "codexAuth.ultraFastDesc": "Zeigt Ultra Fast an, wenn ein authentifizierter Konten-Katalog den Zugriff bestätigt, und bewahrt von dir angegebene Tarif-Metadaten für weitergeleitete Modelle. Dadurch erhältst du keinen Zugriff. Pool-Modelle können den Tarif anzeigen, wenn ein geeignetes Konto ihn hat; bei Auswahl von Ultra Fast wird die Anfrage an ein geeignetes Konto geleitet, auch wenn ein anderes Konto ausgewählt ist.",
   "codexAuth.ultraFastLoadFailed": "Die Ultra-Fast-Einstellung konnte nicht gelesen werden.",
   "codexAuth.ultraFastEnabled": "Ultra-Fast-Tarif aktiviert",
   "codexAuth.ultraFastDisabled": "Ultra-Fast-Tarif deaktiviert",
