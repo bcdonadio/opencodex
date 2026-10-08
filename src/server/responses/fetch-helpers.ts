@@ -1,4 +1,5 @@
 import type { NativeResponseControl } from "./native-response-control";
+import type { CodexWsContinuationDecisionReason } from "./codex-ws-continuation";
 import type { Server } from "bun";
 import {
   codexWsUpstreamFetch,
@@ -248,6 +249,7 @@ export interface ProviderFetchOptions {
 
 export type TransportObservation =
   | { kind: "queue"; observation: RequestPacingObservation }
+  | { kind: "continuation"; reason: CodexWsContinuationDecisionReason; skippedItems: number }
   | { kind: "prepared" }
   | { kind: "send"; transport: "http" | "websocket"; body?: unknown; target?: DiagnosticTarget }
   | { kind: "response"; transport: "http" | "websocket"; response: Response }
@@ -403,7 +405,8 @@ export function providerFetch(
           event.kind === "send" && event.transport === "websocket"
             ? { ...event, target: diagnosticTarget(input, init) } : event) : undefined,
         options.nativeControl,
-        async () => { (await waitForPacing(init.signal ?? undefined))?.release(); });
+        async () => { (await waitForPacing(init.signal ?? undefined))?.release(); },
+        process.env.OCX_CODEX_WS_INCREMENTAL_INPUT === "1");
     }
     return httpFetch(input, init);
   };

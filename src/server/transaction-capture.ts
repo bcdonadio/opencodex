@@ -754,6 +754,18 @@ export function transportObserver(ctx: RequestLogContext): (event: TransportObse
       }
       recordForwardedRequest(ctx, event.transport, event.body);
     }
+    else if (event.kind === "continuation") {
+      const d = diagnostics(ctx);
+      const localReplay = Number(d.replayedItemCount ?? 0);
+      const skipped = Number.isSafeInteger(event.skippedItems) && event.skippedItems >= 0 ? event.skippedItems : 0;
+      d.continuationDecisionReason = event.reason;
+      d.upstreamReplayedItemCount = Math.max(0, localReplay - skipped);
+      d.continuationMode = event.reason === "incremental" ? "websocket_incremental"
+        : localReplay > 0 ? "local_replay" : "explicit_input";
+      d.fieldAvailability.continuationDecisionReason = { status: "observed", source: "proxy" };
+      d.fieldAvailability.upstreamReplayedItemCount = { status: "derived", source: "derived" };
+      clean(ctx);
+    }
     else if (event.kind === "response") recordUpstreamResponse(ctx, event.response, event.transport);
     else if (event.kind === "event") recordProtocolEvent(ctx, event.payload, event.bytes, true);
     else if (event.kind === "stream_failure") {

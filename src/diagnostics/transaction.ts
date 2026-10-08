@@ -311,7 +311,7 @@ const METADATA_FIELDS = [
   "responseModel", "responseEffort", "routeKind", "fallbackReason", "rewriteReason", "authMode",
   "accountPseudonym", "accountSelectionSource", "accountAffinity", "accountPoolSelectionReason",
   "subscriptionPlan", "entitlementSource", "cyberAccessStatus", "cyberAccessProgram", "modelAccessStatus",
-  "authRefreshResult", "tokenEstimateMethod", "continuationMode", "toolChoiceMode", "truncationMode",
+  "authRefreshResult", "tokenEstimateMethod", "continuationMode", "continuationDecisionReason", "toolChoiceMode", "truncationMode",
   "endpointClass", "upstreamHostname", "method", "upstreamContentType", "protocolEventType",
   "terminalEventType", "lastEventType", "lastOutputKind", "closedBy", "upstreamErrorCode", "errorType",
   "errorParam", "incompleteReason", "contentFilterResult", "errorEnvelopeSchema", "refusalCategory",
@@ -340,7 +340,7 @@ const NON_NEGATIVE_NUMBER_FIELDS = [
   "forwardedToolCallCount", "forwardedToolResultCount", "forwardedReasoningItemCount", "forwardedEncryptedItemCount",
   "forwardedImageCount", "forwardedAudioCount", "forwardedFileCount", "forwardedAttachmentBytes",
   "forwardedToolResultBytes", "forwardedLargestToolResultBytes",
-  "reconstructedInputCount", "replayedItemCount", "compactionCount", "httpStatus",
+  "reconstructedInputCount", "replayedItemCount", "upstreamReplayedItemCount", "compactionCount", "httpStatus",
   "websocketHandshakeStatus", "terminalMappedStatus", "lastEventSequence", "streamEventCount", "bytesReceived",
   "bytesForwarded", "websocketCloseCode", "connectionAgeMs", "reconnectCount", "idleTimeoutMs", "bodyStallMs",
   "bodyOverflowBytes", "retryAfterMs", "connectionGeneration", "requestSequenceOnConnection", "upstreamRequestSequenceOnConnection", "retryDelayMs",
@@ -479,6 +479,10 @@ function diagnosticMetadataResult(field: string, value: unknown): SanitizedDiagn
   if (!sanitized) return base;
   let accepted: boolean;
   switch (field) {
+    case "continuationDecisionReason":
+      accepted = ["disabled", "cold-connection", "context-mismatch", "settings-changed", "incremental",
+        "upstream-state-missing", "unsupported-shape"].includes(sanitized);
+      break;
     case "accountPseudonym":
     case "accountAffinity":
     case "accountLogLabel":

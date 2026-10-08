@@ -493,10 +493,10 @@ retires a socket after five minutes or 32 successful exchanges (after active wor
 finishes). Cancellation, errors, idle unsolicited frames and shutdown dispose it.
 A busy key uses a separate one-shot connection rather than interleaving requests.
 
-This is connection reuse, not native incremental-input synthesis: complete HTTP
-inputs are never trimmed and no previous response id is invented. Explicit
-continuation IDs, named lanes, warmup and background requests remain outside this
-pool. A fresh credential-dispatch guard runs before every warm send. Per-exchange
+Default sends retain complete input. With `OCX_CODEX_WS_INCREMENTAL_INPUT=1`, `src/server/responses/codex-ws-continuation.ts` can replace the final canonical WS frame with a delta only when the leased socket's latest parent, keyed normalized-context fingerprint, call identity and non-input settings match. Proofs retain no history content and are bounded; incomplete streamed/terminal output evidence refuses synthesis.
+The full normalized frame remains the fallback. A correlated preacceptance `previous_response_not_found` permits exactly one paced, credential-checked cold full replay; accepted responses, ambiguous failures and native control sends do not. Physical steering invalidates proof and retires its chain.
+Explicit continuation IDs, named lanes, warmup, background, compaction and noncanonical physical destinations remain outside this
+pool optimization. A fresh credential-dispatch guard runs before every warm send. Per-exchange
 listeners, response/item correlation and metadata ownership detach before release.
 No pool timer or shutdown registration exists before eligible traffic activates it.
 

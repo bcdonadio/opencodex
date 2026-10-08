@@ -1,3 +1,5 @@
+import type { CodexWsContinuationProof } from "./codex-ws-continuation";
+
 export const MAX_CODEX_WS_SESSION_EXCHANGES = 32;
 let connectionGeneration = 0;
 
@@ -13,6 +15,7 @@ export class CodexWsSession {
   busy = false;
   private owner?: (reason: Error) => void;
   private readonly completedIds = new Set<string>();
+  continuation?: CodexWsContinuationProof;
 
   constructor(url: string, headers: Record<string, string>, readonly retainable = false,
     private readonly changed: () => void = () => {}, proxy?: string) {
@@ -68,6 +71,7 @@ export class CodexWsSession {
     try { owner?.(reason); } finally {
       this.busy = false;
       this.completedIds.clear();
+      this.continuation = undefined;
       try { this.socket.close(); } catch { /* already closing */ }
       if (this.retainable) {
         try { (this.socket as WebSocket & { terminate?: () => void }).terminate?.(); } catch { /* already closed */ }
@@ -85,6 +89,7 @@ export class CodexWsSession {
     this.closed = true;
     this.busy = false;
     this.completedIds.clear();
+    this.continuation = undefined;
     this.detach();
     this.changed();
     // The active exchange's close listener retains pre-send fallback semantics.

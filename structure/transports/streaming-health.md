@@ -348,7 +348,7 @@ restoration is excluded because it is not a transparent native event stream.
 `src/server/responses/native-steering.ts` owns one downstream turn and one exclusive physical
 upstream connection. The connection remains bound to the credential selected by the ordinary
 dispatch path. Ordinary completion can return a dormant steering lease to the same-turn pool;
-any physical control send retires it after the chain. The normal authentication, admission,
+any physical control send retires it after the chain and invalidates incremental-input proof. A dormant steering owner's replay journal still starts from complete local context when the transport emits a proven delta. The normal authentication, admission,
 quota observation and pre-dispatch guard remain in force. `response.steer` accepts user-only
 input, preserves its target response ID, and cannot select another account or lane.
 A steering owner is installed only after turn admission; warmup and capacity refusal leave

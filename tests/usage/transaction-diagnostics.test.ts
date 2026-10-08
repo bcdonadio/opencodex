@@ -48,6 +48,27 @@ import { noteAttemptSend } from "../../src/server/request-log";
 import { recordDeliveredOutput } from "../../src/server/transaction-capture";
 import type { OcxProviderConfig } from "../../src/types";
 
+test("WebSocket continuation diagnostics distinguish local restoration from wire replay", () => {
+  const ctx = { provider: "openai", model: "m" } as RequestLogContext;
+  recordReconstructedContext(ctx, { input: [{}, {}, {}] }, 2);
+  transportObserver(ctx)({ kind: "continuation", reason: "incremental", skippedItems: 2 });
+  expect(ctx.diagnostics).toMatchObject({
+    reconstructedInputCount: 3, replayedItemCount: 2, upstreamReplayedItemCount: 0,
+    continuationMode: "websocket_incremental", continuationDecisionReason: "incremental",
+  });
+  expect(normalizeTransactionDiagnostics(JSON.parse(JSON.stringify(ctx.diagnostics)))).toMatchObject({
+    reconstructedInputCount: 3, replayedItemCount: 2, upstreamReplayedItemCount: 0,
+    continuationMode: "websocket_incremental", continuationDecisionReason: "incremental",
+  });
+  transportObserver(ctx)({ kind: "continuation", reason: "upstream-state-missing", skippedItems: 0 });
+  expect(ctx.diagnostics).toMatchObject({
+    upstreamReplayedItemCount: 2, continuationMode: "local_replay",
+    continuationDecisionReason: "upstream-state-missing",
+  });
+  const raw = { ...ctx.diagnostics, continuationDecisionReason: "arbitrary provider detail" };
+  expect(normalizeTransactionDiagnostics(raw)?.continuationDecisionReason).toBeUndefined();
+});
+
 test("stream capture sanitizes new facts without rereading retained events", () => {
   const ctx = { provider: "fixture", model: "fixture" } as RequestLogContext;
   recordProtocolEvent(ctx, { type: "response.created", response: { id: "resp-fixture", model: "safe-model" } });

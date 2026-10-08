@@ -9,6 +9,7 @@ import { CodexWsMetadata, type CodexWsQuotaObserver } from "./codex-ws-metadata"
 import { CODEX_RESPONSES_HTTP_URL, type PreparedCodexWsRequest } from "./codex-ws-request";
 import { CodexWsCorrelation } from "./codex-ws-correlation";
 import type { CodexWsSession } from "./codex-ws-session";
+import { completedCodexWsContinuation, CodexWsOutputEvidence, type CodexWsContinuationDecisionReason } from "./codex-ws-continuation";
 import type { ProviderFetchOptions, TransportObservation } from "./fetch-helpers";
 import { UPGRADE_DEADLINE_MS, CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES,
   MAX_CODEX_WS_QUEUE_BYTES, markCodexWsResponse, normalizeResponsesWsRelayEvent, closedBeforeTerminalMessage,
@@ -29,6 +30,10 @@ interface ExchangeOptions {
   onTransport?: (transport: "http" | "websocket") => void;
   /** Bun version string the caller gated on; stamped onto the stage record. */
   bunVersion?: string;
+  /** Full normalized create retained only for this exchange, even when the wire uses a delta. */
+  continuationFrameText?: string;
+  retryFullInput?: () => Promise<Response>;
+  onContinuationDecision?: (reason: CodexWsContinuationDecisionReason, skippedItems: number) => void;
 }
 
 const HTTP_HEADER_TOKEN = /^[!#$%&'*+.^_`|~0-9a-z-]+$/i;
@@ -133,6 +138,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
     let rejectedCorrelation = false;
     const correlation = session.retainable ? new CodexWsCorrelation(session.reused, id => session.hasCompleted(id),
       () => { rejectedCorrelation = true; observe({ kind: "mismatch" }); }) : null;
+    const outputEvidence = options.continuationFrameText ? new CodexWsOutputEvidence() : undefined;
     let detachOwner = () => {};
     let detachSteering = () => {};
     let continuationBase: Record<string, unknown> | undefined;
@@ -163,6 +169,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       signal?.removeEventListener("abort", onAbort);
       metadata?.finish();
       correlation?.finish();
+      outputEvidence?.dispose();
       detachOwner();
       detachSteering();
       ws.removeEventListener("open", onOpen);
@@ -421,6 +428,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
               beforeDispatch?.(new Headers(headers));
               if (frame.type === "response.create") continuationBase = prepared.outgoing;
               controlSent = true;
+              session.continuation = undefined;
               correlation?.finish();
               try { ws.send(prepared.text); } catch {
                 // A send failure has unknown delivery. Never replay or fall back.
@@ -538,6 +546,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         firstResponseAt ??= Date.now();
         try {
           if (!controlSent) correlation?.accept(normalized.payload);
+          if (!controlSent) outputEvidence?.observe(normalized.payload, rawEncodedText.byteLength);
           const response = normalized.payload.response;
           if (controlSent && type === "response.created" && record(response)
             && typeof response.id === "string" && session.hasCompleted(response.id)) {
@@ -560,6 +569,12 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             cleanup();
             try { controller.close(); } catch { /* unused stream already closed */ }
             session.dispose();
+            if (options.retryFullInput && !controlSent && !rejectedCorrelation
+              && record(normalized.payload.error) && normalized.payload.error.code === "previous_response_not_found") {
+              try { options.onContinuationDecision?.("upstream-state-missing", 0); } catch { /* diagnostics only */ }
+              resolve(options.retryFullInput());
+              return;
+            }
             observe({ kind: "response", transport: "websocket", response: rejection });
             resolve(rejection);
             return;
@@ -592,6 +607,8 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
       if (!controlFrame) relayedEvents += 1;
       if (nativeControl ? steeringEnded : (type === "response.completed" || type === "response.failed" || type === "response.incomplete" || type === "error")) {
         const completedId = controlSent ? null : correlation?.completed(normalized.payload) ?? null;
+        session.continuation = completedId && options.continuationFrameText
+          ? completedCodexWsContinuation(options.continuationFrameText, normalized.payload.response, outputEvidence) : undefined;
         terminal = true;
         cleanup();
         try { controller.close(); } catch { /* already closed */ }

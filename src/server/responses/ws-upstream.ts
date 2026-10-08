@@ -23,6 +23,7 @@ import { codexWsExchange } from "./codex-ws-exchange";
 import type { ProviderFetchOptions } from "./fetch-helpers";
 import { CodexWsSession } from "./codex-ws-session";
 import { codexWsPool, codexWsReuseIdentity } from "./codex-ws-pool";
+import { planCodexWsContinuation, type CodexWsContinuationDecisionReason } from "./codex-ws-continuation";
 import { codexWsCreateFrameExceedsLimit } from "./codex-ws-wire";
 import { isLoopbackUrl, rewriteWebSocketDial } from "../../plugins/upstream-hooks";
 export { CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES, MAX_CODEX_WS_QUEUE_BYTES,
@@ -160,6 +161,7 @@ export function codexWsUpstreamFetch(
   observeTransport?: ProviderFetchOptions["observeTransport"],
   nativeControl?: NativeResponseControl,
   beforeContinuation?: () => Promise<void>,
+  incrementalEnabled = false,
 ): Promise<Response> {
   const prepared = prepareCodexWsRequest(url, init);
   if (!prepared) return sseFallback(url, prepareCodexHttpInit(url, init));
@@ -211,6 +213,12 @@ export function codexWsUpstreamFetch(
     return Promise.reject(error);
   }
   let session: CodexWsSession;
+  let exchangePrepared = prepared;
+  let retryFullInput: (() => Promise<Response>) | undefined;
+  let continuationFrameText: string | undefined;
+  const decision = (reason: CodexWsContinuationDecisionReason, skippedItems: number): void => {
+    try { observeTransport?.({ kind: "continuation", reason, skippedItems }); } catch { /* diagnostics only */ }
+  };
   try {
     // Injection keeps a private physical connection. Dormant steering may lease
     // a same-turn socket; a physical control send makes that exchange one-shot.
@@ -227,14 +235,40 @@ export function codexWsUpstreamFetch(
       session.dispose();
       return sseFallback(url, init);
     }
+    if (incrementalEnabled && prepared.canonical && dial.url === CODEX_RESPONSES_WS_URL
+      && session.retainable && (!control || control.kind === "steering")) {
+      continuationFrameText = frameText;
+      const continuation = planCodexWsContinuation(frameText, session.continuation);
+      decision(continuation.reason, continuation.skippedItems);
+      if (continuation.reason === "incremental") {
+        exchangePrepared = { ...prepared, frameText: continuation.frameText };
+        // A typed pre-acceptance state miss is known non-execution. Exactly one cold full
+        // exchange follows pacing and the captured auth/admission guard; it cannot optimize again.
+        retryFullInput = async () => {
+          await beforeContinuation?.();
+          if (signal?.aborted) throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+          beforeDispatch?.(new Headers(prepared.headers));
+          const retryDial = planCodexWsDial(wsUrl, prepared.headers, proxy);
+          if (!retryDial) return sseFallback(url, init);
+          const fresh = new CodexWsSession(retryDial.url, retryDial.headers, false, undefined, retryDial.proxy);
+          if (!fresh.reserve()) { fresh.dispose(); return sseFallback(url, init); }
+          return codexWsExchange({ session: fresh, url, init, prepared, sseFallback, onQuota, beforeDispatch,
+            onTransport, observeTransport, nativeControl: control, beforeContinuation,
+            bunVersion: typeof runtime === "string" ? runtime : runtime.version });
+        };
+      }
+    } else decision(!incrementalEnabled ? "disabled" : dial.url !== CODEX_RESPONSES_WS_URL ? "unsupported-shape" : "cold-connection", 0);
   } catch {
     return sseFallback(url, init);
   }
   return codexWsExchange({
-    session, url, init, prepared, sseFallback, onQuota, beforeDispatch,
+    session, url, init, prepared: exchangePrepared, sseFallback, onQuota, beforeDispatch,
     onTransport, observeTransport,
     nativeControl: control,
     beforeContinuation,
+    continuationFrameText,
+    retryFullInput,
+    onContinuationDecision: decision,
     bunVersion: typeof runtime === "string" ? runtime : runtime.version,
   });
 }

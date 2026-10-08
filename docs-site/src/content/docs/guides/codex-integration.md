@@ -145,6 +145,18 @@ Enabling native steering also permits reuse for ordinary completed requests. Onc
 or continuation frame is sent, that socket stays exclusive to its response chain and is retired
 when the chain ends; native injection keeps its separate connection lifecycle.
 
+An experimental optimization is available with `OCX_CODEX_WS_INCREMENTAL_INPUT=1` in the
+proxy process environment. It sends only new input plus `previous_response_id` when the same
+canonical ChatGPT socket proves an exact match for its last completed context, tool-call identity,
+and request settings. It remains off when the variable is absent or has another value.
+Compaction, changed settings or context, unsupported shapes, and cold connections keep full input.
+A known missing-parent rejection before response acceptance allows one full replay; an accepted
+response or ambiguous transport failure does not. Local reconstruction remains available for recovery.
+Logs distinguish `continuationMode: "websocket_incremental"`, the closed
+`continuationDecisionReason`, and `upstreamReplayedItemCount` from local `replayedItemCount`.
+Compare forwarded bytes and input-item counts to assess wire savings; chained input-token accounting
+still includes earlier context.
+
 To keep the built-in ChatGPT provider on HTTP/SSE, set `providers.openai.upstreamWebsocket`
 to `false` in `~/.opencodex/config.json` and restart the proxy. Merge this field into the
 existing `openai` provider; preserve its account mode and other settings. Omit the field
