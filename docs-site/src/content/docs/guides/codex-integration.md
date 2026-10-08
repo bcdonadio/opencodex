@@ -148,7 +148,8 @@ when the chain ends; native injection keeps its separate connection lifecycle.
 An experimental optimization is available with `OCX_CODEX_WS_INCREMENTAL_INPUT=1` in the
 proxy process environment. It sends only new input plus `previous_response_id` when the same
 canonical ChatGPT socket proves an exact match for its last completed context, tool-call identity,
-and request settings. It remains off when the variable is absent or has another value.
+and request settings. Matching supports raw replay and Codex's typed, turn-stamped output history;
+historical input is never normalized to force a match. It remains off when the variable is absent or has another value.
 Compaction, changed settings or context, unsupported shapes, and cold connections keep full input.
 A known missing-parent rejection before response acceptance allows one full replay; an accepted
 response or ambiguous transport failure does not. Local reconstruction remains available for recovery.

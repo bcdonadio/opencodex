@@ -312,3 +312,110 @@ test("complete consistent observed output preserves safe incremental continuatio
   await drain(); await drain(init([first, replayCall(1), result(1)]));
   expect(Socket.all[0]!.frames[1]!.input).toEqual([result(1)]);
 });
+
+const codexRawReasoning = { type: "reasoning", id: "rs_fixture", summary: [{ type: "summary_text", text: "summary" }], encrypted_content: "fixture_ciphertext" };
+const codexRawCall = { ...call(1), namespace: null };
+const codexRawMessage = { type: "message", id: "msg_fixture", role: "assistant", status: "completed", phase: null,
+  content: [{ type: "output_text", text: "fixture reply", annotations: [], logprobs: [] }] };
+const stamped = { turn_id: "fixture-turn" };
+const codexReplayReasoning = { type: "reasoning", summary: [{ type: "summary_text", text: "summary" }], encrypted_content: "fixture_ciphertext", content: null,
+  internal_chat_message_metadata_passthrough: stamped };
+const codexReplayCall = { type: "function_call", call_id: "call_1", name: "work", arguments: "{}", internal_chat_message_metadata_passthrough: stamped };
+const codexReplayMessage = { type: "message", role: "assistant", content: [{ type: "output_text", text: "fixture reply" }],
+  internal_chat_message_metadata_passthrough: stamped };
+function emitCodexOutput(socket: Socket) { ++sequence; socket.complete([codexRawReasoning, codexRawCall, codexRawMessage]); }
+
+test("Codex typed replay preserves the same context after output projection and history turn stamping", async () => {
+  Socket.onSend = emitCodexOutput;
+  await drain(); Socket.onSend = socket => socket.complete();
+  await drain(init([first, codexReplayReasoning, codexReplayCall, codexReplayMessage, result(1)]));
+  expect(Socket.all[0]!.frames[1]!.input).toEqual([result(1)]);
+  expect(Socket.all[0]!.frames[1]!.previous_response_id).toBe("resp_1");
+});
+
+test.each(["arguments", "name", "call_id", "text", "namespace", "phase", "ciphertext", "summary", "foreign-turn"])(
+  "Codex typed projection preserves meaningful %s differences", async field => {
+    Socket.onSend = emitCodexOutput; await drain(); Socket.onSend = socket => socket.complete();
+    const reasoning = structuredClone(codexReplayReasoning) as Frame;
+    const functionCall = structuredClone(codexReplayCall) as Frame;
+    const message = structuredClone(codexReplayMessage) as Frame;
+    if (["arguments", "name", "call_id", "namespace"].includes(field)) functionCall[field] = "changed";
+    if (field === "text") message.content = [{ type: "output_text", text: "changed" }];
+    if (field === "phase") message.phase = "commentary";
+    if (field === "ciphertext") reasoning.encrypted_content = "changed";
+    if (field === "summary") reasoning.summary = [{ type: "summary_text", text: "changed" }];
+    if (field === "foreign-turn") functionCall.internal_chat_message_metadata_passthrough = { turn_id: "another-turn" };
+    const input = [first, reasoning, functionCall, message, result(1)]; await drain(init(input));
+    expect(Socket.all[0]!.frames[1]!.input).toEqual(input);
+    expect(Socket.all[0]!.frames[1]!.previous_response_id).toBeUndefined();
+  });
+
+test("typed replay projection cannot normalize away changes to the originally sent input", async () => {
+  Socket.onSend = emitCodexOutput; await drain(init([{ ...first, status: "completed" }]));
+  Socket.onSend = socket => socket.complete();
+  const input = [first, codexReplayReasoning, codexReplayCall, codexReplayMessage, result(1)]; await drain(init(input));
+  expect(Socket.all[0]!.frames[1]!.input).toEqual(input);
+  expect(Socket.all[0]!.frames[1]!.previous_response_id).toBeUndefined();
+});
+
+test("typed projection never weakens raw completed-item versus terminal coverage evidence", async () => {
+  Socket.onSend = socket => {
+    const id = `resp_${++sequence}`;
+    queueMicrotask(() => {
+      socket.emit({ type: "response.created", response: { id } });
+      socket.emit({ type: "response.output_item.added", output_index: 0, item: codexRawCall });
+      socket.emit({ type: "response.output_item.done", output_index: 0, item: codexRawCall });
+      const { status: _status, ...differentTerminal } = codexRawCall;
+      socket.emit({ type: "response.completed", response: { id, status: "completed", output: [differentTerminal] } });
+    });
+  };
+  await drain(); Socket.onSend = socket => socket.complete();
+  const input = [first, codexReplayCall, result(1)]; await drain(init(input));
+  expect(Socket.all[0]!.frames[1]!.input).toEqual(input);
+  expect(Socket.all[0]!.frames[1]!.previous_response_id).toBeUndefined();
+});
+
+test("typed custom calls retain their completed status and namespace", async () => {
+  Socket.onSend = socket => { ++sequence; socket.complete([{ type: "custom_tool_call", id: "ctc_fixture", status: "completed", call_id: "call_1", name: "work", namespace: "tools", input: "fixture" }]); };
+  await drain(); Socket.onSend = socket => socket.complete();
+  const custom = { type: "custom_tool_call", status: "completed", call_id: "call_1", name: "work", namespace: "tools", input: "fixture",
+    internal_chat_message_metadata_passthrough: stamped };
+  await drain(init([first, custom, result(1)]));
+  expect(Socket.all[0]!.frames[1]!.input).toEqual([result(1)]);
+});
+
+test("typed custom-call status removal cannot acquire a different context", async () => {
+  Socket.onSend = socket => { ++sequence; socket.complete([{ type: "custom_tool_call", id: "ctc_fixture", status: "completed", call_id: "call_1", name: "work", input: "fixture" }]); };
+  await drain(); Socket.onSend = socket => socket.complete();
+  const input = [first, { type: "custom_tool_call", call_id: "call_1", name: "work", input: "fixture", internal_chat_message_metadata_passthrough: stamped }, result(1)];
+  await drain(init(input));
+  expect(Socket.all[0]!.frames[1]!.input).toEqual(input);
+  expect(Socket.all[0]!.frames[1]!.previous_response_id).toBeUndefined();
+});
+
+test("empty reasoning content is omitted and a missing encrypted channel replays as null", async () => {
+  Socket.onSend = socket => { ++sequence; socket.complete([{ type: "reasoning", id: "rs_fixture", summary: [], content: [] }, codexRawCall]); };
+  await drain(); Socket.onSend = socket => socket.complete();
+  const reasoning = { type: "reasoning", summary: [], encrypted_content: null, internal_chat_message_metadata_passthrough: stamped };
+  await drain(init([first, reasoning, codexReplayCall, result(1)]));
+  expect(Socket.all[0]!.frames[1]!.input).toEqual([result(1)]);
+});
+
+test("existing metadata and nonempty output annotations remain meaningful proof fields", async () => {
+  Socket.onSend = socket => { ++sequence; socket.complete([{ ...codexRawCall, internal_chat_message_metadata_passthrough: { turn_id: "fixture-turn", unknown: "preserve" } },
+    { ...codexRawMessage, content: [{ type: "output_text", text: "fixture reply", annotations: [{ type: "citation", value: "fixture" }] }] }]); };
+  await drain(); Socket.onSend = socket => socket.complete();
+  const input = [first, codexReplayCall, codexReplayMessage, result(1)]; await drain(init(input));
+  expect(Socket.all[0]!.frames[1]!.input).toEqual(input);
+  expect(Socket.all[0]!.frames[1]!.previous_response_id).toBeUndefined();
+});
+
+test("nested-only turn metadata cannot authorize typed output stamping", async () => {
+  const metadata = { "x-codex-turn-metadata": JSON.stringify({ thread_id: "fixture-thread", turn_id: "fixture-turn" }) };
+  Socket.onSend = emitCodexOutput; await drain(init([first], { client_metadata: metadata }));
+  Socket.onSend = socket => socket.complete();
+  const input = [first, codexReplayReasoning, codexReplayCall, codexReplayMessage, result(1)];
+  await drain(init(input, { client_metadata: metadata }));
+  expect(Socket.all[0]!.frames[1]!.input).toEqual(input);
+  expect(Socket.all[0]!.frames[1]!.previous_response_id).toBeUndefined();
+});

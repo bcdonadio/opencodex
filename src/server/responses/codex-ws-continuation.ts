@@ -7,6 +7,7 @@ export interface CodexWsContinuationProof {
   responseId: string;
   count: number;
   inputDigest: string;
+  codexInputDigest?: string;
   settingsDigest: string;
 }
 interface Decision { reason: CodexWsContinuationDecisionReason; skippedItems: number; frameText: string }
@@ -73,6 +74,46 @@ function replayOutputItem(item: unknown): unknown {
   return rest;
 }
 
+/** Output-only projection of Codex's typed replay; the original sent input stays exact. */
+function codexReplayOutput(output: unknown[], body: Record<string, unknown>): unknown[] | undefined {
+  const turnId = record(body.client_metadata) ? body.client_metadata.turn_id : undefined;
+  if (!validId(turnId) || !turnId.trim()) return undefined;
+  return output.map(item => {
+    const raw = replayOutputItem(item);
+    if (!record(raw) || !["message", "function_call", "custom_tool_call", "reasoning"].includes(String(raw.type))) return raw;
+    const next: Record<string, unknown> = { ...raw };
+    // protocol/models.rs ResponseItem: these variants have no output status field.
+    if (next.status === "completed" && next.type !== "custom_tool_call") delete next.status;
+    if ((next.type === "function_call" || next.type === "custom_tool_call") && next.namespace === null) delete next.namespace;
+    if (next.type === "message") {
+      if (next.phase === null) delete next.phase;
+      if (Array.isArray(next.content)) next.content = next.content.map(part => {
+        if (!record(part) || part.type !== "output_text") return part;
+        const projected = { ...part };
+        // ContentItem::OutputText contains text only; retain nonempty ancillary data conservatively.
+        for (const field of ["annotations", "logprobs"] as const) {
+          if (Array.isArray(projected[field]) && (projected[field] as unknown[]).length === 0) delete projected[field];
+        }
+        return projected;
+      });
+    } else if (next.type === "reasoning") {
+      // The Rust Option serializer retains None as null and omits Some(empty content).
+      if (next.content == null) next.content = null;
+      else if (Array.isArray(next.content) && next.content.length === 0) delete next.content;
+      if (next.encrypted_content === undefined) next.encrypted_content = null;
+    }
+    // session/mod.rs stamps a missing turn id at the durable history boundary. This variant
+    // requires the directly declared, pool-validated turn id; nested-only callers stay raw.
+    const metadata = next.internal_chat_message_metadata_passthrough;
+    if (metadata == null || record(metadata)) {
+      const stamped = metadata == null ? {} : { ...metadata };
+      if (stamped.turn_id == null) stamped.turn_id = turnId;
+      next.internal_chat_message_metadata_passthrough = stamped;
+    }
+    return next;
+  });
+}
+
 /** Index/identity/content digests prove the terminal covers every completed wire item. */
 export class CodexWsOutputEvidence {
   private readonly items = new Map<number, { identity: string; done?: string }>();
@@ -136,9 +177,12 @@ export function completedCodexWsContinuation(frameText: string, response: unknow
   // Canonical store:false input serialization drops only top-level item ids, preserving call_id.
   const output = response.output.map(replayOutputItem);
   const inputDigest = fingerprint([...body.input, ...output]);
+  const codexOutput = codexReplayOutput(response.output, body);
+  const codexInputDigest = codexOutput ? fingerprint([...body.input, ...codexOutput]) : undefined;
   const settingsDigest = settings(body);
   return inputDigest && settingsDigest
-    ? { responseId: response.id, count: body.input.length + output.length, inputDigest, settingsDigest } : undefined;
+    ? { responseId: response.id, count: body.input.length + output.length, inputDigest,
+        ...(codexInputDigest ? { codexInputDigest } : {}), settingsDigest } : undefined;
 }
 
 export function planCodexWsContinuation(frameText: string, proof: CodexWsContinuationProof | undefined): Decision {
@@ -148,7 +192,9 @@ export function planCodexWsContinuation(frameText: string, proof: CodexWsContinu
   if (!supported(body)) return full("unsupported-shape");
   if (!proof) return full("cold-connection");
   if (settings(body) !== proof.settingsDigest) return full("settings-changed");
-  if (body.input.length <= proof.count || fingerprint(body.input.slice(0, proof.count)) !== proof.inputDigest) return full("context-mismatch");
+  if (body.input.length <= proof.count) return full("context-mismatch");
+  const prefixDigest = fingerprint(body.input.slice(0, proof.count));
+  if (!prefixDigest || (prefixDigest !== proof.inputDigest && prefixDigest !== proof.codexInputDigest)) return full("context-mismatch");
   return { reason: "incremental", skippedItems: proof.count,
     frameText: JSON.stringify({ ...body, input: body.input.slice(proof.count), previous_response_id: proof.responseId }) };
 }

@@ -65,6 +65,9 @@ test("WebSocket continuation diagnostics distinguish local restoration from wire
     upstreamReplayedItemCount: 2, continuationMode: "local_replay",
     continuationDecisionReason: "upstream-state-missing",
   });
+  const explicit = { provider: "openai", model: "m" } as RequestLogContext;
+  transportObserver(explicit)({ kind: "continuation", reason: "context-mismatch", skippedItems: 0 });
+  expect(explicit.diagnostics?.upstreamReplayedItemCount).toBeUndefined();
   const raw = { ...ctx.diagnostics, continuationDecisionReason: "arbitrary provider detail" };
   expect(normalizeTransactionDiagnostics(raw)?.continuationDecisionReason).toBeUndefined();
 });
