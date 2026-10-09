@@ -28,7 +28,8 @@ function supported(body: unknown): body is Record<string, unknown> & { input: un
     && body.input.length <= MAX_ITEMS
     && !["previous_response_id", "stream_id", "generate", "conversation", "multi_agent", "context_management"].some(key => Object.hasOwn(body, key))
     && body.background !== true
-    && !body.input.some(item => record(item) && typeof item.type === "string" && /compaction|compact_trigger/.test(item.type));
+    && !body.input.some(item => record(item) && typeof item.type === "string" && /compaction|compact_trigger/.test(item.type)
+      && !(item.type === "compaction" && typeof item.encrypted_content === "string" && item.encrypted_content.length > 0));
 }
 
 /** Canonical object keys, exact array order and scalar values; bounded work, no retained content. */
@@ -82,6 +83,9 @@ function codexReplayOutput(output: unknown[], body: Record<string, unknown>): un
     const raw = replayOutputItem(item);
     if (!record(raw) || !["message", "function_call", "custom_tool_call", "reasoning"].includes(String(raw.type))) return raw;
     const next: Record<string, unknown> = { ...raw };
+    // ResponseItem ignores this upstream-only field, including populated objects.
+    // Project newly returned output only; previously sent input remains byte-semantic exact.
+    delete next.metadata;
     // protocol/models.rs ResponseItem: these variants have no output status field.
     if (next.status === "completed" && next.type !== "custom_tool_call") delete next.status;
     if ((next.type === "function_call" || next.type === "custom_tool_call") && next.namespace === null) delete next.namespace;
@@ -195,6 +199,9 @@ export function planCodexWsContinuation(frameText: string, proof: CodexWsContinu
   if (body.input.length <= proof.count) return full("context-mismatch");
   const prefixDigest = fingerprint(body.input.slice(0, proof.count));
   if (!prefixDigest || (prefixDigest !== proof.inputDigest && prefixDigest !== proof.codexInputDigest)) return full("context-mismatch");
+  // A new compacted window must first be sent in full. Once accepted, its exact
+  // opaque item may remain in the proven prefix without disabling every later delta.
+  if (body.input.slice(proof.count).some(item => record(item) && item.type === "compaction")) return full("unsupported-shape");
   return { reason: "incremental", skippedItems: proof.count,
     frameText: JSON.stringify({ ...body, input: body.input.slice(proof.count), previous_response_id: proof.responseId }) };
 }
