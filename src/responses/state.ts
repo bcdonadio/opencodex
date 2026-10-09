@@ -21,6 +21,9 @@ import {
 import { collectReferencedSpillFileNames, snapshotReferencedSpillFileNames } from "./state/spill-inspect";
 import { selectSnapshotEntries, snapshotPayload } from "./state/snapshot-select";
 import { clientCarriedPrefixLength, providerIssuedIdentity } from "./state/replay-fingerprint";
+import { allowsUnforcedStoreFalseReplay } from "./state/unforced-store-false";
+import { computeResponseStateMetrics, type ResponseStateMetrics } from "./state/metrics";
+export type { ResponseStateMetrics } from "./state/metrics";
 export type { ResponseStateTempRecoveryResult, ResponseStateTempRecoveryOptions } from "./state/temp-recovery";
 export type { ResponseSpillDirInspection } from "./spill-store";
 export { recoverStaleResponseStateTemps, reclaimAbandonedResponseStateTemps, inspectAbandonedResponseStateTemps, sweepAbandonedResponseStateTemps } from "./state/temp-recovery";
@@ -125,6 +128,7 @@ export interface ResidentResponseState {
   /** Index in `items` where provider output begins; see clientCarriedPrefixLength. */
   providerOutputStart?: number;
   providers?: OcxProviderContinuationState;
+  unforcedStoreFalse?: boolean;
   sizeBytes: number;
 }
 
@@ -135,6 +139,7 @@ export interface SpilledResponseState {
   /** Mirrors the spilled payload boundary so a spilled entry keeps its anchor. */
   providerOutputStart?: number;
   providers?: OcxProviderContinuationState;
+  unforcedStoreFalse?: boolean;
   spill: ResponseSpillRef;
   sizeBytes: number;
 }
@@ -328,6 +333,7 @@ function measureResidentEntry(id: string, entry: ResidentInput): ResidentRespons
     items: entry.items,
     ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
     ...(entry.providers ? { providers: entry.providers } : {}),
+    ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
   });
   return sizeBytes === null ? null : { kind: "resident", ...entry, sizeBytes };
 }
@@ -430,7 +436,9 @@ function swapResidentForSpill(id: string, expected: ResidentResponseState, ref: 
     kind: "spill",
     createdAt: expected.createdAt,
     ...(expected.clientThreadId ? { clientThreadId: expected.clientThreadId } : {}),
+    ...(expected.providerOutputStart !== undefined ? { providerOutputStart: expected.providerOutputStart } : {}),
     ...(expected.providers ? { providers: expected.providers } : {}),
+    ...(expected.unforcedStoreFalse ? { unforcedStoreFalse: expected.unforcedStoreFalse } : {}),
     spill: ref,
   };
   const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
@@ -454,6 +462,7 @@ function replaceSpillEntryAtomically(
       items: candidate.items,
       ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
       ...(candidate.providers ? { providers: candidate.providers } : {}),
+      ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
     });
     const base: Omit<SpilledResponseState, "sizeBytes"> = {
       kind: "spill",
@@ -461,6 +470,7 @@ function replaceSpillEntryAtomically(
       ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
       ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
       ...(candidate.providers ? { providers: candidate.providers } : {}),
+      ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
       spill: ref,
     };
     const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
@@ -546,6 +556,7 @@ function admitOversizedCandidate(
       items: candidate.items,
       ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
       ...(candidate.providers ? { providers: candidate.providers } : {}),
+      ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
     });
     // Enforce the ceiling against the REAL envelope: the spill payload adds
     // the {version, responseId, ...} wrapper, so a candidate within the
@@ -560,7 +571,9 @@ function admitOversizedCandidate(
       kind: "spill",
       createdAt: candidate.createdAt,
       ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
+      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
       ...(candidate.providers ? { providers: candidate.providers } : {}),
+      ...(candidate.unforcedStoreFalse ? { unforcedStoreFalse: candidate.unforcedStoreFalse } : {}),
       spill: ref,
     };
     const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
@@ -948,6 +961,7 @@ function pruneResponses(at = now()): void {
         items: entry.items,
         ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
         ...(entry.providers ? { providers: entry.providers } : {}),
+        ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
       });
       if (swapResidentForSpill(oldestId, entry, ref)) noteSpillWriteSuccess();
     } catch (error) {
@@ -1007,6 +1021,7 @@ export function evictOldestResponseContinuationForBudget(): number {
       items: entry.items,
       ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
       ...(entry.providers ? { providers: entry.providers } : {}),
+      ...(entry.unforcedStoreFalse ? { unforcedStoreFalse: entry.unforcedStoreFalse } : {}),
     });
     if (swapResidentForSpill(id, entry, ref)) noteSpillWriteSuccess();
   } catch (error) {
@@ -1043,6 +1058,15 @@ function materializeEntry(
     schedulePersist();
     return { ok: false, failure };
   }
+  // A restricted snapshot stub must agree with the validated spill's provenance.
+  if (entry.unforcedStoreFalse && (result.payload.unforcedStoreFalse !== true
+    || entry.providerOutputStart === undefined || entry.providerOutputStart > result.payload.items.length
+    || entry.providerOutputStart !== result.payload.providerOutputStart)) {
+    spillCounters.readFailures += 1;
+    replaceWithSpillFailure(id, entry);
+    schedulePersist();
+    return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+  }
   const state = measureResidentEntry(id, {
     createdAt: result.payload.createdAt,
     ...(result.payload.clientThreadId ? { clientThreadId: result.payload.clientThreadId } : {}),
@@ -1051,6 +1075,7 @@ function materializeEntry(
       ? { providerOutputStart: result.payload.providerOutputStart }
       : {}),
     ...(result.payload.providers ? { providers: result.payload.providers } : {}),
+    ...(result.payload.unforcedStoreFalse ? { unforcedStoreFalse: result.payload.unforcedStoreFalse } : {}),
   });
   if (!state) {
     spillCounters.readFailures += 1;
@@ -1102,6 +1127,15 @@ export function expandPreviousResponseInput(
     replayScopeMismatchDrops += 1;
     return body;
   }
+  const clientInput = inputItems(request.input);
+  const stored = materialized.state.items;
+  const carried = clientCarriedPrefixLength(stored, clientInput);
+  if (
+    materialized.state.unforcedStoreFalse
+    && !allowsUnforcedStoreFalseReplay(stored, materialized.state.providerOutputStart, clientInput, carried)
+  ) {
+    return body;
+  }
   // The client already replayed this history verbatim. Prepending the stored copy would
   // double it, and the doubled turn is stored again, so the next turn triples (#1412 saw
   // 127k of real context reach 1.3M tokens this way).
@@ -1114,10 +1148,7 @@ export function expandPreviousResponseInput(
   // There is no invariant that provider output always carries ids, so an entry whose output
   // has none simply never skips.
   {
-    const clientInput = inputItems(request.input);
-    const stored = materialized.state.items;
     const anchor = materialized.state.providerOutputStart;
-    const carried = clientCarriedPrefixLength(stored, clientInput);
     if (
       carried === stored.length
       && anchor !== undefined
@@ -1138,10 +1169,10 @@ export function expandPreviousResponseInput(
   }
   const expanded = {
     ...request,
-    input: [...materialized.state.items, ...inputItems(request.input)],
+    input: [...stored, ...clientInput],
   };
   if (ephemeral.kind === "hit") markEphemeralReplayBody(expanded, ephemeral.expiresAt);
-  replayedInputPrefixLengths.set(expanded, materialized.state.items.length);
+  replayedInputPrefixLengths.set(expanded, stored.length);
   return expanded;
 }
 
@@ -1186,29 +1217,6 @@ export function previousResponseProviderState(responseId: string | undefined): O
   return providers ? structuredClone(providers) : undefined;
 }
 
-export interface ResponseStateMetrics {
-  count: number;
-  residentCount: number;
-  spillStubCount: number;
-  tombstoneCount: number;
-  totalBytes: number;
-  spillPayloadBytes: number;
-  largestBytes: number;
-  oldestAgeMs: number;
-  spillWrites: number;
-  spillWriteFailures: number;
-  spillWriteStatus: ResponseSpillWriteStatus;
-  spillWriteConsecutiveFailures: number;
-  spillLastWriteFailureCode: ResponseSpillWriteFailureCode | null;
-  spillLastWriteFailureOrigin: ResponseSpillWriteFailureOrigin | null;
-  spillAclRetryReturnedTimeouts: number;
-  spillAclTimeoutMemoRefusals: number;
-  spillLastWriteFailureAt: number | null;
-  spillLastWriteSuccessAt: number | null;
-  spillReadFailures: number;
-  replayScopeMismatchDrops: number;
-}
-
 /**
  * Observe-only snapshot of the in-RAM continuation store, surfaced via GET /api/system/memory.
  * Additive and side-effect free — it does NOT lazy-load the disk snapshot, prune, or evict — so a
@@ -1219,50 +1227,23 @@ export interface ResponseStateMetrics {
  * store (JS heap) or in the runtime allocator (native).
  */
 export function responseStateMetrics(): ResponseStateMetrics {
-  const at = now();
-  let largestBytes = 0;
-  let oldestCreatedAt = at;
-  let residentCount = 0;
-  let spillStubCount = 0;
-  let tombstoneCount = 0;
-  let spillPayloadBytes = 0;
-  for (const state of states.values()) {
-    const bytes = state.sizeBytes;
-    if (bytes > largestBytes) largestBytes = bytes;
-    if (state.createdAt < oldestCreatedAt) oldestCreatedAt = state.createdAt;
-    if (state.kind === "resident") {
-      residentCount += 1;
-    } else if (state.kind === "spill") {
-      spillStubCount += 1;
-      spillPayloadBytes += state.spill.payloadBytes;
-    } else tombstoneCount += 1;
-  }
-  return {
-    count: states.size,
-    residentCount,
-    spillStubCount,
-    tombstoneCount,
+  return computeResponseStateMetrics({
+    states: states.values(),
+    stateCount: states.size,
+    now: now(),
     totalBytes: responseContinuationRetainedStoreSnapshot().bytes,
-    spillPayloadBytes,
-    largestBytes,
-    oldestAgeMs: states.size > 0 ? at - oldestCreatedAt : 0,
     spillWrites: spillCounters.writes,
     spillWriteFailures: spillCounters.writeFailures,
-    spillWriteStatus: spillWriteHealth.consecutiveFailures > 0
-      ? "degraded"
-      : spillWriteHealth.lastSuccessAt !== null
-        ? "healthy"
-        : "initial",
     spillWriteConsecutiveFailures: spillWriteHealth.consecutiveFailures,
-    spillLastWriteFailureCode: spillWriteHealth.lastFailureCode,
-    spillLastWriteFailureOrigin: spillWriteHealth.lastFailureOrigin,
+    spillLastFailureCode: spillWriteHealth.lastFailureCode,
+    spillLastFailureOrigin: spillWriteHealth.lastFailureOrigin,
+    spillLastSuccessAt: spillWriteHealth.lastSuccessAt,
     spillAclRetryReturnedTimeouts: spillCounters.aclRetryReturnedTimeouts,
     spillAclTimeoutMemoRefusals: spillCounters.aclTimeoutMemoRefusals,
-    spillLastWriteFailureAt: spillWriteHealth.lastFailureAt,
-    spillLastWriteSuccessAt: spillWriteHealth.lastSuccessAt,
+    spillLastFailureAt: spillWriteHealth.lastFailureAt,
     spillReadFailures: spillCounters.readFailures,
     replayScopeMismatchDrops,
-  };
+  });
 }
 
 /**

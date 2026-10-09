@@ -55,6 +55,12 @@ export const pt: Record<TKey, string> = {
   "integrations.droidReasoning.clear": "Limpar padrão",
   "integrations.droidReasoning.saveReview": "Salvar / revisar alterações",
 
+  "sidecar.pool": "Pool de contas",
+  "sidecar.poolCurrent": "Pool da solicitação atual",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · Pool 2",
+  "sidecar.poolMixed": "Esta seleção explícita pode usar um pool diferente da solicitação principal.",
+  "provider.name.anthropic2": "Anthropic · Pool 2",
   "nav.claude": "Claude",
   "claude.pageSub": "Roteamento e configurações do OpenCodex para o Claude Code.",
   "pws.anthropicAccountThresholdHint": "Substitui o padrão do pool do Claude. 0 desativa a troca por uso apenas para esta conta; a pausa e a recuperação de limite de taxa continuam valendo.",

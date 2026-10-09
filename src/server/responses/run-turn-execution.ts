@@ -10,6 +10,7 @@ import { createAdapterEventQueue, preflightAdapterEvents, type AdapterEventPrefl
 import {
   bindRouteReasoningReplayScope,
   adapterNeedsForcedContinuation,
+  adapterNeedsToolCallContinuation,
   adapterResponseReachedServingTerminal,
 } from "./core-replay";
 import { noteAttemptRecoveryWithheld, sealRequestAttemptIdentity, recordAttemptCredentialSource, observeRequestTransport } from "../request-log";
@@ -52,6 +53,7 @@ import { planWebSearch } from "../../web-search";
 import { runTurnWebSearchInitialParsed, runTurnWebSearchLoop } from "../../web-search/run-turn-loop";
 import { WEB_SEARCH_TOOL_NAME } from "../../web-search/synthetic-tool";
 import { orderDevinMessagesOutput } from "../../claude/devin-output-order";
+import { unboundPoolSpendRefusalMessage } from "../workflow-refusal";
 
 // LOCAL PATCH (runturn-websearch): top-level fields route binding or the
 // adapter itself may write during a turn. Iteration-local `turnParsed` objects
@@ -333,7 +335,7 @@ export async function executeResponsesRunTurn(
                 status: 429,
                 errorType: "rate_limit_error",
                 code: SEND_BUDGET_EXHAUSTED_CODE,
-                message: err.message,
+                message: unboundPoolSpendRefusalMessage(logCtx) ?? err.message,
               }
             : {
                 type: "error",
@@ -794,7 +796,10 @@ export async function executeResponsesRunTurn(
                 parsed._rawBody,
                 response,
                 continuationStateForResponse(providerState),
-                responseStateOptions(adapterNeedsForcedContinuation(transportState.adapter.name)),
+                {
+                  ...responseStateOptions(adapterNeedsForcedContinuation(transportState.adapter.name)),
+                  retainForToolContinuation: adapterNeedsToolCallContinuation(transportState.adapter.name),
+                },
               );
             }
             notifyResponseComplete(response);
@@ -940,7 +945,10 @@ export async function executeResponsesRunTurn(
           parsed._rawBody,
           json,
           continuationStateForResponse(providerState),
-          responseStateOptions(adapterNeedsForcedContinuation(transportState.adapter.name)),
+          {
+            ...responseStateOptions(adapterNeedsForcedContinuation(transportState.adapter.name)),
+            retainForToolContinuation: adapterNeedsToolCallContinuation(transportState.adapter.name),
+          },
         );
       }
       // #1926 gap 2: the buffered path queued its signature persists inside

@@ -28,6 +28,12 @@ export const zh: Record<TKey, string> = {
   "logs.diagnostics.failed": "无法下载支持包。请重试。",
   "logs.diagnostics.yes": "是",
   "logs.diagnostics.no": "否",
+  "sidecar.pool": "账户池",
+  "sidecar.poolCurrent": "使用当前请求的账户池",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · 账户池 2",
+  "sidecar.poolMixed": "此显式选择可能使用与主请求不同的账户池。",
+  "provider.name.anthropic2": "Anthropic · 账户池 2",
   "nav.claude": "Claude",
   "claude.pageSub": "管理 Claude Code 的 OpenCodex 路由和设置。",
 

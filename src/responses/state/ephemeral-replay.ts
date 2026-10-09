@@ -2,6 +2,7 @@ import { enforceAppOwnedMemoryBudget } from "../../lib/app-owned-memory";
 import type { OcxProviderContinuationState } from "../../types";
 import type { ResidentInput, ResidentResponseState } from "../state";
 import { isBodyNonPersistable, markBodyNonPersistable } from "./body-policy";
+import { hasPendingClientToolCall } from "./unforced-store-false";
 
 const EPHEMERAL_RESPONSE_TTL_MS = 15 * 60 * 1_000;
 const MAX_EPHEMERAL_RESPONSES = 128;
@@ -26,6 +27,7 @@ export type EphemeralReplayResolution =
 
 export type RememberResponseStateOptions = {
   force?: boolean;
+  retainForToolContinuation?: boolean;
   clientThreadId?: string;
   ephemeral?: boolean;
   ephemeralScope?: string;
@@ -181,13 +183,14 @@ export function rememberResponseState(
   }
   // `force` bypasses only the store:false skip. Non-persistable bodies returned above never
   // reach the durable store, regardless of force.
-  if (request.store === false && !opts?.force) return;
   if (typeof response.id !== "string" || !Array.isArray(response.output)) return;
   if (response.status === "incomplete") {
     const details = response.incomplete_details;
     if (!details || typeof details !== "object" || Array.isArray(details)
       || (details as { reason?: unknown }).reason !== "max_output_tokens") return;
   } else if (response.status !== undefined && response.status !== "completed") return;
+  const unforcedStoreFalse = request.store === false && !opts?.force;
+  if (unforcedStoreFalse && !(opts?.retainForToolContinuation === true && hasPendingClientToolCall(response.output))) return;
   const bound = requireStore();
   bound.ensureLoaded();
   const normalizedProviderState: OcxProviderContinuationState = typeof providerState === "string"
@@ -206,6 +209,7 @@ export function rememberResponseState(
     items: [...requestItems, ...response.output],
     providerOutputStart: requestItems.length,
     ...(Object.keys(normalizedProviderState).length > 0 ? { providers: normalizedProviderState } : {}),
+    ...(unforcedStoreFalse ? { unforcedStoreFalse: true } : {}),
   });
   enforceAppOwnedMemoryBudget();
   bound.schedulePersist();

@@ -30,6 +30,12 @@ export const en = {
   "logs.diagnostics.failed": "Could not download the support bundle. Try again.",
   "logs.diagnostics.yes": "Yes",
   "logs.diagnostics.no": "No",
+  "sidecar.pool": "Pool",
+  "sidecar.poolCurrent": "Current request's pool",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · Pool 2",
+  "sidecar.poolMixed": "This explicit selection may use a different pool from the main request.",
+  "provider.name.anthropic2": "Anthropic · Pool 2",
   "nav.claude": "Claude",
   "claude.pageSub": "OpenCodex routing and settings for Claude Code.",
 

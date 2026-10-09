@@ -1,4 +1,6 @@
 import { transportObserver, recordRequestedReasoning } from "./transaction-capture";
+import { createPhysicalSendReporter } from "../lib/request-execution-budget";
+import { createInferenceSendBudget } from "./inference/context";
 import { buildOpenAIChatPassthroughRequest, createOpenAIChatAdapter } from "../adapters/openai-chat";
 import type { AdapterRequest, ProviderAdapter } from "../adapters/base";
 import { isNativeChatRouteEligible } from "./chat-native-eligibility";
@@ -18,7 +20,7 @@ import {
   isCyberPolicyMessage,
   SEND_BUDGET_EXHAUSTED_CODE,
 } from "../lib/errors";
-import type { RequestExecutionBudget } from "../lib/request-execution-budget";
+import { reportDispatchSends, type RequestExecutionBudget, type SingleUseDispatchPermit } from "../lib/request-execution-budget";
 import type { AdmissionLease } from "../lib/admission";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { redactSecretString } from "../lib/redact";
@@ -200,6 +202,7 @@ export interface NativeChatExecution extends HandleNativeChatOptions {
    * the parent row, replace the one the final log settles.
    */
   sendBudget?: RequestExecutionBudget;
+  comboDispatchPermit?: SingleUseDispatchPermit;
   /** Replaces the request-relative first-output mark; a combo child records its own. */
   onFirstOutput?: () => void;
   /** The lease a streamed body holds; defaults to `logIds.turnAdmissionLease`. */
@@ -256,6 +259,7 @@ export function createNativeChatComboSource(input: {
       translatorBudget: input.translatorBudget,
       finishLog: child.finishLog,
       sendBudget: child.sendBudget,
+      comboDispatchPermit: child.comboDispatchPermit,
       onFirstOutput: child.onFirstOutput,
       ...(child.turnAdmissionLease ? { turnAdmissionLease: child.turnAdmissionLease } : {}),
     }, child.attemptHandle),
@@ -318,6 +322,7 @@ export async function runNativeChatAttempt(
   let activeProvider: OcxProviderConfig = route.provider;
   stampApiKeyAccountLabel(logCtx, route.providerName, activeProvider);
   const spendTracker = sendBudget ? undefined : attachRequestSpendTracker(req, logCtx);
+  const physicalBudget = sendBudget ?? createInferenceSendBudget(req, logCtx);
   let activeAdapter: ProviderAdapter = createOpenAIChatAdapter(activeProvider);
   let activeRequest: AdapterRequest;
   let retainedRequestBytes = 0;
@@ -456,43 +461,50 @@ export async function runNativeChatAttempt(
               const encoding = new Headers(init.headers).get("accept-encoding");
               if (!headers.has("accept-encoding") && encoding) headers.set("accept-encoding", encoding);
               if (init.signal?.aborted) throw init.signal.reason;
-              if (sendBudget) {
-                // Backstop for sends the helper cannot see coming (a reset replay). The first
-                // report settles the combo's booking; each later one is charged and booked.
-                if (physicalSends > 0 && sendBudget.remainingBaseSends(sharedSendCap) <= 0) {
-                  throw new SendBudgetExhaustedError(safeHostLabel(request.url));
+              const spendReport = createPhysicalSendReporter(physicalBudget, () => ({
+                poolId: logCtx.spendPoolId ?? route.providerName, identityId: logCtx.accountLogLabel,
+              }), execution.comboDispatchPermit);
+              let dispatched: Response;
+              try {
+                // Capture this request's spend policy at its first physical boundary, including
+                // observe-only starts; later configuration changes belong to later requests.
+                if (spendReport.beforeSend && !spendReport.beforeSend()) {
+                  if ((logCtx.spendTracker as { refusals?: number } | undefined)?.refusals) throw new NativeChatSpendRefusal();
+                  throw new SendBudgetExhaustedError();
                 }
-                physicalSends += 1;
-                sendBudget.used += 1;
-              } else if (!spendTracker?.charge()) throw new NativeChatSpendRefusal();
-              noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
-              const customFetch = (activeProvider as OcxProviderTransport).fetch;
-              onHttpDispatch();
-              const wireInit = applyUpstreamRecoveryInit({
-                ...init, method: request.method, headers, body: request.body,
-              }, transportRecovery);
-              if (!customFetch) {
-                const executed = await sendWithConnectionPolicy(
-                  execute,
+                if (!physicalBudget.spendEnforced && sendBudget) {
+                  // Backstop for sends the helper cannot see coming (a reset replay). The first
+                  // report settles the combo's booking; each later one is charged and booked.
+                  if (physicalSends > 0 && sendBudget.remainingBaseSends(sharedSendCap) <= 0) {
+                    throw new SendBudgetExhaustedError(safeHostLabel(request.url));
+                  }
+                  physicalSends += 1;
+                  reportDispatchSends(sendBudget, 1, execution.comboDispatchPermit);
+                } else if (!physicalBudget.spendEnforced && !spendTracker?.charge()) throw new NativeChatSpendRefusal();
+                noteProviderAttemptSend(logCtx, route.providerName, activeProvider, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
+                // A reselected provider transport is still a physical send: the connection policy
+                // and manual-redirect ownership wrap the selected implementation (#4992).
+                const customFetch = (activeProvider as OcxProviderTransport).fetch;
+                onHttpDispatch();
+                const wireInit = applyUpstreamRecoveryInit({
+                  ...init, method: request.method, headers, body: request.body,
+                }, transportRecovery);
+                const observe = customFetch ? transportObserver(logCtx) : undefined;
+                observe?.({ kind: "send", transport: "http", body: wireInit.body,
+                  target: diagnosticTarget(request.url, wireInit) });
+                dispatched = await sendWithConnectionPolicy(
+                  customFetch ?? execute,
                   request.url,
                   wireInit,
                   { providerName: route.providerName, provider: activeProvider },
                 );
-                if (!executed.ok) await recordKeyAttemptFailure(logCtx, executed, init.signal ?? upstream.signal);
-                return executed;
+                observe?.({ kind: "response", transport: "http", response: dispatched });
+              } finally {
+                try { if (physicalBudget.spendEnforced) spendReport(1); }
+                finally { spendReport.close?.(); }
               }
-              const observe = transportObserver(logCtx);
-              observe({ kind: "send", transport: "http", body: wireInit.body,
-                target: diagnosticTarget(request.url, wireInit) });
-              const response = await sendWithConnectionPolicy(
-                customFetch,
-                request.url,
-                wireInit,
-                { providerName: route.providerName, provider: activeProvider },
-              );
-              observe({ kind: "response", transport: "http", response });
-              if (!response.ok) await recordKeyAttemptFailure(logCtx, response, init.signal ?? upstream.signal);
-              return response;
+              if (!dispatched.ok) await recordKeyAttemptFailure(logCtx, dispatched, init.signal ?? upstream.signal);
+              return dispatched;
             },
           }),
         );
@@ -575,7 +587,7 @@ export async function runNativeChatAttempt(
     upstream.abort();
     if (req.signal.aborted) return fail(499, "Client cancelled request", "client_cancelled");
     const sendError = error instanceof UpstreamRetryEvidenceError ? error.cause : error;
-    if (sendBudget && sendError instanceof SendBudgetExhaustedError) {
+    if (sendError instanceof SendBudgetExhaustedError) {
       // A decision this process made, answered as the Responses path answers it: 429, not 502.
       return fail(429, sendError.message, SEND_BUDGET_EXHAUSTED_CODE, SEND_BUDGET_EXHAUSTED_CODE);
     }

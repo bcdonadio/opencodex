@@ -29,6 +29,12 @@ export const tr: Record<TKey, string> = {
   "logs.diagnostics.failed": "Destek paketi indirilemedi. Tekrar deneyin.",
   "logs.diagnostics.yes": "Evet",
   "logs.diagnostics.no": "Hayır",
+  "sidecar.pool": "Hesap havuzu",
+  "sidecar.poolCurrent": "Geçerli isteğin havuzu",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · Havuz 2",
+  "sidecar.poolMixed": "Bu açık seçim, ana istekten farklı bir havuz kullanabilir.",
+  "provider.name.anthropic2": "Anthropic · Havuz 2",
   "nav.claude": "Claude",
   "claude.pageSub": "Claude Code için OpenCodex yönlendirmesi ve ayarları.",
 

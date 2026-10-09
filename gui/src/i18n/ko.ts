@@ -28,6 +28,12 @@ export const ko: Record<TKey, string> = {
   "logs.diagnostics.failed": "지원 번들을 다운로드하지 못했습니다. 다시 시도하세요.",
   "logs.diagnostics.yes": "예",
   "logs.diagnostics.no": "아니요",
+  "sidecar.pool": "계정 풀",
+  "sidecar.poolCurrent": "현재 요청의 풀 사용",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · 풀 2",
+  "sidecar.poolMixed": "이 선택은 메인 요청과 다른 풀을 사용할 수 있습니다.",
+  "provider.name.anthropic2": "Anthropic · 풀 2",
   "nav.claude": "Claude",
   "claude.pageSub": "Claude Code의 OpenCodex 라우팅과 설정을 관리합니다.",
 

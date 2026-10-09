@@ -28,6 +28,12 @@ export const ja: Record<TKey, string> = {
   "logs.diagnostics.failed": "サポートバンドルをダウンロードできませんでした。再試行してください。",
   "logs.diagnostics.yes": "はい",
   "logs.diagnostics.no": "いいえ",
+  "sidecar.pool": "アカウントプール",
+  "sidecar.poolCurrent": "現在のリクエストのプール",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · プール2",
+  "sidecar.poolMixed": "この明示的な選択では、メインのリクエストと異なるプールを使用する場合があります。",
+  "provider.name.anthropic2": "Anthropic · プール2",
   "nav.claude": "Claude",
   "claude.pageSub": "Claude Code の OpenCodex ルーティングと設定を管理します。",
 

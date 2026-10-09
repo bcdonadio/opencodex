@@ -28,6 +28,12 @@ export const ru: Record<TKey, string> = {
   "logs.diagnostics.failed": "Не удалось скачать пакет для поддержки. Повторите попытку.",
   "logs.diagnostics.yes": "Да",
   "logs.diagnostics.no": "Нет",
+  "sidecar.pool": "Пул аккаунтов",
+  "sidecar.poolCurrent": "Пул текущего запроса",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · Пул 2",
+  "sidecar.poolMixed": "При явном выборе может использоваться другой пул, чем у основного запроса.",
+  "provider.name.anthropic2": "Anthropic · Пул 2",
   "nav.claude": "Claude",
   "claude.pageSub": "Маршрутизация и настройки OpenCodex для Claude Code.",
 

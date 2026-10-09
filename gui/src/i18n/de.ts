@@ -29,6 +29,12 @@ export const de: Record<TKey, string> = {
   "logs.diagnostics.failed": "Das Supportpaket konnte nicht heruntergeladen werden. Erneut versuchen.",
   "logs.diagnostics.yes": "Ja",
   "logs.diagnostics.no": "Nein",
+  "sidecar.pool": "Kontopool",
+  "sidecar.poolCurrent": "Pool der aktuellen Anfrage",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · Pool 2",
+  "sidecar.poolMixed": "Diese explizite Auswahl kann einen anderen Pool als die Hauptanfrage verwenden.",
+  "provider.name.anthropic2": "Anthropic · Pool 2",
   "nav.claude": "Claude",
   "claude.pageSub": "OpenCodex-Routing und Einstellungen für Claude Code.",
 

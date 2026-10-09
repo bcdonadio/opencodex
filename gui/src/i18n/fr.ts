@@ -28,6 +28,12 @@ export const fr: Record<TKey, string> = {
   "logs.diagnostics.failed": "Impossible de télécharger le dossier d’assistance. Réessayez.",
   "logs.diagnostics.yes": "Oui",
   "logs.diagnostics.no": "Non",
+  "sidecar.pool": "Pool de comptes",
+  "sidecar.poolCurrent": "Pool de la requête actuelle",
+  "sidecar.poolA": "Anthropic",
+  "sidecar.poolB": "Anthropic · Pool 2",
+  "sidecar.poolMixed": "Ce choix explicite peut utiliser un autre pool que la requête principale.",
+  "provider.name.anthropic2": "Anthropic · Pool 2",
   "nav.claude": "Claude",
   "claude.pageSub": "Routage et paramètres OpenCodex pour Claude Code.",
 

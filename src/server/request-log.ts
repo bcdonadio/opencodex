@@ -69,6 +69,7 @@ import {
   type UsageTransport,
 } from "../usage/log";
 import type { RequestExecutionBudget } from "../lib/request-execution-budget";
+import type { WorkflowSpendDenialDetail } from "../lib/workflow-budget";
 import { attributeFinalRequest, attributeSealedAttempt } from "./request-log-failure-attribution";
 import { debugAttemptDeliverySummary } from "../lib/debug";
 import {
@@ -220,6 +221,10 @@ export interface RequestLogContext {
   spendOutputCeilingTokens?: number;
   /** Pre-send input estimate reserved for spend only; unlike usageLogInputTokens it never enters usage. */
   spendInputEstimateTokens?: number;
+  /** Canonical provider-pool spend identity; independent of mutable, account-specific log labels. */
+  spendPoolId?: string;
+  /** Internal safe refusal detail for a request whose ceiling includes unidentified old pool spend. */
+  spendRefusalDetail?: WorkflowSpendDenialDetail;
   /** Settles this request's durable spend entries from `addFinalRequestLog`. */
   spendTracker?: RequestSpendSettlement;
   attempts?: PersistedUsageAttempt[];
