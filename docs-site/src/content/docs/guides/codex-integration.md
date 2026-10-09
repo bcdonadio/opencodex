@@ -154,7 +154,7 @@ historical input is never normalized to force a match. It remains off when the v
 A new compacted window, changed settings or context, unsupported shapes, and cold connections keep full input.
 After a complete compacted window is accepted, its unchanged `compaction` item can participate in
 later incremental requests. Compaction triggers and other compaction shapes remain excluded.
-A known missing-parent rejection before response acceptance allows one full replay; an accepted
+A known missing-parent or unsupported-parent rejection before response acceptance allows one full replay; an accepted
 response or ambiguous transport failure does not. Local reconstruction remains available for recovery.
 Logs distinguish `continuationMode: "websocket_incremental"`, the closed
 `continuationDecisionReason`, and `upstreamReplayedItemCount` from local `replayedItemCount`.

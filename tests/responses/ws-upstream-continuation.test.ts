@@ -121,10 +121,10 @@ test.each([{ authorization: "Bearer changed" }, { "chatgpt-account-id": "another
     expect(Socket.all).toHaveLength(2); expect(Socket.all[1]!.frames[0]!.input).toEqual(input);
   });
 
-test("explicit previous-response-not-found retries once with full input and fresh ownership", async () => {
+test.each(["previous_response_not_found", "unsupported_persisted_item_context"])("explicit parent rejection retries once with full input and fresh ownership: %s", async code => {
   await drain(); const input = [first, replayCall(1), result(1)]; let paced = 0; let guarded = 0;
   Socket.onSend = (socket, frame) => frame.previous_response_id
-    ? queueMicrotask(() => socket.emit({ type: "error", status: 400, error: { code: "previous_response_not_found" } })) : socket.complete();
+    ? queueMicrotask(() => socket.emit({ type: "error", status: 400, error: { code, param: "previous_response_id" } })) : socket.complete();
   const options = init(input); const control = new NativeSteeringChannel(JSON.parse(options.body as string));
   const response = await request(options, true, control, () => { guarded++; }, async () => { paced++; });
   expect(await response.text()).toContain("response.completed");
@@ -135,16 +135,16 @@ test("explicit previous-response-not-found retries once with full input and fres
   expect(paced).toBe(1); expect(guarded).toBeGreaterThanOrEqual(3);
 });
 
-test.each(["other_error", "server_error"])("other precommit errors do not replay: %s", async code => {
+test.each(["other_error", "server_error", "unsupported_persisted_item_context"])("other precommit errors do not replay without a matching parent parameter: %s", async code => {
   await drain(); Socket.onSend = socket => queueMicrotask(() => socket.emit({ type: "error", status: code === "server_error" ? 500 : 400, error: { code } }));
   await (await request(init([first, replayCall(1), result(1)]))).text();
   expect(Socket.all).toHaveLength(1); expect(Socket.all[0]!.frames).toHaveLength(2);
 });
 
-test("previous-response-not-found after acceptance never replays", async () => {
+test.each(["previous_response_not_found", "unsupported_persisted_item_context"])("parent rejection after acceptance never replays: %s", async code => {
   await drain(); Socket.onSend = socket => queueMicrotask(() => {
     socket.emit({ type: "response.created", response: { id: "resp_accepted" } });
-    socket.emit({ type: "error", status: 400, error: { code: "previous_response_not_found" } });
+    socket.emit({ type: "error", status: 400, error: { code, param: "previous_response_id" } });
   });
   await (await request(init([first, replayCall(1), result(1)]))).text();
   expect(Socket.all).toHaveLength(1); expect(Socket.all[0]!.frames).toHaveLength(2);

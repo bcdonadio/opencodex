@@ -570,8 +570,9 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
             try { controller.close(); } catch { /* unused stream already closed */ }
             session.dispose();
             if (options.retryFullInput && !controlSent && !rejectedCorrelation
-              && record(normalized.payload.error) && normalized.payload.error.code === "previous_response_not_found") {
-              try { options.onContinuationDecision?.("upstream-state-missing", 0); } catch { /* diagnostics only */ }
+              && record(normalized.payload.error) && (normalized.payload.error.code === "previous_response_not_found"
+                || (normalized.payload.error.code === "unsupported_persisted_item_context" && normalized.payload.error.param === "previous_response_id"))) {
+              try { options.onContinuationDecision?.(normalized.payload.error.code === "previous_response_not_found" ? "upstream-state-missing" : "unsupported-shape", 0); } catch { /* diagnostics only */ }
               resolve(options.retryFullInput());
               return;
             }
