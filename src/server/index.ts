@@ -502,7 +502,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
     work: (lease: ActiveTurnLease) => Promise<Response>,
     refusalLog?: WorkflowRefusalLog,
   ): Promise<Response> {
-    const lease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
+    const lease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers), req.signal);
     if (!lease) return serverBusyResponse(req, "active turns", policy);
     // Root, lane, and the refusal that follows from them, all live in ./workflow-refusal.
     let workflow: ReturnType<typeof admitHttpWorkflowTurn>;
@@ -750,6 +750,7 @@ function startServerWithSpendLedgerOwner(port: number | undefined, deps: StartSe
   Object.defineProperty(server, "stop", {
     configurable: true,
     value: async (closeActiveConnections?: boolean): Promise<void> => {
+      backgroundLifecycle?.revokeClientFanout();
       remoteWorkspaceStopping = true;
       liveCallBindings.clear();
       // Disarm the package-tree restart timer before teardown can schedule another restart.

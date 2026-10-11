@@ -1,5 +1,6 @@
 import { transportObserver, recordRequestShape, recordContextTransformation, recordCompletedCompaction } from "../transaction-capture";
 import { recordRouteAuth } from "../transaction-auth-capture";
+import { spendLedgerStorageErrorResponse } from "./spend-storage-error";
 import { createPhysicalSendReporter } from "../../lib/request-execution-budget";
 import { createInferenceSendBudget } from "../inference/context";
 import { unboundPoolSpendRefusalResponse } from "../workflow-refusal";
@@ -1139,11 +1140,11 @@ export async function handleResponsesCompact(
     let outcomeCtx = authCtx;
     const localDispatchRefusal = (error: unknown): Response | undefined => {
       const cause = unwrapUpstreamRetryEvidenceError(error);
-      const response = cause instanceof SendBudgetExhaustedError
+      const response = spendLedgerStorageErrorResponse(error, logCtx) ?? (cause instanceof SendBudgetExhaustedError
         ? unboundPoolSpendRefusalResponse(logCtx) ?? formatErrorResponse(429, "request_send_budget_exhausted", cause.message)
         : mapCodexAuthContextErrorToResponse(cause, {
           now: Date.now(), accountSelector: route.codexAccountNamespace,
-        });
+        }));
       if (response) {
         releaseUpstreamHostAdmission(compactHostAdmissionLease);
         compactHostAdmissionLease = null;

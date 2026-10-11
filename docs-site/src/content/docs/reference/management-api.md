@@ -83,7 +83,7 @@ route-specific results rather than repeating this table.
 | `PUT /api/grok/selection` | Persist the excluded Grok models | 400 invalid or oversized selection |
 | `POST /api/grok/apply` | Apply persisted Grok configuration through the managed sync | 409 `grok_apply_busy`; 400/500 apply failure |
 | `GET /api/grok/reset-coupons?accountId=...` | Read remaining Grok billing reset tokens and validity windows for the active or specified xAI account | 400 missing account; 401 unauthenticated; 502 upstream gRPC-Web error |
-| `POST /api/grok/reset-coupons/consume` | Redeem an eligible reset coupon. Body `{ accountId?, tokenId?, operationId? }`. Optional `operationId` (UUIDv4) makes redemption idempotent: repeating the same ID replays the durable result without double-redemption. | 400 invalid JSON/UUID; 401 unauthenticated; 409 `identity_mismatch`; 502 upstream error; 503 ledger capacity |
+| `POST /api/grok/reset-coupons/consume` | Redeem an eligible reset coupon. Body `{ accountId?, tokenId?, operationId? }`. Optional `operationId` (UUIDv4) makes redemption idempotent: repeating the same ID replays the durable result without double-redemption. | 400 invalid JSON/UUID; 401 unauthenticated; 409 `operation_id_owned_by_another_account` / `coupon_unavailable` / `operation_token_mismatch` / `operation_state_changed` / `attempt_in_progress` / `attempt_unresolved`; 502 upstream error; 503 ledger capacity / `ledger_unavailable`; 500 `attempt_mark_failed` |
 | `GET /api/anthropic/reset-grants?accountId=...` | Read the Claude usage-limit reset grants of one Anthropic OAuth account: eligibility, each grant's resets left, validity window, and the windows it clears, plus any unconfirmed attempt still retryable | 400 no matching account; 401 re-authentication needed; 502 upstream unavailable |
 | `POST /api/anthropic/reset-grants/consume` | Spend one reset grant. Body `{ accountId, grantId, operationId }`; `operationId` is a UUIDv4 sent upstream as the request ID, so repeating it retries the same claim. Requires a dashboard session. | 400 invalid body; 401 re-authentication needed; 403 `session_required`; 409 `grant_not_usable`, `in_flight`, `unresolved_prior_operation`, `unknown_outcome_expired`, `operation_identity_mismatch`; 500 `journal_write_failed`; 502 `unknown_outcome`; 503 journal busy, unavailable, or full |
 | `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile | 400 invalid or unavailable assignment |
@@ -91,12 +91,13 @@ route-specific results rather than repeating this table.
 | `GET /api/claude-desktop/status` | Inspect saved-versus-applied profile and Desktop health | 400 status read failure |
 | `GET, PUT /api/claude-code` | Read or update Claude Code gateway, auth-mode, model-map, context, agent, and sidecar settings | 400 invalid field or shape |
 
-The dashboard drives both coupon paths from **Providers > xAI Grok > Accounts**: each
-signed-in account row carries a ticket badge with its remaining coupon count, and the
-badge opens a dialog that lists validity windows and redeems the coupon closest to
-expiry. The dialog sends a client-minted `operationId`, and it stops sending after a
-timeout instead of retrying, because a redemption whose journal record is still open
-would execute again. `ocx account grok-reset-coupons` remains the terminal equivalent.
+`tokenId`, when supplied, must be a non-empty string; invalid values return `400 invalid_token_id` before credentials are read or the ledger is opened. Within the 30-day retention window, a same-`operationId` retry that omits `accountId` uses the recorded account, even if the active account changed. An executable `open` retry that omits `tokenId` uses its recorded token. An explicit different account or token is still refused. A definitive failure clears a matching speculative pending hold in the dashboard, allowing a new explicitly confirmed attempt; actual unknown outcomes remain held.
+
+An attempt is durably claimed before redemption. Only a confirmed upstream redemption response can record `redeemed`; a coupon missing from the remaining list does not prove this operation succeeded. After a timeout or missing settlement, retries inspect availability without redeeming again and return `attempt_unresolved`; a recent attempt returns `attempt_in_progress`. A late inspection refusal settles only an operation still `open`. In the same transaction, an identity-matching definitive terminal winner is replayed with HTTP 200 and its original code; an unresolved or identity-mismatched winner returns `operation_state_changed`, preserving same-ID recovery guidance. An unreadable or locked ledger returns `ledger_unavailable` without dispatching a redemption.
+
+An unconfirmed redemption returns HTTP 502 with `error.code: "attempt_unresolved"` and the effective `operationId`. Preserve that ID; a replacement ID would start a different operation. The CLI creates the ID before sending and prints `--operation-id` guidance if delivery or the response is uncertain. Legacy version-one `open` records and unconfirmed `redeem_failed` records are quarantined as uncertain; they never authorize another redemption.
+
+The dashboard at **Providers > xAI Grok > Accounts** lists remaining coupons and their validity windows from each account’s ticket badge. It sends a client-minted `operationId`. After uncertain delivery or an unknown-outcome response, the account controller retains that attempt while it remains mounted, including across dialog close/reopen. Availability refreshes issue GET only and never authorize another consume POST. `ocx account grok-reset-coupons` is the terminal equivalent.
 
 Claude usage resets work the same way from **Providers > Anthropic > Accounts**. Each
 signed-in account row carries a ticket badge with its remaining resets, and the dialog
@@ -281,6 +282,16 @@ Request logs retain `servedModel` when the upstream identifies the model that an
 `wireModel` when the model sent upstream differs from the client-facing model. The dashboard
 shows `wire → served` when those identities differ; its tooltip preserves both values. Missing
 upstream model evidence remains absent rather than being inferred from the requested model.
+
+Failed request rows can include bounded `upstreamErrorType`, `upstreamErrorCode`, and
+`upstreamRequestId` diagnostics. On the Codex upstream WebSocket path, a bare error followed by
+EOF retains recognized rate-limit or overload codes in the synthesized failed terminal.
+Request logs record these as 429 for `rate_limit_exceeded` / `rate_limit_error`, or 503 for
+`server_is_overloaded` / `overloaded_error`. A recognized type without a code uses the same
+status; explicit unknown codes remain generic 502 failures. Bare-error status is provisional:
+a genuine completed, failed, or incomplete terminal replaces it before account-health recording.
+Refusal precedence is unchanged.
+This diagnostic mapping adds no automatic replay or retry.
 
 `GET /api/logs` accepts an optional opaque `cursor` from its previous response. The envelope preserves
 `logs`, `total`, `generatedAt` and `timeZone`, and adds `cursor` and `reset`. Without a cursor it returns
@@ -687,7 +698,7 @@ the 503 without reporting model capacity; provider overload errors retain their 
 
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
-| `GET /api/system/memory` | Return scalar process, heap, stream, response-state, watchdog, and active-turn metrics. Response-state diagnostics include spill-write status, consecutive failures, fixed privacy-safe failure class, and last failure/success timestamps. `spillLastWriteFailureOrigin` is `retry_returned_timeout`, `timeout_memo_refusal`, or null; cumulative `spillAclRetryReturnedTimeouts` and `spillAclTimeoutMemoRefusals` count terminal failed publications. See [Windows spill diagnostics](/troubleshooting/windows-memory/) for process-local semantics. Raw errors and paths are never returned. | — |
+| `GET /api/system/memory` | Return scalar process, heap, stream, response-state, watchdog, and active-turn metrics. Response-state diagnostics include spill-write status, consecutive failures, fixed privacy-safe failure class, and last failure/success timestamps. `spillLastWriteFailureOrigin` is `retry_returned_timeout`, `timeout_memo_refusal`, or null; cumulative `spillAclRetryReturnedTimeouts` and `spillAclTimeoutMemoRefusals` count terminal failed publications; cumulative `spillCapacityRefusals` and `spillHeadroomEvictions` count continuations refused at the spill ceiling and continuations evicted to make room for a newer one. See [Windows spill diagnostics](/troubleshooting/windows-memory/) for process-local semantics. Raw errors and paths are never returned. | — |
 | `POST /api/system/restart` | Begin a drain-aware process restart without removing client injection; optional JSON `drainGraceMs` explicitly shortens the default 60s grace | Returns 202; repeated calls report the existing grace; 400 invalid body or grace |
 | `POST /api/stop` | Stop the service, restore native Codex, remove managed Grok injection, and drain the proxy | 409 service ownership conflict; 409 `respawnable_service` when a Windows Task Scheduler wrapper could respawn the proxy and the caller is not `ocx stop` (nothing is changed); 409 `self_unload_service` when this proxy is running as the installed launchd/systemd service, because stopping the manager from inside it would end the process before native Codex is restored — run `ocx stop` instead (nothing is changed); 409 when the installed manager refuses to stop; 409 `service_state_unknown` when the Task Scheduler state cannot be read (nothing is changed; repair the query and retry) |
 | `GET /api/system/codex-app-server` | Report whether running Codex app-servers predate the current model catalog | — |
@@ -716,7 +727,7 @@ manager. Its routes are:
 | `PUT /api/codex-auth/accounts/credits` | Allow or stop spending ChatGPT credits after the usage limit. Body `{ id, creditsAfterLimit }` for one account, including `__main__`: true adds the id to `creditCodexAccountIds`, false removes it. Body `{ all }` for the global switch: true lists `__main__` and every pool account, false clears the list. Applies to the next selection. | 400 invalid id or non-boolean value; 404 missing account |
 | `PUT /api/settings` with `codexQuotaAutoRefresh: { id, window, enabled }` | Enable or disable 5-hour or weekly automatic window activation for one account | 400 invalid id/window/state; 404 missing account; 409 unavailable window |
 | `POST /api/codex-auth/accounts/clear-cooldown` | Clear runtime cooldown for one account or all accounts | 400 invalid id |
-| `GET, PUT /api/codex-auth/active` | Read or select the active account | 400 invalid or missing account; 409 paused/legacy-row conflict |
+| `GET, PUT /api/codex-auth/active` | Read or select the active account | 400 invalid or missing account; 409 paused/legacy-row conflict or `account_selection_unavailable` |
 | `PUT /api/codex-auth/auto-switch` | Set the global quota threshold with `{ threshold }`, or an account override with `{ id, threshold }`; `null` restores global inheritance, and `__main__` selects the Desktop login | 400 invalid id/threshold; 404 missing account |
 | `PUT, PATCH /api/codex-auth/pool-strategy` | Update Codex account-pool selection strategy | 400 invalid strategy/config |
 | `PUT /api/codex-auth/failover` | Set the account failover threshold | 400 invalid threshold |
@@ -728,6 +739,14 @@ manager. Its routes are:
 | `POST /api/codex-auth/login/code` | Submit a manual code for a Codex login flow | 400 invalid flow/code |
 | `POST /api/codex-auth/login/cancel` | Cancel only the pending Codex login identified by `{ "flowId": "..." }` | 400 missing, unknown, or non-pending flow ID |
 | `GET /api/codex-auth/login-status` | Poll a flow or account login state. A completed new-account flow includes `catalogRefreshPending: true` only when recovery is needed. | Unknown flows report `expired`; no active flow reports `idle` |
+
+`PUT /api/codex-auth/active` requires `{ "accountId": "<id>" }` or an explicit
+`{ "accountId": null }` to clear selection. Re-selecting the current account is an explicit
+selection even if another process changed the saved account. The server preserves unrelated
+saved settings and rejects targets removed or paused since the dashboard loaded. An unavailable
+or invalid saved configuration leaves the previous live selection and affinity unchanged; reload
+settings before retrying. A successful response describes the committed selection. Existing quota
+and failover rules can still release a pin; `pinDrained` reports a currently known drain reason.
 
 For reset-credit consumption, a different `operationId` supplied while the same physical
 account has an unfinished operation joins that operation as an alias. Its retry uses the

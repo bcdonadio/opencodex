@@ -4,6 +4,8 @@ import { stampApiKeyAccountLabel, usesApiKeyAccount } from "../providers/label";
 import { KEY_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import { attemptAccountChanged, sealRequestAttemptIdentity } from "./request-log-account-rotation";
 export { sealRequestAttemptIdentity };
+import { captureUpstreamTerminalDiagnostics, upstreamDiagnosticLogFields, type UpstreamErrorDiagnostics, type UpstreamErrorPayload } from "./request-log-terminal-status";
+export { noteUpstreamRequestId } from "./request-log-terminal-status";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import type { ResponsesTerminalStatus } from "../bridge";
 import {
@@ -12,8 +14,6 @@ import {
   httpStatusFromTerminalError as httpStatusFromClassifiedTerminalError,
   isClientClosedMessage,
   isCyberPolicyCode,
-  isCyberPolicyMessage,
-  isRateLimitOrQuotaFailureMessage,
   isUpstreamResetReplayRefusedMessage,
   upstreamErrorMessageFromPayload,
 } from "../lib/errors";
@@ -117,7 +117,7 @@ function cacheDiagnosticHooks(): CacheDiagnosticHooks | undefined {
   return (globalThis as Record<symbol, CacheDiagnosticHooks | undefined>)[CACHE_DIAGNOSTIC_HOOK];
 }
 
-export interface RequestLogContext {
+export interface RequestLogContext extends UpstreamErrorDiagnostics {
   model: string;
   provider: string;
   /** Optional process-lifetime aggregate sink, injected by the server composition owner. */
@@ -271,6 +271,8 @@ export interface RequestLogContext {
   conversationStateScrub?: "account-change";
   transportPhase?: "pre_headers" | "mid_stream" | "terminal_sse";
   terminalSource?: "upstream" | "synthetic";
+  /** Closed failure evidence supplied by the transport, never inferred from provider text. */
+  causeHint?: RequestFailureCause;
   /** Bounded route-decision trace (RI-01); never contains secrets. */
   routeDecision?: RouteDecisionTraceV1;
   /** Full eligible provider/model membership from a policy route; never logged. */
@@ -299,7 +301,7 @@ export function rebindCacheDiagnosticBody(
   cacheDiagnosticHooks()?.rebind(body, draft);
 }
 
-export interface RequestLogEntry {
+export interface RequestLogEntry extends UpstreamErrorDiagnostics {
   requestId: string;
   /** The logical request this row belongs to (#4546); absent on rows written without a budget. */
   logicalRequestId?: string;
@@ -929,6 +931,7 @@ export function requestLogErrorCode(
   status: number,
   upstreamError?: string,
   terminalErrorCode?: string,
+  replayRefusal = false,
 ): string | undefined {
   if (status >= 200 && status < 400) return undefined;
   // A structured terminal code is authoritative even when the provider message is localized,
@@ -957,10 +960,8 @@ export function requestLogErrorCode(
     return "permission_denied";
   }
   if (status === 429) {
-    // A refused ambiguous reset answers 429 by design (it must not invite a client
-    // retry that could duplicate inference); classify it by its message so the log
-    // distinguishes a proxy refusal from provider throttling.
-    if (upstreamError?.trim() && isUpstreamResetReplayRefusedMessage(upstreamError)) {
+    // Prefer transport provenance; retain the legacy message fallback for older callers.
+    if (replayRefusal || (upstreamError?.trim() && isUpstreamResetReplayRefusedMessage(upstreamError))) {
       return UPSTREAM_RESET_REPLAY_REFUSED_CODE;
     }
     return "rate_limit_exceeded";
@@ -1223,16 +1224,8 @@ function captureUpstreamErrorParsed(
   parsed: unknown | undefined,
 ): void {
   if (parsed !== undefined && parsed !== null) {
-    const json = parsed as {
-      type?: unknown;
-      error?: { message?: unknown };
-      last_error?: { message?: unknown };
-      response?: {
-        error?: { type?: unknown; code?: unknown; message?: unknown };
-        incomplete_details?: { reason?: unknown; message?: unknown };
-      };
-    };
-    captureTerminalHttpStatus(logCtx, json);
+    const json = parsed as UpstreamErrorPayload;
+    captureUpstreamTerminalDiagnostics(logCtx, json);
     const reason = json?.response?.incomplete_details?.reason;
     if (json.type === "response.incomplete"
       && logCtx.terminalIncompleteReason === undefined
@@ -1274,75 +1267,6 @@ function incompleteReasonLabel(reason: string): string {
     default:
       return `Upstream incomplete: ${reason}`;
   }
-}
-
-function captureTerminalHttpStatus(
-  logCtx: RequestLogContext,
-  json: {
-    type?: unknown;
-    code?: unknown;
-    message?: unknown;
-    error?: { type?: unknown; code?: unknown; message?: unknown };
-    last_error?: { type?: unknown; code?: unknown; message?: unknown };
-    response?: {
-      error?: { type?: unknown; code?: unknown; message?: unknown };
-      incomplete_details?: { code?: unknown; message?: unknown; reason?: unknown };
-    };
-  },
-): void {
-  if (logCtx.terminalHttpStatus !== undefined) return;
-  const type = json.type;
-  if (type !== "response.failed" && type !== "response.incomplete" && type !== "error") return;
-  const responseError = json.response?.error;
-  const responseDetails = json.response?.incomplete_details;
-  const candidates: Array<{ type?: unknown; code?: unknown; message?: unknown } | undefined> = [
-    json.error, json.last_error, responseError, responseDetails, json,
-  ];
-  const policy = candidates.some(candidate => (
-    candidate?.code === null || typeof candidate?.code === "string"
-  ) && isCyberPolicyCode(candidate.code as string | null | undefined))
-    || candidates.some(candidate => (
-      typeof candidate?.message === "string"
-      && candidate.message.trim().length > 0
-      && isCyberPolicyMessage(candidate.message)
-    ));
-  if (policy) {
-    logCtx.terminalErrorCode = CYBER_POLICY_ERROR_CODE;
-    logCtx.terminalHttpStatus = 400;
-    return;
-  }
-  // A quota terminal can carry only a structured reason, without an error message.
-  // Keep this separate from normal output limits and from the policy precedence above.
-  const quotaTag = (value: unknown): boolean => value === "usage_limit_reached"
-    || value === "rate_limit_exceeded" || value === "insufficient_quota";
-  const structuredRefusal = candidates.some(candidate => [400, 401, 403, 499].includes(
-    httpStatusFromTerminalError({
-      type: typeof candidate?.type === "string" ? candidate.type : undefined,
-      code: typeof candidate?.code === "string" ? candidate.code : undefined,
-    }),
-  ));
-  const ordinaryIncompleteReason = typeof responseDetails?.reason === "string"
-    && ["max_output_tokens", "content_filter", "steered", "upstream_stall_timeout", "adapter_eof"].includes(responseDetails.reason);
-  if (type === "response.incomplete" && !structuredRefusal && (quotaTag(responseDetails?.reason) || candidates.some(candidate =>
-    quotaTag(candidate?.code)
-    || quotaTag(candidate?.type) || candidate?.type === "rate_limit_error"
-    || (!ordinaryIncompleteReason && typeof candidate?.message === "string" && isRateLimitOrQuotaFailureMessage(candidate.message))
-  ))) {
-    // The shared quota classifier also accepts a numeric HTTP status as its message.
-    // Preserve explicit payment-required evidence rather than relabeling it as 429.
-    logCtx.terminalHttpStatus = candidates.some(candidate => typeof candidate?.message === "string"
-      && Number(candidate.message.trim()) === 402) ? 402 : 429;
-    return;
-  }
-  if (type !== "response.failed" || !responseError || typeof responseError !== "object") return;
-  const responseCode = responseError.code === null || typeof responseError.code === "string"
-    ? responseError.code
-    : undefined;
-  logCtx.terminalHttpStatus = httpStatusFromTerminalError({
-    type: typeof responseError.type === "string" ? responseError.type : undefined,
-    code: responseCode,
-    message: typeof responseError.message === "string" ? responseError.message : undefined,
-  });
 }
 
 /** Map a terminal Responses error object to the HTTP status we record in /api/logs. */
@@ -1559,6 +1483,7 @@ export function addFinalRequestLog(
     effectiveStatus,
     logCtx.upstreamError,
     logCtx.terminalErrorCode,
+    logCtx.causeHint === "transport-ambiguous" && logCtx.terminalSource === "synthetic",
   );
   // A response.failed whose classified status is 499 is still a client cancel, not an upstream
   // terminal failure — keep /api/logs closeReason aligned with that.
@@ -1588,6 +1513,7 @@ export function addFinalRequestLog(
     ...(logCtx.transportPhase ? { transportPhase: logCtx.transportPhase } : {}),
     ...(logCtx.terminalSource ? { terminalSource: logCtx.terminalSource } : {}),
     outputObserved: logCtx.firstOutputMs !== undefined,
+    ...(logCtx.causeHint ? { causeHint: logCtx.causeHint } : {}),
     locallyAnswered: logCtx.localTerminalReason !== undefined,
     ...(logCtx.activeAttempt ? { attempt: logCtx.activeAttempt } : {}),
   });
@@ -1714,6 +1640,7 @@ export function addFinalRequestLog(
     ...(meta?.terminalStatus ? { terminalStatus: meta.terminalStatus } : {}),
     ...(closeReason ? { closeReason } : {}),
     ...(logCtx.upstreamError ? { upstreamError: logCtx.upstreamError } : {}),
+    ...upstreamDiagnosticLogFields(logCtx),
     usageStatus,
     ...(loggedUsage ? { usage: loggedUsage } : {}),
     ...(totalTokens !== undefined ? { totalTokens } : {}),

@@ -12,7 +12,7 @@ import type { CodexWsSession } from "./codex-ws-session";
 import { completedCodexWsContinuation, CodexWsOutputEvidence, type CodexWsContinuationDecisionReason } from "./codex-ws-continuation";
 import type { ProviderFetchOptions, TransportObservation } from "./fetch-helpers";
 import { UPGRADE_DEADLINE_MS, CODEX_WS_LIVENESS_PING_INTERVAL_MS, CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES,
-  MAX_CODEX_WS_QUEUE_BYTES, markCodexWsResponse, normalizeResponsesWsRelayEvent, closedBeforeTerminalMessage,
+  MAX_CODEX_WS_QUEUE_BYTES, markCodexWsResponse, markCodexWsPreludeProjection, normalizeResponsesWsRelayEvent, closedBeforeTerminalMessage,
   codexWsCreateFrameExceedsLimit, codexWsFailureDetail, codexWsPreResponseFailure, markCodexWsStage, codexWsOcxVersion,
   markCodexWsSocketDeath, type CodexWsFailureStage, type CodexWsStageRecord } from "./codex-ws-wire";
 
@@ -28,6 +28,7 @@ interface ExchangeOptions {
   beforeDispatch?: (headers: Headers) => void;
   observeTransport?: ProviderFetchOptions["observeTransport"];
   onTransport?: (transport: "http" | "websocket") => void;
+  onPhysicalDispatch?: () => void;
   /** Bun version string the caller gated on; stamped onto the stage record. */
   bunVersion?: string;
   /** Full normalized create retained only for this exchange, even when the wire uses a delta. */
@@ -53,7 +54,8 @@ function rejectionHeaders(source: Record<string, unknown>, prelude: Headers): He
     }
   }
   // Reuse the metadata owner's count/value/family budgets and window freshness
-  // rules, without publishing quota twice. The unmarked HTTP response owns it.
+  // rules, without publishing quota twice. Pool bookkeeping consumes the HTTP
+  // projection; plain-main publication belongs only to the WS observer.
   const projected = new CodexWsMetadata();
   try {
     for (const values of [Object.fromEntries(prelude), source]) {
@@ -266,6 +268,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         // the create frame alone no longer describes the turn.
         if (socketDied && !nativeControl) markCodexWsSocketDeath(failureResponse, stage);
         observe({ kind: "response", transport: "websocket", response: failureResponse });
+        markCodexWsPreludeProjection(failureResponse);
         resolve(failureResponse);
         return;
       }
@@ -458,6 +461,17 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
         failStream(error, "protocol_error");
         return;
       }
+      try { options.onPhysicalDispatch?.(); } catch (error) {
+        // Admission refused before the frame left. This is a pre-open rejection,
+        // not a transport failure and not an authorization to replay over SSE.
+        settledPreOpen = true;
+        sent = false;
+        terminal = true;
+        cleanup();
+        session.dispose();
+        reject(error);
+        return;
+      }
       try {
         ws.send(frameText);
         sentSuccessfully = true;
@@ -577,6 +591,7 @@ export function codexWsExchange(options: ExchangeOptions): Promise<Response> {
               return;
             }
             observe({ kind: "response", transport: "websocket", response: rejection });
+            markCodexWsPreludeProjection(rejection);
             resolve(rejection);
             return;
           }

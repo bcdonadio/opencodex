@@ -25,13 +25,16 @@ import { teeWithBoundedInspection } from "../inspection-tee";
 import {
   codexForwardTerminalOutcomeRecorder,
   usesCodexForwardPoolAuth,
+  liveMainQuotaDispatch,
   codexQuotaOutcomeMeta,
   codexDenialOutcomeMeta,
   isFixedCodexAccount,
   shouldDeferCodexResetDerivedCooldown,
 } from "./core-codex-account";
+import { isMainQuotaDispatchLive, isMainQuotaDispatchWsClaimed } from "../../codex/main-account-cache";
+import { MAIN_CODEX_ACCOUNT_ID } from "../../codex/account-id";
 import type { ResponsesTerminalStatus } from "../../bridge";
-import { isCodexWsQuotaObservedResponse, isCodexWsUpstreamResponse } from "./ws-upstream";
+import { isCodexWsQuotaObservedResponse, isCodexWsUpstreamResponse, isCodexWsPreludeProjection } from "./ws-upstream";
 import { recordSubagentQuotaFailureForThreadSpawn } from "../../codex/subagent-model-fallback";
 import { recordCodexUpstreamOutcome } from "../../codex/routing";
 import { codexProbeLeaseId, codexProbeQuotaScope, codexTransientProbeGrant, releaseCodexAuthContextProbeLease } from "../../codex/auth-context";
@@ -141,6 +144,7 @@ import {
   inspectResponseLogJson,
   inspectResponseLogSsePayloadParsed,
   observeRequestTransport,
+  noteUpstreamRequestId,
 } from "../request-log";
 import { restoreRoutedCustomCallsInJson } from "../../responses/custom-tool-compat";
 import { restoreRoutedToolSearchCallsInJson } from "../../responses/tool-search-compat";
@@ -413,6 +417,9 @@ export async function deliverPassthroughResponse(
     | "localUpstream"
   >,
 ): Promise<Response> {
+  const { route } = requestState;
+  // The proof must belong to the response whose headers are published.
+  const arrivalMainDispatch = liveMainQuotaDispatch(admissionState.authCtx, route.provider);
   const { logCtx, config, options, req } = requestContext;
   const {
     codexSafetyBufferingOptions,
@@ -436,7 +443,7 @@ export async function deliverPassthroughResponse(
     normalizeFunctionCompletionJson,
   } = nativeExchange;
   const { commitReasoningReplayServingRoute, recordTerminalOutcomes } = responseEffects;
-  const { parsed, route, subagentQuotaFailureModel, clientRequestedStream, translatorBudget, inboundWire } = requestState;
+  const { parsed, subagentQuotaFailureModel, clientRequestedStream, translatorBudget, inboundWire } = requestState;
   const enforceDeclaredToolNames = inboundWire !== "chat" && inboundWire !== "anthropic";
   const { openAiSearchSidecar } = sidecarState;
   const { requestBindings } = transportState;
@@ -459,6 +466,7 @@ export async function deliverPassthroughResponse(
   }
 
     const headers = sanitizePassthroughHeaders(upstreamResponse.headers, codexSafetyBufferingOptions);
+    if (!upstreamResponse.ok) noteUpstreamRequestId(logCtx, headers);
     const resolvedModel = headers.get("openai-model")?.trim();
     if (resolvedModel) {
       logCtx.servedModel = resolvedModel;
@@ -541,6 +549,20 @@ export async function deliverPassthroughResponse(
           // account — fence it on the credential the request was holding.
           ...(admissionState.authCtx.kind === "pool" ? { credentialGeneration: admissionState.authCtx.generation } : {}),
         });
+      }
+    } else {
+      // The WS observer is the only plain-main publisher for a WebSocket exchange;
+      // a prelude projection carries the prelude snapshot, not fresh evidence.
+      // The dispatch claim is authoritative because downstream wrappers can replace the Response.
+      if (arrivalMainDispatch && !isMainQuotaDispatchWsClaimed(arrivalMainDispatch)
+        && !(isCodexWsUpstreamResponse(upstreamResponse) || isCodexWsPreludeProjection(upstreamResponse))) {
+        const { applyAccountQuotaFromUpstreamHeaders } = await import("../../codex/auth-api");
+        // Import yields; same-account token replacement leaves the identity writer live.
+        // Re-check the credential fence with no await before publication.
+        if (isMainQuotaDispatchLive(arrivalMainDispatch)) {
+          applyAccountQuotaFromUpstreamHeaders(MAIN_CODEX_ACCOUNT_ID, upstreamResponse.headers,
+            arrivalMainDispatch.configGeneration, arrivalMainDispatch.writer, { modelId: route.modelId });
+        }
       }
     }
 

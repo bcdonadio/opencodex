@@ -106,8 +106,8 @@ nonblank `id`/`name`/`namespace`, and fully representable nonempty text/image ou
 existing continuation conversation-boundary calculation. The metadata is structural,
 not authentication. Unknown/opaque/malformed parts reject the entire conversion;
 ordinary missing/empty tool call ids retain the existing translated-route 400 guard.
-Native passthrough and compaction retain raw-body handling. The leaf reuses the input
-content converter after validation and imports no optional subsystem.
+Passthrough and routed-compaction raw-body repairs emit it as a user turn (`externalTaskInputResponsesContent`,
+#6764); the direct native `/responses/compact` forward keeps its raw-body handling. The leaf imports no optional subsystem.
 Stateful developer-guidance injection reuses that validator for its raw insertion
 boundary, so parsed messages and stored raw history retain the same task/guidance order.
 
@@ -130,7 +130,7 @@ with no new tool calls is also deferred while results remain outstanding. Deferr
 A new tool-call batch settles its predecessor. Additional results in an open batch join in arrival
 order, preserving images and error markers; known late output uses an attributed user-text carrier
 after any pending batch. Unknown IDs and mismatched names/namespaces still throw; missing results
-retain the unknown-status marker; the replay and tool-continuation tests under `tests/providers/ollama/` cover both paths. See the decision record below.
+retain the unknown-status marker; the replay and tool-continuation tests under `tests/providers/ollama/` cover both paths. See the decision record below. Native response tool-call identity uses valid IDs before function-index/position fallbacks. Distinct IDs at index zero remain separate; repeated IDs replace arguments and cannot change function names. ID-less later frames can update an existing index (and an id may adopt a call first seen without one), but same-frame entries share a call only with the same ID. First-seen order, separate call budgets/retained metadata and the 128-call cap remain enforced. `parallelToolCalls:false` still fails closed before actionable tool events. `tests/providers/ollama/ollama-native-parser.test.ts` covers these contracts.
 
 Forward-mode OpenAI passthrough also repairs replayed `call_id` values longer than the Responses
 API's 64-character limit. Sidechat/fork replay can namespace routed-provider ids beyond that limit,

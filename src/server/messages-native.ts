@@ -36,11 +36,12 @@ import {
   buildAnthropicMessagesPassthroughRequest,
   type AnthropicMessagesPassthroughRequest,
 } from "../adapters/anthropic/passthrough";
-import { resolveInboundModel } from "../claude/inbound";
-import { anthropicErrorBody, anthropicErrorResponse, collectAnthropicMessage } from "../claude/outbound";
+import { effortFromOutputConfig, resolveInboundModel } from "../claude/inbound";
+import { anthropicErrorBody, anthropicErrorResponse, claudeOverflowSsePayload, claudePromptTooLongMessage, collectAnthropicMessage, isContextOverflowText, isThroughputLimitText } from "../claude/outbound";
 import type { AdmissionLease } from "../lib/admission";
 import { readBoundedResponseBody } from "../lib/bounded-body";
 import { classifyError } from "../lib/errors";
+import { relaySseWithPayloadRewrite } from "./sse-payload-rewrite";
 import { redactSecretString } from "../lib/redact";
 import { resolveClientRetryAfter } from "../lib/retry-after";
 import { isTranslatorBudgetExceededError, type TranslatorBudget } from "../lib/translator-budget";
@@ -107,6 +108,7 @@ import {
 import {
   noteProviderAttemptSend,
   recordAttemptCredentialSource,
+  recordAttemptRequestedEffort,
   recordFirstOutput,
   recordKeyAttemptFailure,
   recordKeyWireAttemptUsage,
@@ -119,6 +121,7 @@ import { workflowRefusalResponse } from "./workflow-refusal";
 import { sseFieldValue } from "../lib/sse-decoder";
 import { admissionModelDeniedResponse, type AdmissionModelScope } from "./admission-model-scope";
 import { nativeMessagesToolScopeDenial } from "./messages-native-scope";
+import { retainUpstreamMessagesRequestId } from "./messages-response-headers";
 
 export {
   isNativeMessagesRouteEligible,
@@ -317,6 +320,15 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   logCtx.requestedModel = requestedModel;
   if (route.routeReason === "model-alias" || route.modelId !== requestedModel) logCtx.requestedAlias = requestedModel;
   logCtx.requestedServiceTier = typeof body.service_tier === "string" ? body.service_tier : undefined;
+  if (logCtx.requestedEffort === undefined) {
+    const effort = effortFromOutputConfig(body.output_config);
+    const thinking = isRec(body.thinking) ? body.thinking : undefined;
+    const budget = thinking?.budget_tokens;
+    if (effort !== undefined) logCtx.requestedEffort = effort;
+    else if (thinking?.type === "disabled") logCtx.requestedEffort = "none";
+    else if (thinking?.type === "enabled" && typeof budget === "number"
+      && Number.isSafeInteger(budget) && budget > 0) logCtx.requestedEffort = `budget:${budget}`;
+  }
   // Reserve spend the way native Chat does: an input estimate that never enters usage, and the
   // caller's own output ceiling.
   if (logCtx.usageLogInputTokens === undefined) {
@@ -332,6 +344,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
     adapter: "anthropic",
   });
   attemptHandle.seal(logCtx.accountLogLabel);
+  recordAttemptRequestedEffort(logCtx);
   const { attempt } = attemptHandle;
   const finalLog = createFinalRequestLog(logIds, logCtx);
   const finishLog: FinishLog = (status, message, meta = { closeReason: "non_stream" }) => {
@@ -500,7 +513,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
       && nativeMessagesDeclineReason({ ...route, provider: routed }, body, config, selector) === undefined;
   };
 
-  const send = async (recovery?: "rate-limit-429" | "oauth-account-403" | "key-429" | "key-401"): Promise<Response> => {
+  const send = async (recovery?: "rate-limit-429" | "oauth-401" | "oauth-account-403" | "key-429" | "key-401"): Promise<Response> => {
     const remaining = remainingTransientSends();
     if (requestTransientPolicy && remaining <= 0) {
       throw new Error("native Messages transient send budget exhausted before recovery dispatch");
@@ -672,7 +685,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
     const oauthRetryKey = {};
     const triedAccountIds = new Set<string>();
     let oauthFailovers = 0;
-    while (oauthBinding && (response.status === 429 || response.status === 403)) {
+    while (oauthBinding && (response.status === 429 || response.status === 403 || response.status === 401)) {
       const sendingBinding = oauthBinding;
       const expectedRecoverySelection = sendingBinding.selection;
       triedAccountIds.add(sendingBinding.snapshot.accountId);
@@ -690,7 +703,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
         canRetry: transientSendAvailable() && oauthFailovers < ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST,
       });
       if (!nextAccountId) break;
-      const recovery = response.status === 403 ? "oauth-account-403" : "rate-limit-429";
+      const recovery = response.status === 401 ? "oauth-401" : response.status === 403 ? "oauth-account-403" : "rate-limit-429";
       discard(response);
       oauthBinding = await resolveNativeOAuthBindingForInstance(nativeInstance!, config, { routeTarget,
         sessionKey: options.sessionKey, model: route.modelId, candidateAccountId: nextAccountId,
@@ -739,7 +752,7 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
       upstream.abort();
       return fail(499, "Client cancelled request", "api_error");
     }
-    return nativeMessagesErrorResponse(response, bodyText, finishLog);
+    return retainUpstreamMessagesRequestId(nativeMessagesErrorResponse(response, bodyText, finishLog), response.headers);
   }
 
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
@@ -764,10 +777,15 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
           releaseStreamTurn();
         }
       }, bodyGuard);
-      return new Response(relayed, {
+      // A configured Messages provider words an oversized-input refusal its own way; Claude Code
+      // compacts only on Anthropic's wording (devlog/_plan/261009_claude_1m_default/010). The
+      // rewrite buffers whole frames, so it sits after the tap: stall detection keeps timing raw
+      // upstream bytes. Real Anthropic pools refuse pre-stream in that wording and keep one relay.
+      const clientStream = nativeInstance ? relayed : relaySseWithPayloadRewrite(relayed, claudeOverflowSsePayload, translatorBudget);
+      return retainUpstreamMessagesRequestId(new Response(clientStream, {
         status: 200,
         headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive" },
-      });
+      }), response.headers);
     }
     // A non-streaming caller whose upstream streamed anyway: fold the stream into one message.
     const tapState: { closeReason?: FinalRequestLogMeta["closeReason"]; meta?: FinalRequestLogMeta } = {};
@@ -789,10 +807,11 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
         // as the streaming lane's row; a plain upstream error event keeps the non_stream row.
         const tapMeta = tapState.meta;
         if (tapMeta && (tapMeta.terminalStatus || tapMeta.closeReason !== "terminal")) finishLog(502, text, tapMeta);
+        if (isNativeOverflowError(error, text)) return fail(400, claudePromptTooLongMessage(text), "invalid_request_error");
         return fail(502, text, "api_error");
       }
       finishLog(200);
-      return Response.json(message);
+      return retainUpstreamMessagesRequestId(Response.json(message), response.headers);
     } catch (error) {
       cleanupAbort();
       upstream.abort();
@@ -850,12 +869,19 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
   const serialized = JSON.stringify(message);
   finishLog(200);
   if (requestedStream) {
-    return new Response(messageAsSse(message), {
+    return retainUpstreamMessagesRequestId(new Response(messageAsSse(message), {
       status: 200,
       headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" },
-    });
+    }), response.headers);
   }
-  return new Response(serialized, { status: 200, headers: { "Content-Type": "application/json" } });
+  return retainUpstreamMessagesRequestId(new Response(serialized, { status: 200, headers: { "Content-Type": "application/json" } }), response.headers);
+}
+
+/** A folded stream error that refuses an oversized input (same gate as the SSE rewrite). */
+function isNativeOverflowError(error: Rec, message: string): boolean {
+  const sized = error.type === "invalid_request_error" || error.type === "request_too_large";
+  return sized && !isThroughputLimitText(message)
+    && (error.code === "context_length_exceeded" || isContextOverflowText(message));
 }
 
 /**
@@ -865,11 +891,13 @@ export async function handleNativeMessages(options: HandleNativeMessagesOptions)
  */
 function nativeMessagesErrorResponse(response: Response, bodyText: string, finishLog: FinishLog): Response {
   let upstreamType: string | undefined;
+  let upstreamCode: string | undefined;
   let upstreamMessage: string | undefined;
   try {
     const parsed = JSON.parse(bodyText) as Rec;
     const details = isRec(parsed.error) ? parsed.error : parsed;
     if (typeof details.type === "string") upstreamType = details.type;
+    if (typeof details.code === "string") upstreamCode = details.code;
     if (typeof details.message === "string" && details.message.trim()) {
       upstreamMessage = redactSecretString(details.message.trim());
     }
@@ -898,9 +926,17 @@ function nativeMessagesErrorResponse(response: Response, bodyText: string, finis
   if (retryAfter) headers.set("Retry-After", retryAfter);
   else if (transient) headers.set("Retry-After", "2");
   if (replayRefusal) applyReplayRefusalClientHeaders(headers);
+  // The native envelope keeps its shape (no added code); only an overflow's wording changes, so
+  // Claude Code recognizes it and compacts (010).
+  // Only a 400/413 refusal: the shared classifier also files a 429 "too many tokens per minute"
+  // under context_length_exceeded, and that one must stay a rate limit.
+  const overflow = !replayRefusal && (response.status === 400 || response.status === 413)
+    && !isThroughputLimitText(safeMessage)
+    && (classified.code === "context_length_exceeded" || upstreamCode === "context_length_exceeded"
+      || isContextOverflowText(safeMessage));
   const out = new Response(JSON.stringify(anthropicErrorBody(
     status,
-    safeMessage,
+    overflow ? claudePromptTooLongMessage(safeMessage) : safeMessage,
     transient ? "overloaded_error" : upstreamType,
     replayRefusal ? UPSTREAM_RESET_REPLAY_REFUSED_CODE : undefined,
   )), { status, headers });

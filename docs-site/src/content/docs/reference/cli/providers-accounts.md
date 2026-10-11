@@ -225,6 +225,14 @@ them anyway: it routes to the account-pool login, so `ocx login codex --reauth` 
 `ocx account reauth codex`. The dashboard Codex account pool (Reauthenticate) does it too. That route
 runs inside the proxy, so it needs a running one.
 
+For the ChatGPT OAuth provider, an explicit terminal OAuth code confirming an expired
+or revoked refresh grant requires signing in again. Free-text descriptions alone never
+require reauthentication. Temporary token-service failures, timeouts and cancellation leave the account
+eligible for a later refresh. Browser token exchange and refresh each have a 30-second
+per-fetch deadline covering headers and body. HTTP-derived errors show only the status
+and an allowlisted OAuth code. Cancellation, timeout and transport failures use fixed
+messages without the original reason or cause.
+
 ```bash
 ocx login xai
 ocx login anthropic
@@ -398,6 +406,12 @@ or recovery evidence. The account card shows the published cached usage, keeping
 with the lock status; Direct provider quota omits an unpublished response and its older cached report. Conflicting account
 identities and stale 401/403 replies retain the current
 cached info and cannot clear or set the current account's reauthentication state.
+
+Responses to requests sent with the identified main credential refresh its cached
+usage from their quota headers, whether the proxy substituted the stored credential or
+the caller sent the same credential itself. A response is applied only if that
+credential is still the observed main credential when it arrives; a caller-owned
+credential for another account or workspace never updates the main account's usage.
 
 The persisted option is `"codexMainAccountHardLock"` in OpenCodex's `config.json`. An absent key or
 `true` means on; only an explicit `false` turns it off, and that is what switching the setting off

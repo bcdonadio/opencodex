@@ -2,7 +2,7 @@ import { projectAntigravitySelectedModels } from "../../providers/antigravity-ef
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { initializeConfigOwnership } from "../../lib/config-ownership";
-import { getConfigDir, loadConfig, websocketsEnabled, withConfigMutationLockSync } from "../../config";
+import { getConfigDir, loadConfig, ultraFastTierEnabled, websocketsEnabled, withConfigMutationLockSync } from "../../config";
 import { shouldSyncCodexOnStart } from "../desired-state";
 import { legacyCustomModelCatalogSlugs } from "../custom-model-catalog-migration";
 import { getCodexHome } from "../paths";
@@ -55,7 +55,7 @@ import {
 } from "./metadata";
 import { trustedAccountBoundNativeCatalogSlug } from "./account-models";
 import { applyAccountModelMetadata } from "./account-model-metadata";
-import { bundledCatalogCacheState, loadBundledCodexCatalog } from "./bundled";
+import { bundledCatalogCacheState, bundledCodexCatalogSnapshot, loadBundledCodexCatalogAsync } from "./bundled";
 import { isMultiAgentV2Enabled } from "../features";
 import { clampCatalogModelsToCodexSupport } from "./effort";
 import { suppressedSyntheticMaxCatalogSlugs } from "./model-hints";
@@ -156,7 +156,7 @@ function optionalFileBytes(path: string): string | null {
 }
 
 function loadCatalogForRetainedSync(path: string): RawCatalog | null {
-  const bundled = isDefaultCatalogPath(path) ? loadBundledCodexCatalog() : null;
+  const bundled = isDefaultCatalogPath(path) ? bundledCodexCatalogSnapshot() : null;
   if (bundled) return JSON.parse(JSON.stringify(bundled)) as RawCatalog;
   const active = readCatalog(path);
   // A valid configured custom file remains the content authority even when it has no bare native
@@ -509,6 +509,7 @@ function writeRetainedCatalogSync({
     }).filter(entry => trustedAccountBoundNativeCatalogSlug(entry) !== undefined)
     : [];
   catalog.models = mergeCatalogEntriesFromObservedState({
+    ultraFastTier: ultraFastTierEnabled(config),
     modelPickerOrder,
     accountSelectors,
     catalogModels: catalogModelsForMerge,
@@ -542,7 +543,7 @@ function writeRetainedCatalogSync({
       warningPolicy: "emit",
     },
   });
-  clampCatalogModelsToCodexSupport(catalog.models);
+  clampCatalogModelsToCodexSupport(catalog.models, { observedCatalog: bundledCodexCatalogSnapshot() });
   finalizeAutoReviewModelOverride(catalog.models, catalogModelsForMerge, config);
   // Last mutation before serialization; see `enforceCatalogSlugUniqueness` for why the ordering
   // against the effort clamp is load-bearing rather than cosmetic.
@@ -631,6 +632,8 @@ export async function syncCatalogModels(
     await resolvePendingInitialModelSelection(config);
   }
   const owningCodexHome = getCodexHome();
+  // Settle before reading content and its matching evidence; no pre-refresh catalog is reused.
+  await loadBundledCodexCatalogAsync();
   const preflightRead = readRetainedCatalogSync(config);
   if (preflightRead === null) {
     return {
@@ -651,7 +654,6 @@ export async function syncCatalogModels(
   // The persisted runtime selection is covered by the filesystem evidence above
   // rather than by a process epoch; see `retainedCatalogProcessEvidence` for why
   // the in-memory runtime memo cannot be baselined honestly from this path.
-  loadBundledCodexCatalog();
   const prepared: RetainedCatalogSyncRead = {
     ...preflightRead,
     evidence: retainedCatalogSyncEvidence(config, preflightRead.catalogPath, preflightRead.catalog),

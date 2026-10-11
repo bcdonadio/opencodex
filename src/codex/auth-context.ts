@@ -1,5 +1,6 @@
 import { bindPoolCreditPolicy, poolCreditHoldResetAt, poolContextCreditHoldResetAt } from "./pool-credit-policy";
 import { hasSpendableCodexCredits } from "./quota-types";
+import { nextQuotaQueryDelay } from "./quota-query-backoff";
 import { noteMainAccountActivity } from "./main-account-external-usage";
 import { codexAccountPriorityFailbackEnabled } from "./account-priority";
 import type { PoolQuotaWriter } from "./quota-types";
@@ -83,11 +84,13 @@ import {
 import {
   captureMainAccountIdentityGeneration,
   captureMainQuotaWriter,
+  captureMainQuotaDispatch,
   getObservedMainQuotaIdentityKey,
   isMainQuotaWriterLive,
   matchesMainQuotaCredential,
   observeMainQuotaCredential,
   type MainQuotaWriter,
+  type MainQuotaDispatch,
 } from "./main-account-cache";
 import { CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, isCodexReserveHelperUnsupported, isCodexReserveRequestEligible } from "./loopback-target";
 import type { DataPlaneAdmission } from "../server/auth-cors";
@@ -278,7 +281,11 @@ export function previewCodexPoolLineage(
 }
 
 export type CodexAuthContext =
-  | { kind: "main"; accountId: null; reserveAuthorization?: MainReserveAuthorization }
+  | {
+      kind: "main"; accountId: null; reserveAuthorization?: MainReserveAuthorization;
+      /** Captured for the observed main credential actually selected for upstream. */
+      mainQuotaDispatch?: MainQuotaDispatch;
+    }
   | {
       kind: "pool";
       accountId: string;
@@ -555,8 +562,11 @@ function assertPoolAccountCredits(accountId: string, resetAt: number | undefined
 export class CodexMainAccountCreditsOffError extends CodexAccountCooldownError {
   readonly resetAt?: number;
 
-  constructor(resetAt?: number) {
-    super(MAIN_CODEX_ACCOUNT_ID, resetAt ?? 0);
+  constructor(resetAt?: number, creditRecovery = false) {
+    // Keep the included reset as policy evidence, but let consented callers retry
+    // within the base metadata recovery interval even when backoff grows longer.
+    super(MAIN_CODEX_ACCOUNT_ID, creditRecovery
+      ? Math.min(resetAt ?? Infinity, Date.now() + nextQuotaQueryDelay()) : resetAt ?? 0);
     this.name = "CodexMainAccountCreditsOffError";
     this.resetAt = resetAt;
     this.message = "Codex main account reached its usage limit, and spending ChatGPT credits is off or no fresh spendable balance is available."
@@ -780,7 +790,8 @@ function assertMainAccountPolicy(
     const status = getMainAccountHardLockStatus(config);
     if (status.state === "blocked") throw new CodexMainAccountHardLockError(status.resetAt, status.thresholds);
     const creditsResetAt = mainCreditsHoldResetAt(config);
-    if (creditsResetAt !== undefined) throw new CodexMainAccountCreditsOffError(creditsResetAt);
+    if (creditsResetAt !== undefined) throw new CodexMainAccountCreditsOffError(creditsResetAt,
+      codexAccountUsesCreditsAfterLimit(config, MAIN_CODEX_ACCOUNT_ID));
   }
   // Only an admitted request is opencodex's own use of the main account. Counting a refused one
   // would hide outside usage from the warning exactly while the lock is holding.
@@ -1677,6 +1688,14 @@ export class CodexMainSubstitutionUnavailableError extends Error {
   }
 }
 
+/** Dispatch identity comes only from an owned observation of the selected credential. */
+function selectedMainQuotaDispatch(selected: Headers): MainQuotaDispatch | undefined {
+  const bearer = selected.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  if (!bearer) return undefined;
+  const accountId = selected.get("chatgpt-account-id") ?? extractAccountId(undefined, bearer);
+  return captureMainQuotaDispatch(bearer, accountId, captureConfigGeneration());
+}
+
 /**
  * Build the upstream auth headers for one Codex turn.
  *
@@ -1696,6 +1715,7 @@ export function materializeCodexUpstreamAuth(
   ctx: CodexAuthContext,
   options: CodexAuthMaterializationOptions = {},
 ): Headers {
+  if (ctx.kind === "main") ctx.mainQuotaDispatch = undefined;
   if (selectedCallerMainContexts.has(ctx) && options.substituteMainCredential === true) {
     throw new CodexMainSubstitutionUnavailableError();
   }
@@ -1741,10 +1761,12 @@ export function materializeCodexUpstreamAuth(
     observeSelectedMainCredential(stored, writer);
     assertMainAccountPolicy(options.config);
     assertMaterializedReserve(selected, ctx, options);
+    ctx.mainQuotaDispatch = selectedMainQuotaDispatch(selected);
     return selected;
   }
   if (callerMatchesObservedMain(selected)) assertMainAccountPolicy(options.config);
   assertMaterializedReserve(selected, ctx, options);
+  if (ctx.kind === "main") ctx.mainQuotaDispatch = selectedMainQuotaDispatch(selected);
   return selected;
 }
 
@@ -1796,6 +1818,7 @@ export async function materializeCodexUpstreamAuthAsync(
   ctx: CodexAuthContext,
   options: CodexAuthMaterializationOptions = {},
 ): Promise<Headers> {
+  if (ctx.kind === "main") ctx.mainQuotaDispatch = undefined;
   if (selectedCallerMainContexts.has(ctx) && options.substituteMainCredential === true) {
     throw new CodexMainSubstitutionUnavailableError();
   }
@@ -1826,6 +1849,7 @@ export async function materializeCodexUpstreamAuthAsync(
   assertMainAccountPolicy(options.config);
   // An opt-in enabled during token refresh must not turn a proof-less context into Reserve.
   assertMaterializedReserve(selected, ctx, options);
+  ctx.mainQuotaDispatch = selectedMainQuotaDispatch(selected);
   return selected;
 }
 

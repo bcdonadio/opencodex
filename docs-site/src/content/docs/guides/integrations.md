@@ -29,7 +29,7 @@ file, and removes it again. Eighteen clients work this way, each with a switch:
 
 "omo" names three products that share the `~/.omo` folder. The **omo** tab manages Pi-based omo
 (the senpi engine) through `~/.omo/agent/models.json`, as in the table above. Codex-based omo
-(LazyCodex) gets its own controls on the Codex tab, described in
+(LazyCodex) gets its own section on the same tab, shown only when LazyCodex is detected, described in
 [omo (Codex / LazyCodex) role models](#omo-codex--lazycodex-role-models). OpenCode-based omo
 (oh-my-opencode) keeps its own config under OpenCode; opencodex does not read or write it.
 
@@ -532,6 +532,14 @@ per-profile refusal, residual and separately labeled redacted backup information
 inspect the affected profile before retrying. This refresh is separate from each
 profile's preview/bound mutation workflow.
 
+Sync refreshes only profiles whose sync preference is on, so an empty result is not a failure.
+If `ocx integration client status --client aside` shows a profile as `off (stale)`, status
+prints the commands to reconnect it: review `ocx integration client preview --client aside
+--operation apply --profile N`, and run `ocx integration client enable --client aside --profile N`
+only if the preview permits the change and you accept it. Nothing is re-enabled automatically.
+A malformed `asideProfileSync` block in `config.json` turns every profile off and logs a
+warning when the config loads.
+
 Each profile has separate ownership and history. Existing user edits, unsafe paths and linked
 catalogs are refused; the existing explicit overwrite and drift-confirmation controls remain
 available. Fully quit and reopen Aside to load changed model files.
@@ -652,7 +660,7 @@ key) in the app's API key field. The app sends it as `Authorization: Bearer`, wh
 
 ## omo (Codex / LazyCodex) role models
 
-When LazyCodex is installed, the Codex tab shows an **omo (Codex / LazyCodex)** section listing
+When LazyCodex is installed, the omo tab shows an **omo (Codex / LazyCodex)** section below the Pi-based omo controls, listing
 every Codex agent role found in `$CODEX_HOME/agents/*.toml`, with the model each one is pinned
 to. Codex runs a role on that pin no matter which model the parent asks for, so this is where a
 role's model is actually decided. LazyCodex counts as installed when the `omo@sisyphuslabs`
@@ -665,7 +673,7 @@ press Save:
 - opencodex rewrites only the root `model = "..."` line of that role's file. The role's
   instructions, comments, and other keys are left exactly as they were. A role with no pin gets
   one added near the top of the file.
-- The same value is written to `codex.agents.<role>.model` in `~/.omo/omo.jsonc`, which
+- The same value is written to `[codex].agents.<role>.model` in `~/.omo/omo.jsonc`, which
   LazyCodex 5.1.1 and later reads. If that file does not exist it is not created. If it contains
   comments it is left untouched, because saving would remove them; the tab says so, and you can
   set the value there by hand. Symlinks and non-regular files are rejected; on macOS and Linux,
@@ -678,6 +686,11 @@ New Codex sessions pick up the change. The same controls exist on the command li
 ocx agent roles
 ocx agent roles set explorer xai/grok-4.5
 ```
+
+`ocx agent roles set <role> <model> --effort <level>` also sets the role's reasoning effort: it
+rewrites the role file's `model_reasoning_effort` line and writes `[codex].agents.<role>.reasoning`
+in omo.jsonc when LazyCodex has that level (`ultra` stays in the role file only, and an older
+`reasoning` is removed). A Save that changes only the model leaves both effort values as they were.
 
 ### Auto-assign
 

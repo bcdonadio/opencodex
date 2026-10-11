@@ -90,6 +90,7 @@ traffic through a local interception proxy, which Anthropic may treat as a terms
 owned settings are still observed; otherwise the field is `null`.
 `/api/sync` and roster-update auto-apply never write a gateway profile while the resolved mode is
 first-party; both re-resolve after model discovery before writing.
+Background refresh preserves the selected owned gateway profile's mode, refuses symlinked library, metadata, profile or backup paths and non-regular profiles, and rechecks admission, the selected owned metadata entry and its applied fingerprint in the no-follow writer's pre-rename hook; it leaves metadata and backup bytes unchanged.
 
 Mode switches establish the replacement before removing the previous connection. A failed
 first-party apply (disabled intercept, CA failure, unreadable settings or foreign env) preserves
@@ -249,7 +250,8 @@ application-access dialogs are controlled by macOS; restart or upgrade does not 
 `picker-ca-store.ts` owns the versioned OS credential service, canonical-config identity namespace,
 bounded exact-shape payload, full constrained CA profile, validity and P-256 private-key match validation.
 `picker-ca-persistence.ts` validates public `authority.json` and `authority-init.json` records under
-the canonical CA lock, rejecting symlinks and mismatched pre-open/path and descriptor identities. Initialization journals the config identity, new fingerprint and public
+the canonical CA lock, rejecting symlinks and mismatched pre-open/path and descriptor identities.
+Device and inode comparisons use bigint stats so distinct full-width file IDs cannot alias through numeric rounding. Initialization journals the config identity, new fingerprint and public
 predecessor before writing the credential, verifies readback, then commits metadata and publication;
 it removes the journal last. Recovery requires matching journal/store identity; missing initialized
 credentials, unavailable storage or inconsistent metadata fail closed without publishing a replacement.
@@ -286,7 +288,7 @@ intent and cannot repair the URL a running Desktop already pinned. The `claude.a
 certificate, streams every body and upgrade unchanged, and rewrites only the bootstrap response's
 local Code picker surfaces, `ccd` (what the Desktop Code tab reads) and its `code` fallback, never the
 remote `ccr` (`picker-bootstrap.ts`), failing open to the original bytes; the model list
-comes from a persisted snapshot (`picker-models.ts`), so a bootstrap never waits on discovery. Picker aliases carry `[1m]` only for authoritative windows of at least 1M, using the shared context marker helper with auto-context disabled. Sub-million opt-ins remain unmarked because the picker cannot guarantee the Desktop runner's compaction environment. A
+comes from a persisted snapshot (`picker-models.ts`), so a bootstrap never waits on discovery. Picker aliases carry `[1m]` for long windows (`src/claude/long-context.ts`: at least 1M, or at least the 829,800 default compact window), and Claude models on either Anthropic pool only at a genuine 1M. The picker cannot guarantee the Desktop runner's compaction environment, so an 872k route that outgrows its window relies on the `prompt is too long` envelope, which Claude Code compacts on; Desktop 3P `supports1m`/`prefer1m`, discovery `· 1M` rows and generated subagent markers use the same rule. `claudeCode.contextAccounting` (`src/types/config.ts`) is absent for the 1m default; the only stored value is `"200k"`, which stops automatic `[1m]` marking and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` injection, drops Desktop 3P `prefer1m` while keeping `supports1m`, and still lists genuine 1M discovery rows. An explicit `[1m]` selector stays. `ocx claude config set --context-accounting` and `PUT /api/claude-code` write it (`"1m"` deletes the key). A
 CONNECT to claude.ai that arrives before the first refresh waits at most 3 s, then goes blind. A
 picker proxy bind failure only disables picker mode; a picker construction or start failure closes
 every socket the start had bound before rethrowing. Ordinary session cookies within the header
@@ -515,7 +517,7 @@ The account history response can include a [low-confidence effective capacity es
 
 Account quota surfaces use [safe probe diagnostics](../transports/inventory.md#account-quota-failure-diagnostics) separately from quota validity, credential health and routing authority.
 
-Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](../transports/responses.md) documents this boundary, and native Chat removes effort only for an explicit empty declaration or no-reasoning model.
+Combo child requests normalize effort and thinking controls against the selected target while retaining reasoning summaries; strict unknown targets preserve caller controls. The [Responses transport owner](../transports/responses.md) documents this boundary, and native Chat capability stripping applies only for an explicit empty declaration or no-reasoning model; an initial JEV null choice separately strips caller effort.
 
 Live sideband admission and its bounded upstream handshake follow the [runtime contract](../runtime.md#live-sideband-handshake); the ordinary Responses WebSocket exchange remains separate.
 
@@ -544,6 +546,8 @@ Translated tool results in `src/claude/inbound.ts` retain nonempty string `tool_
 `src/claude/inbound.ts` bounds the text-carrier skill-directory probe to 4,096 UTF-16 code units, plus one character to recognize the terminating newline. A longer first line is preserved intact instead of being scanned or stubbed; normal POSIX, Windows, mixed and UNC separators retain their basename matching. The existing 10,000-character payload threshold and `claudeCode.blockedSkills` policy remain: `claude-api` is blocked by default, and an explicit empty list disables elision. Native Anthropic passthrough and tool-call/result pairing are unchanged. `tests/claude-integration/claude-inbound.test.ts` covers the exact 4,096/4,097 boundary and a long newline-free carrier.
 
 `src/claude/inbound-content-options.ts` strips Claude Code's leading `x-anthropic-billing-header:` line from a string system prompt or from the first text block of a system array before it becomes Responses `instructions`, dropping a block left empty. The line's `cch` value rotates per request, so keeping it made the translated prefix and the system-derived fallback `prompt_cache_key` change every turn (#6627). The match is anchored at the prompt start, like the Antigravity strip in `src/adapters/google.ts`; native Anthropic passthrough does not use this translation and keeps the client preamble. `tests/claude-integration/claude-inbound.test.ts` covers string and array systems, header-only blocks, later mentions and key stability.
+
+`src/claude/outbound.ts` carries a Responses provider's own `encrypted_content` in an `ocxr1:` `nat` envelope (`src/responses/reasoning-envelope.ts`) only when the serving attempt has committed and `src/server/responses/core-replay.ts` supplied a durable destination and credential owner. The `nat.tag` HMAC binds the exact blob to that owner and the installation's persisted salt. `src/claude/inbound.ts` restores the blob and item id only for the same client-facing model; each route binding verifies the tag against its effective endpoint, including `responsesPath`, and generation-bearing credential, then removes a mismatch from both the raw reasoning item and the parser's thinking-signature carrier before send. Missing owner or tag fails closed, including direct-forward credentials and OAuth generation changes. Native Anthropic ingress projects away every `nat` on both native branches, dropping blob-only blocks and leaving signed or visible-text fields intact. A thinking block that closes before serving commit has no `nat`. Translated bodies that reason request `include: ["reasoning.encrypted_content"]`; a body without reasoning does not. Anthropic `sig` and `red` envelopes keep their existing behavior. `tests/claude-integration/claude-native-reasoning-provenance.test.ts` covers route ownership and native projection.
 
 ## Claude Code picker descriptions
 

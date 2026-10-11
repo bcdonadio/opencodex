@@ -217,7 +217,7 @@ their existing visibility rules.
 Visibility, selected-model and preset writes refresh already-owned catalog contributions (including OpenCode, Kilo and
 Command Code) after persisting the selection. Explicit sync also refreshes owned OpenCode, Kilo and Command Code blocks. The shared catalog-refresh
 fan-out loads the filtered roster lazily once, leaves unowned clients alone, and reports each
-refusal independently. Existing coordinated writers retain all no-clobber and ownership checks.
+refusal independently. Existing coordinated writers retain all no-clobber and ownership checks. A background catalog auto-refresh that changes the served set calls `syncEnabledClientIntegrations` unattended from `src/server/background-lifecycle.ts`: it refreshes only an existing Grok fence, a Desktop gateway profile that is still selected and byte-identical to the last applied write (keeping its static, hybrid or discovery mode), and owned file and Aside blocks without a first apply; it skips Cline, honours the hub and sibling gate, and the coordinated writer's synchronous `guard` refuses any write once the scheduler generation has stopped or the owner captured for that delivery has revoked fan-out admission or released its lease; a later delivery may select a surviving owner. Each write also requires the projection's configuration snapshot to remain current, ignoring only Desktop's applied fingerprint and timestamp; Grok rechecks its complete fence and refuses symlinked config or backup paths inside the synchronous injector, then revalidates admission and unchanged regular-file bytes in the no-follow writer's pre-rename hook without copying a backup.
 Implicit refresh operations use distinct flight keys: overlapping desired catalogs return busy
 rather than joining a write of a different catalog and reporting false success.
 On a sibling instance ([Codex home](../codex-home.md#codex-home)), including one identified from another home's managed client destination, `src/integrations/catalog-refresh.ts`
@@ -477,7 +477,7 @@ connection defaults all profiles on; explicit per-profile changes materialize th
 pin one legacy root owner before changing it. Sibling stores remain independent. Policy saves
 precede coordinated writes under one scoped flight, and actual file state/refusals remain
 separate. Restore reconciles target intent from validated snapshot ownership without changing
-sibling policy. Profile journal views retain source-store provenance for older legacy entries.
+sibling policy. Profile journal views retain source-store provenance for older legacy entries. A profile that is off beside a stale block is never re-enabled automatically; the CLI names its preview-then-enable recovery (`src/cli/aside-profile-recovery.ts`), and a malformed policy that falls back to all-off produces a load-time warning.
 
 The shared atomic replacement publisher also identifies explicit Remote Workspace file writes as `remote-workspace`; its isolated owner and support limits are documented in [Remote Workspace](../remote-workspace.md).
 
@@ -488,7 +488,7 @@ The shared atomic replacement publisher also identifies explicit Remote Workspac
 | Variant | Its own evidence | opencodex surface |
 | --- | --- | --- |
 | Pi-based omo (senpi engine) | `~/.omo/agent`, or `OMO_CODING_AGENT_DIR` / `SENPI_CODING_AGENT_DIR` / `PI_CODING_AGENT_DIR` (`omoAgentDir()`) | the `omo` file integration and tab, `providers.opencodex` in `models.json` |
-| Codex-based omo (LazyCodex) | `[plugins."omo@sisyphuslabs"] enabled = true` in `$CODEX_HOME/config.toml` plus `lazycodex-install.json` in an installed copy under `$CODEX_HOME/plugins/cache/sisyphuslabs/omo/<version>/` (`detectLazyCodex()` in `src/clients/lazycodex.ts`) | role model pins and the omo.jsonc mirror below, on the Codex tab |
+| Codex-based omo (LazyCodex) | `[plugins."omo@sisyphuslabs"] enabled = true` in `$CODEX_HOME/config.toml` plus `lazycodex-install.json` in an installed copy under `$CODEX_HOME/plugins/cache/sisyphuslabs/omo/<version>/` (`detectLazyCodex()` in `src/clients/lazycodex.ts`) | role model pins and the omo.jsonc mirror below, in their own section of the omo tab |
 | OpenCode-based omo (oh-my-opencode) | its config under OpenCode | none; nothing here reads or writes it |
 
 `~/.omo` alone identifies none of them: Pi-based omo and LazyCodex both use it.
@@ -497,14 +497,14 @@ The shared atomic replacement publisher also identifies explicit Remote Workspac
 
 Separate from the `models.json` provider integration above, and only when `detectLazyCodex()`
 reports LazyCodex installed, `src/clients/omo-role-models.ts`
-mirrors a dashboard or `ocx agent roles set` pick into `codex.agents.<role>.model` of
+mirrors a dashboard or `ocx agent roles set` pick into `[codex].agents.<role>.model` of
 `~/.omo/omo.jsonc`, which LazyCodex 5.1.1 and later reads. The home is resolved the way omo
 resolves it: `HOME`, then `USERPROFILE`, then the OS home. This write has no ownership record,
-snapshot, or journal. It changes one value the user just chose and leaves every other key as it
+snapshot, or journal. It changes the role's `model` and, when the request carries an effort, its `reasoning` (Codex `none` becomes `off`; a level LazyCodex lacks, such as `ultra`, removes a stale `reasoning`; a model-only save keeps it), and leaves every other key as it
 was, re-serialized with the file's indentation, line endings, and BOM.
 
 It never creates the file and never writes one it would damage: a missing file reports
-`absent`, a document that is not an object or whose `codex`, `codex.agents`, or role entry is
+`absent`, a document that is not an object or whose `[codex]`, `[codex].agents`, or role entry is
 not an object reports `invalid`, and a file containing any `//` or block comment reports
 `skipped_comments`, because re-serializing JSONC would drop those comments. The management
 response carries that status and the dashboard shows it; the role TOML write described in

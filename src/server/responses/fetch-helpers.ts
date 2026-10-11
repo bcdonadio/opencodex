@@ -45,6 +45,10 @@ const pacingWebsocketDowngradeWarned = new Set<string>();
  */
 const EGRESS_DECIDED = Symbol.for("opencodex.provider-egress.decided");
 const UPSTREAM_REWRITTEN = Symbol.for("opencodex.plugins.upstream-rewritten");
+// Survives queued credential rebuilds and executor replacement without importing budget owners.
+const PHYSICAL_DISPATCH = Symbol.for("opencodex.physical-dispatch");
+// One WS attempt and its HTTP fallback are one logical physical-send receipt.
+const WS_FALLBACK_RECEIPT = Symbol.for("opencodex.ws-fallback-receipt");
 
 /**
  * Announce once, per provider, that an explicit egress route moved this provider off the
@@ -202,6 +206,7 @@ export function sendWithConnectionPolicy(
   const largeCodexBody = typeof body === "string"
     && /^https:\/\/chatgpt\.com\/backend-api\/codex\/responses(?:\/compact)?$/.test(target)
     && Buffer.byteLength(body, "utf8") >= 1024 * 1024;
+  (init as Record<symbol, (() => void) | undefined> | undefined)?.[PHYSICAL_DISPATCH]?.();
   return physicalFetch(input, {
     ...init,
     ...(largeCodexBody ? { body: Buffer.from(body, "utf8") } : {}),
@@ -238,6 +243,8 @@ export interface ProviderFetchOptions {
   beforeDispatch?: (headers: Headers) => void;
   /** Called only after a primary request is actually dispatched on the wire. */
   onTransport?: (transport: "http" | "websocket") => void;
+  /** One-shot receipt after final local HTTP admission, immediately before executor entry. */
+  onPhysicalDispatch?: () => void;
   /** Revalidate/rebuild a queued request at its physical send boundary, after pacing. */
   dispatchOverride?: (
     input: Parameters<typeof globalThis.fetch>[0],
@@ -289,6 +296,7 @@ export function diagnosticTarget(input: Parameters<typeof globalThis.fetch>[0], 
   } catch { return undefined; }
 }
 
+/** Compose provider pacing and transport admission; receipts run only at executor entry. */
 export function providerFetch(
   provider: OcxProviderConfig,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
@@ -347,6 +355,12 @@ export function providerFetch(
       };
       // This hook inspects a copy; the final connection and egress policy belongs to dispatch.
       options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
+      const sharedReceipt = (init as Record<symbol, (() => void) | undefined> | undefined)?.[WS_FALLBACK_RECEIPT];
+      let notified = false;
+      Object.assign(dispatchInit, options.onPhysicalDispatch ? { [PHYSICAL_DISPATCH]: () => {
+        if (sharedReceipt) sharedReceipt();
+        else if (!notified) { options.onPhysicalDispatch!(); notified = true; }
+      } } : {});
       // Recovery may rebuild the destination and body at the dispatch boundary.
       // Observe the executor's arguments so diagnostics describe that actual send.
       const execute = markEgressTransparentExecutor(Object.assign(async (
@@ -399,14 +413,22 @@ export function providerFetch(
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch,
+      let notified = false;
+      const notifyOnce = (): void => {
+        if (notified) return;
+        notified = true;
+        options.onPhysicalDispatch?.();
+      };
+      const fallback = ((url: Parameters<typeof globalThis.fetch>[0], fallbackInit?: RequestInit) =>
+        httpFetch(url, { ...fallbackInit, [WS_FALLBACK_RECEIPT]: notifyOnce } as RequestInit)) as typeof globalThis.fetch;
+      return codexWsUpstreamFetch(input, init, fallback, runtime, options.onCodexWsQuota, options.beforeDispatch,
         options.onTransport,
         options.observeTransport ? event => notifyTransport(options.observeTransport,
           event.kind === "send" && event.transport === "websocket"
             ? { ...event, target: diagnosticTarget(input, init) } : event) : undefined,
         options.nativeControl,
         async () => { (await waitForPacing(init.signal ?? undefined))?.release(); },
-        process.env.OCX_CODEX_WS_INCREMENTAL_INPUT === "1");
+        process.env.OCX_CODEX_WS_INCREMENTAL_INPUT === "1", notifyOnce);
     }
     return httpFetch(input, init);
   };
