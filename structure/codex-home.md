@@ -132,6 +132,9 @@ An absent `config.toml` or absent root `sqlite_home` permits the environment/hom
 other read failure, malformed TOML, wrong-typed or blank `sqlite_home` is indeterminate and fails
 closed so history code cannot select a different database by accident. This strict parse is scoped
 to SQLite ownership; the tolerant root-string helper used by injection and catalog reads is unchanged.
+For structural parsing, `src/codex/toml-structural-parse.ts` projects valid i64 integer values outside
+JavaScript’s safe range to numbers in a temporary parser input. Strings, comments and keys retain
+their bytes, and Bun validates the whole document. No config file or integer consumer is changed.
 
 > Decision record: [ADR-0007](decisions/ADR-0007-codex-home.md)
 

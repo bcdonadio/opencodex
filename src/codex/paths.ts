@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { expandUserPath } from "../config";
 import { defaultCodexHome } from "./home";
 import { codexHomeIsAbsent } from "./codex-home-owner";
+import { parseTomlStructure } from "./toml-structural-parse";
 
 function resolveCodexHome(): string {
   const raw = process.env.CODEX_HOME?.trim();
@@ -56,7 +57,7 @@ type RootTomlStringState =
 function readAuthoritativeRootTomlString(content: string, key: string): RootTomlStringState {
   let parsed: unknown;
   try {
-    parsed = Bun.TOML.parse(content);
+    parsed = parseTomlStructure(content);
   } catch {
     return { kind: "invalid" };
   }

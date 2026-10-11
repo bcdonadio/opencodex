@@ -71,6 +71,41 @@ describe("Codex SQLite home resolution", () => {
     }
   });
 
+  test("unrelated valid i64 values do not invalidate SQLite ownership", () => {
+    const values = ["9223372036854775807", "-9223372036854775808", "+9_007_199_254_740_992",
+      "0x7fffffffffffffff", "0o777777777777777777777", "0b1" + "0".repeat(53)];
+    for (const value of values) {
+      for (const body of [`max_bytes = ${value}`, `limits = [${value}]`, `limits = { bytes = ${value} }`]) {
+        for (const root of ["", 'sqlite_home = "/state/from-config"\n']) {
+          expect(resolveCodexSqliteHome({
+            codexHome: "/state/codex-home", env: {},
+            readConfig: () => `${root}[otel.tool_result]\n${body}\n`,
+          })).toBe(root ? resolve("/state/from-config") : "/state/codex-home");
+        }
+      }
+    }
+  });
+
+  test("i64 projection preserves strings, keys and malformed document refusal", () => {
+    const valid = 'sqlite_home = "9223372036854775807"\n'
+      + 'text = """\n# 9223372036854775807\n[table]\n"""\n'
+      + "literal = '''9223372036854775807'''\n"
+      + 'values = { 9223372036854775807 = 1, bytes = 9223372036854775807 }\n';
+    expect(resolveCodexSqliteHome({ codexHome: "/state/codex-home", env: {},
+      cwd: () => "/work", readConfig: () => valid })).toBe(resolve("/work/9223372036854775807"));
+    for (const config of [
+      "sqlite_home = 9223372036854775807\n",
+      'sqlite_home = "/state"\n[otel]\nn = 9223372036854775808\n',
+      'sqlite_home = "/state"\n[otel]\nn = -9223372036854775809\n',
+      'sqlite_home = "/state"\n[otel]\nn = 9223372036854775807\nbroken = [\n',
+      'sqlite_home = "/state"\n[otel]\nn = 9223372036854775807\nn = 1\n',
+      'sqlite_home = "/state"\n[otel]\nn = 09223372036854775807\n',
+    ]) {
+      expect(() => resolveCodexSqliteHome({ codexHome: "/state/codex-home", env: {},
+        readConfig: () => config })).toThrow("invalid sqlite_home");
+    }
+  });
+
   test("accepts a valid quoted root sqlite_home key", () => {
     expect(resolveCodexSqliteHome({
       codexHome: "/state/codex-home",
