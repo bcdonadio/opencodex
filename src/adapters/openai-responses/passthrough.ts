@@ -50,6 +50,7 @@ import { observeOutbound } from "../../usage/cache-diagnostic";
 import { normalizeForwardedClientHeaderName } from "../../lib/provider-client-headers";
 import { normalizeMuseToolChoice } from "./muse-tool-choice";
 import { renderCompactionSearchHistoryItems } from "./compaction-search-history";
+import { stripKimiEmptyAssistantMessages } from "./empty-assistant";
 
 /**
  * Identifies DeepSeek's strict Responses replay contract: tool-bearing continuations need
@@ -497,6 +498,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       outBody = repairUnidentifiedToolOutputItems(outBody);
       // Code-mode guidance can add instructions, so normalize the xAI envelope after it.
       outBody = normalizeXaiContinuationInstructions(outBody, provider);
+      outBody = stripKimiEmptyAssistantMessages(outBody, url);
       if (parsed._plaintextV2AgentMessages === true && isCanonicalOpenAiForwardProvider(provider)) {
         const prepared = preparePlaintextV2AgentMessages(outBody);
         outBody = prepared.body;
@@ -519,6 +521,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
                   outBody,
                   destinationDecodesNativeCompactionBlob(provider),
                   threadServingIdentityChanged,
+                  parsed._compactionRequest !== true,
                 ),
                 {
                   preserveRawReasoningContent: provider.preserveResponsesReasoningContent === true,

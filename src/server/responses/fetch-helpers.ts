@@ -1,5 +1,6 @@
 import type { NativeResponseControl } from "./native-response-control";
 import type { CodexWsContinuationDecisionReason } from "./codex-ws-continuation";
+import type { CodexWsPreOutputRefusalHold } from "./codex-ws-wire";
 import type { Server } from "bun";
 import {
   codexWsUpstreamFetch,
@@ -30,6 +31,7 @@ import {
   type ProviderEgressBinding,
 } from "../../lib/provider-egress";
 import { redactSecretString } from "../../lib/redact";
+import { outboundCredentials } from "../../lib/outbound-credential-registry";
 
 export { withUpstreamHttpVersion };
 
@@ -207,6 +209,9 @@ export function sendWithConnectionPolicy(
     && /^https:\/\/chatgpt\.com\/backend-api\/codex\/responses(?:\/compact)?$/.test(target)
     && Buffer.byteLength(body, "utf8") >= 1024 * 1024;
   (init as Record<symbol, (() => void) | undefined> | undefined)?.[PHYSICAL_DISPATCH]?.();
+  // Final headers, after plugin rewrites: an upstream can only echo what it received here, so the
+  // request log refuses any diagnostic that repeats one of these values (see request-log-terminal-status).
+  outboundCredentials().remember(headers);
   return physicalFetch(input, {
     ...init,
     ...(largeCodexBody ? { body: Buffer.from(body, "utf8") } : {}),
@@ -245,6 +250,12 @@ export interface ProviderFetchOptions {
   onTransport?: (transport: "http" | "websocket") => void;
   /** One-shot receipt after final local HTTP admission, immediately before executor entry. */
   onPhysicalDispatch?: () => void;
+  /**
+   * Opt-in (#6969): let a Codex WebSocket send hold empty lifecycle frames so an authoritative
+   * upstream refusal before any output settles as a replayable gateway status. Only a caller that
+   * restores the projection afterwards (restoreCodexWsPreOutputRefusal) may set it.
+   */
+  preOutputRefusalHold?: CodexWsPreOutputRefusalHold;
   /** Revalidate/rebuild a queued request at its physical send boundary, after pacing. */
   dispatchOverride?: (
     input: Parameters<typeof globalThis.fetch>[0],
@@ -428,7 +439,7 @@ export function providerFetch(
             ? { ...event, target: diagnosticTarget(input, init) } : event) : undefined,
         options.nativeControl,
         async () => { (await waitForPacing(init.signal ?? undefined))?.release(); },
-        process.env.OCX_CODEX_WS_INCREMENTAL_INPUT === "1", notifyOnce);
+        process.env.OCX_CODEX_WS_INCREMENTAL_INPUT === "1", notifyOnce, options.preOutputRefusalHold);
     }
     return httpFetch(input, init);
   };

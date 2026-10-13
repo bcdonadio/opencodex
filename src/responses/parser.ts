@@ -15,7 +15,7 @@ import { createToolChoiceResolver, namespacedToolName } from "../types";
 import { responsesRequestSchema } from "./schema";
 import { providerMetadataFromResponsesFunctionCall } from "./provider-opaque-metadata";
 import { lookupReplayThoughtSignature } from "./thought-signature-replay";
-import { compactionItemToText, isCompactionItemType } from "./compaction";
+import { CHECKPOINT_CONTINUATION_NOTE, compactionItemToText, decodeCompactionSummary, isCompactionItemType } from "./compaction";
 import { previousResponseReplayPrefixLength } from "./state";
 import { decodeReasoningEnvelope } from "./reasoning-envelope";
 import { hasRoutedIdentity, nameRoutedIdentity } from "../adapters/identity";
@@ -192,6 +192,7 @@ export function parseRequest(
   // Remote compaction v2: the input tail carries `{type:"compaction_trigger"}` and Codex expects a
   // synthetic `{type:"compaction"}` output item (src/responses/compaction.ts). Flagged for the server.
   let compactionRequest = false;
+  let decodedCheckpoint = false;
   let contextCompactionBoundary = false;
   let continuationConversationMessageIndex: number | undefined;
 
@@ -260,6 +261,7 @@ export function parseRequest(
         if (inputIndex >= replayedInputPrefixLength) contextCompactionBoundary = true;
         const encrypted = (item as { encrypted_content?: unknown }).encrypted_content;
         if (effectiveType === "context_compaction" && typeof encrypted !== "string") continue;
+        if (typeof encrypted === "string" && decodeCompactionSummary(encrypted) !== null) decodedCheckpoint = true;
         pendingReasoning.length = 0;
         messages.push({
           role: "user",
@@ -585,6 +587,10 @@ export function parseRequest(
     .map(t => loadedToolNames.has(namespacedToolName(t.namespace, t.name))
       ? { ...t, loadedFromToolSearch: true }
       : t);
+  // #6764: the decoded checkpoint is ordinary user text on this route. Say in the system prompt
+  // what it is, so a retained earlier request that it reports as completed is not repeated.
+  // A compaction request is a summarizer turn and must not be told to continue.
+  if (decodedCheckpoint && !compactionRequest) systemPrompt.push(CHECKPOINT_CONTINUATION_NOTE);
   const context: OcxContext = {
     ...(systemPrompt.length > 0 ? { systemPrompt } : {}),
     messages,

@@ -12,7 +12,7 @@ import type { CodexAccountEntry } from "./codex-account-pool-types";
 import type { CodexAccountModeState } from "../codex-multi-state";
 import QuotaBars from "./QuotaBars";
 import CodexCreditsRow from "./CodexCreditsRow";
-import { CodexPauseToggleLabel, CodexTicketBadge } from "./codex-account-pool-helpers";
+import { CodexPauseToggleLabel, CodexPinnedBadge, CodexTicketBadge } from "./codex-account-pool-helpers";
 import {
   doctorCopyButtonLabel,
   formatOAuthHealthLabel,
@@ -42,6 +42,7 @@ export function CodexAccountPoolCards({
   autoSwitchDisabled,
   switchingId,
   pinnedId = null,
+  onUnpin,
   onReauth,
   onEditAlias,
   onRemove,
@@ -75,6 +76,8 @@ export function CodexAccountPoolCards({
    * badge on the account the operator actually chose.
    */
   pinnedId?: string | null;
+  /** Opens the release confirm for the pinned card: selecting the badge again unpins. */
+  onUnpin: (account: CodexAccountEntry) => void;
   onReauth: (id: string) => void;
   onEditAlias: (account: CodexAccountEntry) => void;
   onRemove: (id: string) => void;
@@ -122,7 +125,7 @@ export function CodexAccountPoolCards({
               )}
               <AccountPriorityBadge value={a.priority} />
               <CreditsOnBadge enabled={a.creditsAfterLimit} />
-              {a.id === pinnedId && !a.paused && <span className="badge badge-muted">{t("codexAuth.pinned")}</span>}
+              {a.id === pinnedId && !a.paused && <CodexPinnedBadge t={t} onUnpin={() => onUnpin(a)} />}
               <CodexTicketBadge t={t} account={a} onClick={() => onOpenReset(a)} />
               {healthLabel && (
                 <span className={oauthHealthBadgeClass(healthStatus)}>{healthLabel}</span>
