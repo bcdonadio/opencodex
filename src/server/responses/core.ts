@@ -50,7 +50,7 @@ export async function handleResponses(
   abortSignal.addEventListener("abort", cancel, { once: true });
   try {
     const response = await runWithCompactionRecovery(req, config, logCtx, {
-      ...options,
+      ...options, abortSignal,
       ...credentialOwnership,
       openAiSidecarAuth: options.openAiSidecarAuth === undefined
         ? captureExplicitOpenAiCallerAuth(req.headers, config) : options.openAiSidecarAuth,

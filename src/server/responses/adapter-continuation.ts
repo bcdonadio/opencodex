@@ -33,6 +33,8 @@ import {
   isNonReplayableResponse,
   prepareSameTarget429Wait,
 } from "../../lib/upstream-retry";
+import { unwrapUpstreamRetryEvidenceError } from "../../codex/auth-context";
+import { AdmissionModelDeniedError, MODEL_NOT_ALLOWED_FOR_KEY } from "../admission-model-scope";
 import { redactSecretString } from "../../lib/redact";
 import { resolveWireProtocolOverride } from "../adapter-resolve";
 import { bindRouteReasoningReplayScope } from "./core-replay";
@@ -149,6 +151,22 @@ export function createAdapterContinuations(
     sendBudgetExhausted,
   } = sendBudgetState;
 
+  const continuationFailureEvent = (error: unknown): Extract<AdapterEvent, { type: "error" }> => {
+    if (options.abortSignal?.aborted || upstream.signal.aborted) {
+      return { type: "error", message: "client closed request during terminal continuation", status: 499 };
+    }
+    const refusal = unwrapUpstreamRetryEvidenceError(error);
+    if (refusal instanceof AdmissionModelDeniedError) {
+      return {
+        type: "error", message: refusal.message, status: 403,
+        errorType: MODEL_NOT_ALLOWED_FOR_KEY, code: MODEL_NOT_ALLOWED_FOR_KEY, retryable: false,
+      };
+    }
+    return {
+      type: "error",
+      message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}`,
+    };
+  };
 
   // One bounded internal continuation re-ask for clean end_turn turns that announced an edit
   // without emitting a tool call. Anthropic gets this by default; openai-chat providers opt in
@@ -312,12 +330,7 @@ export function createAdapterContinuations(
           kiroRefusalPendingReplay = undefined;
           kiroReplaySetupFailed = true;
         } else {
-        if (options.abortSignal?.aborted || upstream.signal.aborted) {
-          yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
-        } else {
-          yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
-        }
-        return;
+        yield continuationFailureEvent(error); return;
         }
       }
 
@@ -368,12 +381,7 @@ export function createAdapterContinuations(
         try {
           response = await fetchContinuation("rate-limit-429");
         } catch (error) {
-          if (options.abortSignal?.aborted || upstream.signal.aborted) {
-            yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
-          } else {
-            yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
-          }
-          return;
+          yield continuationFailureEvent(error); return;
         }
       }
 
@@ -389,9 +397,7 @@ export function createAdapterContinuations(
           route.provider = rotated;
           try { await transportState.resolveCopilotSelection(nextParsed); }
           catch (error) {
-            yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}`,
-              ...(options.abortSignal?.aborted || upstream.signal.aborted ? { status: 499 } : {}) };
-            return;
+            yield continuationFailureEvent(error); return;
           }
           invalidateSameTargetRequest();
           transportState.activeAdapter = resolveSelectionAdapter(
@@ -638,13 +644,17 @@ export function createAdapterContinuations(
               nextContinuationRecoveryKind = "oauth-account-429";
               continue;
             }
-          } catch {
+          } catch (error) {
             // Everything in this try runs before the replay: the send happens on the next
             // iteration, after `continue`. A throw here therefore leaves a reservation that
             // never dispatched, and holding it would refuse a later recovery in this same
             // request for a send that never left the process.
             hop.permit?.release();
-            // fall through to emit continuation error below
+            if (unwrapUpstreamRetryEvidenceError(error) instanceof AdmissionModelDeniedError) {
+              yield continuationFailureEvent(error);
+              return;
+            }
+            // Other negotiation failures preserve the original provider refusal.
           }
         }
       }
@@ -725,7 +735,7 @@ export function createAdapterContinuations(
 
   const fetchGuardedEmptyCompletionRetry = (): AsyncIterable<AdapterEvent> => {
     const retryEvents = fetchTerminalGuardContinuation(parsed, "empty-completion", true);
-    return terminalGuardEnabled
+    const terminalGuardedRetry = terminalGuardEnabled
       ? guardTerminalEventStream({
           parsed,
           firstEvents: retryEvents,
@@ -734,6 +744,13 @@ export function createAdapterContinuations(
           continuation: next => fetchTerminalGuardContinuation(next, undefined, !parsed.stream),
         })
       : retryEvents;
+    return parsed._advisorGuard
+      ? parsed._advisorGuard({
+          parsed,
+          firstEvents: terminalGuardedRetry,
+          continuation: fetchTerminalGuardContinuation,
+        })
+      : terminalGuardedRetry;
   };
 
   return {
