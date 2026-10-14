@@ -28,6 +28,24 @@ import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 describe("active registry admission", () => {
+  test("websocket capacity reclaims idle connections without closing active turns", () => {
+    const leases = Array.from({ length: MAX_TRACKED_CODEX_WEBSOCKETS }, () => tryReserveCodexWebSocket());
+    const closed: number[] = [];
+    let replacement: ReturnType<typeof tryReserveCodexWebSocket> = null;
+    try {
+      for (const [index, lease] of leases.entries()) {
+        lease!.bind({ data: index === 1 ? {} : index === 0 ? { nativeControl: {} } : { cancel() {} }, close() { closed.push(index); } } as never);
+      }
+      replacement = tryReserveCodexWebSocket();
+      expect(replacement).not.toBeNull();
+      expect(closed).toEqual([1]);
+      expect(tryReserveCodexWebSocket()).toBeNull();
+    } finally {
+      replacement?.release();
+      for (const lease of leases) lease?.release();
+    }
+  });
+
   test("active turn 257 returns structured server_busy before handler work", async () => {
     const leases = Array.from({ length: 256 }, () => tryAdmitTurn());
     const previousHome = process.env.OPENCODEX_HOME;
@@ -60,7 +78,7 @@ describe("active registry admission", () => {
     }
   });
 
-  test("websocket 129 rejects at the real upgrade boundary without entering account registry", async () => {
+  test("websocket 129 falls back immediately at the upgrade boundary without entering account registry", async () => {
     const leases = Array.from({ length: MAX_TRACKED_CODEX_WEBSOCKETS }, () => tryReserveCodexWebSocket());
     const previousHome = process.env.OPENCODEX_HOME;
     const home = mkdtempSync(join(tmpdir(), "ocx-websocket-cap-"));
@@ -80,8 +98,8 @@ describe("active registry admission", () => {
       const response = await fetch(new URL("/v1/responses", server.url), {
         headers: { connection: "Upgrade", upgrade: "websocket" },
       });
-      expect(response.status).toBe(503);
-      expect(await response.json()).toMatchObject({ error: { code: "server_busy" } });
+      expect(response.status).toBe(426);
+      expect(await response.json()).toMatchObject({ error: { code: "upgrade_required" } });
       expect(getTrackedCodexWebSocketCountForAccount("not-admitted")).toBe(0);
     } finally {
       for (const lease of leases) lease?.release();

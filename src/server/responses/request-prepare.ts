@@ -216,7 +216,7 @@ export async function prepareResponsesRequest(
   if (!concreteSelection && !options.compactionRoutingOverride && inboundWire === "responses") {
     options.compactionRoutingOverride = applyCompactionRoutingOverride(body, req.headers, config, {
       endpoint: "responses",
-      transport: options.inboundTransport,
+      transport: options.inboundTransport === "websocket" ? "websocket" : undefined,
     });
   }
   // Codex's memory pipeline names a destination per phase. The phase is read from Codex's own turn
@@ -227,7 +227,7 @@ export async function prepareResponsesRequest(
   const memoryModelPhase = options.internalDecisionCall ? undefined : options.memoryModelPhase
     ?? ((config.memoryModels?.extract || config.memoryModels?.consolidation)
       && !concreteSelection && !options.compactionRoutingOverride && inboundWire === "responses"
-      ? detectMemoryModelPhase(body, req.headers, { transport: options.inboundTransport }) ?? undefined
+      ? detectMemoryModelPhase(body, req.headers, { transport: options.inboundTransport === "websocket" ? "websocket" : undefined }) ?? undefined
       : undefined);
   const memoryModelTarget = memoryModelPhase ? configuredMemoryModel(config, memoryModelPhase) : undefined;
   // A combo child is a synthetic replay of the parent's decision: its model is already the target's
@@ -303,7 +303,7 @@ export async function prepareResponsesRequest(
   // Luna is also selectable by users/children. Both intercept sites use the same
   // per-turn provenance; WS frames must not inherit the handshake's classification.
   const threadSpawn = isThreadSpawnRequest(req.headers);
-  const preserveShadowModel = shadowCallPreservesSelectedModel(body, req.headers, options.inboundTransport);
+  const preserveShadowModel = shadowCallPreservesSelectedModel(body, req.headers, options.inboundTransport === "websocket" ? "websocket" : undefined);
   if (!concreteSelection && !options.compactionRoutingOverride && !options.internalDecisionCall && !preserveShadowModel && !memoryModelApplies && body && typeof body === "object" && !Array.isArray(body)) {
     const shadowIntercept = config.shadowCallIntercept;
     const rawShadowModel = (body as { model?: unknown }).model;

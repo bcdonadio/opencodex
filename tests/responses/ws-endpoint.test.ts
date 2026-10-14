@@ -15,6 +15,7 @@ import {
   MAX_WEBSOCKET_IDLE_TIMEOUT_SECONDS,
   WEBSOCKET_IDLE_TIMEOUT_SECONDS,
 } from "../../src/server/index/live-sideband";
+import { inspectResponseLogSsePayload, type RequestLogContext } from "../../src/server/request-log";
 import { RESPONSE_TTL_MS } from "../../src/responses/state";
 import type { ServerWebSocket } from "bun";
 
@@ -516,6 +517,27 @@ describe("WS endpoint re-framer (120/132)", () => {
     const empty = mockWs();
     await sendResponseToWebSocket(empty.ws, new Response(null, { status: 204 }), () => true);
     expect(JSON.parse(empty.sent.at(-1)!).type).toBe("error");
+  });
+
+  test("non-2xx error body is inspected before delivery and observer failures are isolated", async () => {
+    for (const observerThrows of [false, true]) {
+      const { ws, sent } = mockWs();
+      const logCtx = {} as RequestLogContext;
+      const observed: string[] = [];
+      await sendResponseToWebSocket(ws, Response.json({
+        error: { type: "invalid_request_error", code: "invalid_request_error", message: "Invalid tool result" },
+      }, { status: 400 }), () => true, {
+        onSsePayload: payload => {
+          expect(sent).toHaveLength(0);
+          observed.push(payload);
+          inspectResponseLogSsePayload(logCtx, payload);
+          if (observerThrows) throw new Error("observer failed");
+        },
+      });
+      expect(observed).toEqual(sent);
+      expect(logCtx.upstreamError).toBe("Invalid tool result");
+      expect(JSON.parse(sent[0]).status).toBe(400);
+    }
   });
 
   test("non-2xx responses use standalone error envelope with status and safe headers", async () => {

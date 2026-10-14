@@ -61,7 +61,7 @@ the code let a provider-scoped transport past it is what #4992 recorded, and it 
 regression for this policy has to enter through `handleResponses` rather than through a
 hand-written override that cooperates by calling the executor it was handed.
 
-`src/server/responses/sidecar-execution.ts` owns search probe settlement: local validation releases immediately, bodyless responses release before returning, and upstream bodies retain the lease through completion, error or cancellation regardless of HTTP status. The core dispatcher does not infer body completion from a non-success status.
+`src/server/responses/sidecar-execution.ts` owns settlement of the `openAiSearchSidecar` search probe, independently of vision credentials: local validation releases immediately, bodyless responses release before returning, and upstream bodies retain the lease through completion, error or cancellation regardless of HTTP status. The core dispatcher does not infer body completion from a non-success status.
 
 ### Semantic progress ownership
 
@@ -285,7 +285,7 @@ foreign caller values; an exact-model `true` does not grant that forwarding perm
 unclassified Chat routes it gates every caller tier because no canonical Fast capability has been
 validated. An object-form registry wire default may also set `forwardCallerServiceTier: false` to
 close a known subscription gateway while leaving generic unclassified Responses passthrough
-unchanged. Exact `false` narrows provider defaults, and provider-level `supportsServiceTier: false` cannot be reopened.
+unchanged, except that an inherited `ultrafast` tier is stripped unless the destination has a declared capability. This prevents a retained Codex App speed setting from reaching custom GLM/vLLM routes. Set `supportsServiceTier: false` on a custom provider that accepts no service tiers to strip every caller tier. Exact `false` narrows provider defaults, and provider-level `supportsServiceTier: false` cannot be reopened.
 Capability is namespaced by the selected provider and model; model-name similarity and adapter type
 alone never opt a gateway in. Response-tier evidence is governed by `src/providers/openai-tiers-destination.ts`: canonical ChatGPT Codex forwarding is non-authoritative (#2558); other destinations honor the optional provider boolean `responseTierAuthoritative`, with omission retaining legacy response authority. No gateway name or address infers a declaration. The final route captures this in `TierObservationContext` through `src/server/responses/core-normalize.ts`, without changing capability, `TierDecision`, or outgoing parameters.
 

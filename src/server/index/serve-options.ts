@@ -604,7 +604,10 @@ export function createServeOptions(ctx: ServeOptionsContext) {
           return withCors(formatErrorResponse(426, "upgrade_required", "Responses WebSocket transport is disabled; use HTTP"), req, policy);
         }
         const websocketLease = tryReserveCodexWebSocket();
-        if (!websocketLease) return serverBusyResponse(req, "Codex WebSockets", policy);
+        if (!websocketLease) {
+          // Codex retries 503 five times before HTTP fallback; 426 selects HTTP immediately.
+          return withCors(formatErrorResponse(426, "upgrade_required", "Responses WebSocket capacity reached; use HTTP"), req, policy);
+        }
         // Upgrade on the server that RECEIVED this request, not the captured `server`
         // binding. They are the same object for the public listener, but the
         // unauthenticated loopback listener (#1102) is a second Bun.serve, and handing its

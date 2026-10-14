@@ -134,7 +134,7 @@ export async function executeResponsesSidecars(
   // search outcome already settled the lease, making each release a
   // generation-bound no-op.
   const releaseSearchProbeLease = (): void => {
-    openAiSidecar?.releaseProbeLease?.();
+    openAiSearchSidecar?.releaseProbeLease?.();
   };
 
 

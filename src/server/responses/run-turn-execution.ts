@@ -109,7 +109,7 @@ export async function executeResponsesRunTurn(
     | "noteRoutedAttemptSend"
     | "bindKeyUsageFromBridge"
   >,
-  sidecarState: Pick<ResponsesSidecarAuth, "routedCompaction" | "openAiSidecar">,
+  sidecarState: Pick<ResponsesSidecarAuth, "routedCompaction" | "openAiSearchSidecar">,
   responseEffects: Pick<
     ResponsesEffects,
     | "cancelResponseCompletion"
@@ -167,7 +167,7 @@ export async function executeResponsesRunTurn(
   // pre-response failure below. After an executed search the outcome recorder
   // already settled the lease, making each release a generation-bound no-op.
   const releaseSearchProbeLease = (): void => {
-    sidecarState.openAiSidecar?.releaseProbeLease?.();
+    sidecarState.openAiSearchSidecar?.releaseProbeLease?.();
   };
   // When Codex declared hosted web_search and a sidecar plan resolves, drive
   // the routed model through the same search interception the fetch-path loop
@@ -176,7 +176,7 @@ export async function executeResponsesRunTurn(
   let wsPlan: ReturnType<typeof planWebSearch>;
   try {
     wsPlan = !routedCompaction
-      ? planWebSearch(config, parsed, false, route.provider, route.modelId, sidecarState.openAiSidecar, {
+      ? planWebSearch(config, parsed, false, route.provider, route.modelId, sidecarState.openAiSearchSidecar, {
         admission: options.admission, codexAuthPolicy: options.codexAuthPolicy, providerName: route.providerName,
       })
       : undefined;

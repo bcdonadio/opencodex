@@ -469,6 +469,9 @@ export function decideTier(
 ): TierDecision {
   if (policy.capability === false) return { kind: "drop" };
   if (policy.capability === undefined) {
+    // Codex App can retain Ultrafast when switching to an unrelated custom model.
+    // Without a declared capability, that OpenAI tier is not an upstream option.
+    if (canonicalFastTierMarker(callerTier) === "ultrafast") return { kind: "drop" };
     return policy.forwardCallerTier ? { kind: "forward-caller" } : { kind: "drop" };
   }
   if (policy.fastWire === null) {

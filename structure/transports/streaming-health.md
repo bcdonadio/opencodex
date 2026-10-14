@@ -17,6 +17,10 @@ terminal on drift; see [continuation binding contract](../providers-and-adapters
 
 Shared parsing and streaming follow the [request-copy](byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](responses-wire-shapes.md#passthrough-sse-stream-shapes-314).
 
+HTTP error responses reframed by `src/server/ws-bridge.ts` pass their serialized
+error envelope through the request-log payload observer before delivery, preserving
+the upstream message in WebSocket diagnostics. Observer failures cannot interrupt delivery.
+
 ## Heartbeat and stall deadline
 
 RunTurn search interception forwards adapter heartbeats immediately and emits progress for buffered semantic events. Its bridge uses the search plan's stall deadline so a bounded sidecar search fits the watchdog budget.
@@ -237,7 +241,11 @@ The WebSocket endpoint exists at `/v1/responses`, but discovery is opt-in:
 `supports_websockets` from injected provider tables and routed catalog entries, keeping Codex on
 HTTP/SSE. When true, Codex may use Responses WebSocket frames handled by `src/server/ws-bridge.ts`.
 If Codex still attempts a WebSocket upgrade while the feature is disabled, `/v1/responses` rejects
-the upgrade with 426 so Codex falls back to HTTP cleanly.
+the upgrade with 426 so Codex falls back to HTTP cleanly. At the 128-connection
+limit, `src/codex/websocket-registry.ts` first reclaims one idle connection; active
+turns and retained native continuations are never evicted. If every slot remains
+busy or reserved, the upgrade also returns 426, allowing immediate HTTP fallback
+instead of Codex's five retries of a 503 response.
 
 That setting controls the client-facing upgrade only. The transparent upstream
 ChatGPT WS optimization described above is selected independently and still

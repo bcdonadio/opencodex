@@ -451,7 +451,13 @@ export async function sendResponseToWebSocket(
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     if (!isCurrent()) return;
-    sendJsonFrame(ws, buildWsErrorFrame(response.status, errorPayloadFromText(text), response.headers));
+    const payload = JSON.stringify(buildWsErrorFrame(response.status, errorPayloadFromText(text), response.headers));
+    try {
+      options.onSsePayload?.(payload);
+    } catch {
+      /* payload observation must not affect WebSocket delivery */
+    }
+    sendTextFrame(ws, payload);
     observeDelivery(options.onFrameSent, "error");
     return;
   }

@@ -305,7 +305,8 @@ But the model catalog and runtime request tier id use `priority`. opencodex pres
 Native OpenAI passthrough models keep fast support; routed providers are capability-gated —
 `service_tier` is stripped only when the provider declares `supportsServiceTier: false` (the registry
 classifies canonical OpenAI as `true`, DeepSeek and Volcengine Ark as `false`), while unclassified
-custom gateways keep caller-supplied values untouched and never get an injection. A custom gateway
+custom Responses gateways keep caller-supplied values untouched except for Ultrafast, which
+requires declared capability, and never get an injection. A custom gateway
 can opt in globally with `supportsServiceTier: true`, or narrowly with
 `modelSupportsServiceTier: { "verified-model": true }`; an exact `false` narrows a provider
 default of `true`, while provider-level `false` remains fail-closed. The same final adapter/model

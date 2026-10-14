@@ -182,6 +182,40 @@ describe("FastWire characterization: unclassified support matrix", () => {
   );
 });
 
+describe("Ultrafast requires a classified destination", () => {
+  test.each(["openai-responses", "openai-chat"] as const)(
+    "%s drops the Codex App tier on an unclassified GLM route",
+    async adapter => {
+      for (const fastMode of [true, false, undefined]) {
+        const { outboundBody, logCtx } = await driveResponses({
+          providerName: "cortex-hq",
+          model: "zai-org/GLM-5.3",
+          provider: { ...unclassifiedResponsesProvider(), adapter },
+          callerTier: "ultrafast",
+          fastMode,
+        });
+        expect(outboundBody).not.toHaveProperty("service_tier");
+        expect(logCtx.tierOutcome).toMatchObject({ wireValue: null, callerTierDropped: true });
+      }
+    },
+  );
+
+  test("a supported destination keeps an explicitly mapped Ultrafast tier", async () => {
+    const { outboundBody } = await driveResponses({
+      provider: {
+        ...supportedResponsesProvider(),
+        fastWire: {
+          kind: "service-tier",
+          canonicalToWire: { priority: "priority", ultrafast: "ultrafast" },
+          foreignCallerTiers: "verbatim",
+        },
+      },
+      callerTier: "ultrafast",
+    });
+    expect(outboundBody.service_tier).toBe("ultrafast");
+  });
+});
+
 describe("FastWire characterization: exact-model Chat tier forwarding", () => {
   // FastWire #1886 B1 capability semantic migration: exact capability no longer grants
   // permission to forward a caller's foreign Chat tier.

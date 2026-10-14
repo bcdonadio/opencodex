@@ -5,22 +5,43 @@ import { createAdmissionGate, type AdmissionMetrics, type AdmissionReservation }
 export const MAX_TRACKED_CODEX_WEBSOCKETS = 128;
 const websocketGate = createAdmissionGate("codex_websockets", MAX_TRACKED_CODEX_WEBSOCKETS);
 
+// Bound idle sockets may outlive their threads because Codex caches the connection.
+// Reclaim one only under pressure; in-flight turns and native continuations retain ownership.
+const reservations = new Set<{
+  socket?: ServerWebSocket<WsData>;
+  release(): void;
+}>();
+
 export function tryReserveCodexWebSocket(): AdmissionReservation<ServerWebSocket<WsData>> | null {
+  if (websocketGate.metrics().active >= MAX_TRACKED_CODEX_WEBSOCKETS) {
+    for (const reservation of reservations) {
+      const ws = reservation.socket;
+      if (!ws || ws.data.cancel || ws.data.nativeControl) continue;
+      reservation.release();
+      unregisterCodexWebSocket(ws);
+      try { ws.close(1000, "idle connection reclaimed"); } catch { /* already closed */ }
+      break;
+    }
+  }
   const gateLease = websocketGate.tryAcquire();
   if (!gateLease) return null;
-  let socket: ServerWebSocket<WsData> | undefined;
   let active = true;
-  return {
-    bind(value) {
-      if (!active) return;
-      socket = value;
-    },
+  const reservation = {
+    socket: undefined as ServerWebSocket<WsData> | undefined,
     release() {
       if (!active) return;
       active = false;
-      socket = undefined;
+      reservations.delete(reservation);
+      reservation.socket = undefined;
       gateLease.release();
     },
+  };
+  reservations.add(reservation);
+  return {
+    bind(value) {
+      if (active) reservation.socket = value;
+    },
+    release: reservation.release,
   };
 }
 

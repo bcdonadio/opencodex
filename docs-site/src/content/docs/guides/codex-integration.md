@@ -33,6 +33,15 @@ that model, even when another account is selected. Explicit account selectors re
 bound to their account. Disabling the setting or losing upstream entitlement removes
 stale Ultrafast metadata.
 
+If the App retains Ultrafast while you switch to a custom provider with no declared
+service-tier capability, OpenCodex drops that tier before forwarding the request.
+For a vLLM endpoint that supports no service tiers, set `supportsServiceTier: false`
+to strip every caller tier on both Chat Completions and Responses routes.
+
+At the 128-connection WebSocket limit, OpenCodex reclaims an idle connection while
+preserving active turns and native continuations. If every slot remains busy,
+Codex falls back to HTTP/SSE immediately instead of retrying five times.
+
 Logs record the emitted `service_tier` separately from delivery confirmation. A forwarded
 `ultrafast` tier can show `fastOutcome: "unknown"` and `confirmation: "unknown"` when the
 proxy has no scheduling classification for that tier. The ChatGPT route's `default` response

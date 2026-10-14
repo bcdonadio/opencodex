@@ -64,7 +64,7 @@ mock.module("../../src/server/responses/request-sidecar-auth", () => ({ ...sidec
     }
     return {
       routedCompaction: false,
-      openAiSidecar: { releaseProbeLease: () => { releasedFixtureProbe = true; } },
+      openAiSearchSidecar: { releaseProbeLease: () => { releasedFixtureProbe = true; } },
     } as Awaited<ReturnType<typeof sidecarAuth.prepareResponsesSidecarAuth>>;
   },
 }));
@@ -167,18 +167,18 @@ test.each(["image", "video"] as const)("media-only %s bridge still injects its t
   expect(attempts[0].context.tools?.some(t => t.webSearch)).toBe(false);
 });
 
-test("releases a search probe when pre-dispatch validation rejects the request", async () => {
+test.each(["cursor", "openai-chat"] as const)("%s releases a search probe when pre-dispatch validation rejects the request", async adapter => {
   releasedFixtureProbe = false;
   const config = {
-    port: 0, defaultProvider: "cursor",
+    port: 0, defaultProvider: "fixture",
     webSearchSidecar: { backend: "exa", exaApiKey: "fixture-search-key" },
     providers: {
-      cursor: { adapter: "cursor", baseUrl: "https://api2.cursor.sh", authMode: "oauth", models: ["model"] },
+      fixture: { adapter, baseUrl: "https://fixture.test/v1", apiKey: "fixture-key", models: ["model"] },
     },
   } as OcxConfig;
   const response = await handleResponses(new Request("http://localhost/v1/responses", {
     method: "POST", headers: { "content-type": "application/json", "x-fixture-probe": "held" },
-    body: JSON.stringify({ model: "cursor/model", input: [{
+    body: JSON.stringify({ model: "fixture/model", input: [{
       type: "function_call_output", output: "fixture result",
     }], tools: [{ type: "web_search" }] }),
   }), config, { model: "", provider: "" });
