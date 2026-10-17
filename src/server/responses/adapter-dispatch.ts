@@ -1,3 +1,4 @@
+import { bindAnthropicRejectionResponse } from "../../adapters/anthropic-rejection-memo";
 import { deferPhysicalSendReporter } from "./deferred-send-reporter";
 import { spendLedgerStorageErrorResponse } from "./spend-storage-error";
 import { classifyAnthropic429 } from "../../oauth/anthropic-rate-limit-policy";
@@ -58,7 +59,7 @@ import { describeUpstreamConnectFailure } from "./upstream-error";
 import type { OpaqueBlobRecoveryGuard } from "./core-opaque-recovery";
 import type { AttemptRecoveryKind } from "../../usage/log";
 import type { OAuthAccessSnapshot } from "../../oauth";
-import { OAuthAccountPausedError, OAuthLoginRequiredError, publicOAuthAuthenticationErrorMessage } from "../../oauth";
+import { OAuthAccountPausedError, OAuthLoginRequiredError, OAuthTokenRefreshBusyError, publicOAuthAuthenticationErrorMessage } from "../../oauth";
 import { getAccountSet, markAccountNeedsReauthIfGeneration } from "../../oauth/store";
 import { tryKiroAlternateAfterTerminalRefresh } from "../../oauth/kiro-terminal-failover";
 import { classifyKiroRefusal } from "../../adapters/kiro-refusal";
@@ -91,6 +92,7 @@ import {
   reasoningEffortRejectionText,
   anthropicFastRefused,
 } from "./core-opaque-recovery";
+import { createAnthropicThinkingRecovery } from "./anthropic-thinking-recovery";
 import { shouldAttemptImageTierRetry } from "../image-retry";
 import {
   isTransientConsoleGoUploadRejection,
@@ -600,7 +602,7 @@ export async function prepareAdapterExchange(
   let rateLimitRetries = 0;
   // Shared with the terminal-guard continuation below: an image-tier reduction that let the
   // main request clear a 413 must not be forgotten on the very next continuation build.
-  if (!upstreamResponse.ok) {
+  // Recovery helpers also serve initial HTTP-200 adapter errors during delivery.
     // Recovery loop: multi-key 429 failover + at most ONE opaque-state rebuild and ONE
     // anthropic 413 tightened retry
     // (devlog/260714_image_normalization_pipeline/030). One mutable activeAdapter serves
@@ -609,6 +611,9 @@ export async function prepareAdapterExchange(
     // 413→429 rotation cannot silently undo the tightening.
     let imageRetryAttempted = false;
     const opaqueBlobRecoveryGuard: OpaqueBlobRecoveryGuard = { attempted: false };
+    const thinkingSignatureRecovery = createAnthropicThinkingRecovery(
+      parsed, upstream.signal, opaqueBlobRecoveryGuard, () => !sendBudgetExhausted(),
+    );
     // Console Go answers a transient 400 "Invalid upload request." for bodies it accepts
     // moments later; at most one byte-identical replay is allowed per request.
     const consoleGoUploadRetryGuard: { attempted: boolean } = { attempted: false };
@@ -877,6 +882,11 @@ export async function prepareAdapterExchange(
         return { failed: formatErrorResponse(502, "upstream_error", msg) };
       }
     };
+    const refetchThinkingSignature = () => {
+      invalidateSameTargetRequest();
+      return rebuildAndRefetch("opaque-blob-rejection");
+    };
+  if (!upstreamResponse.ok) {
     const rotateAntigravityAuth = async (
       failedResponse: Response,
       recovery: AttemptRecoveryKind,
@@ -934,6 +944,17 @@ export async function prepareAdapterExchange(
           return await sanitizeNonReplayableUpstreamError(upstreamResponse, upstream.signal);
         } finally { cleanupUpstreamAbort(); }
       }
+      bindAnthropicRejectionResponse(transportState.sameTargetRequest, upstreamResponse);
+      if (await thinkingSignatureRecovery.prepareHttp(
+        upstreamResponse, transportState.activeAdapter.name,
+      )) {
+        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* closed */ }
+        invalidateSameTargetRequest();
+        const result = await rebuildAndRefetch("opaque-blob-rejection");
+        if ("failed" in result) return result.failed;
+        upstreamResponse = result;
+        continue recovery;
+      }
      if (
        upstreamResponse.status === 401
        && isOAuth401ReplayProvider
@@ -948,6 +969,15 @@ export async function prepareAdapterExchange(
           recordAuthRefresh(logCtx, "succeeded");
         } catch (err) {
           recordAuthRefresh(logCtx, "failed");
+          const cancelled = options.abortSignal?.aborted || req.signal.aborted;
+          if (cancelled || err instanceof OAuthTokenRefreshBusyError) {
+            cleanupUpstreamAbort();
+            upstream.abort();
+            try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+            releaseCodexAuthContextProbeLease(admissionState.authCtx);
+            return cancelled ? clientCancelledResponse()
+              : formatErrorResponse(503, "server_error", publicOAuthAuthenticationErrorMessage(err), { retryAfter: "1" });
+          }
           const failed = transportState.sentOAuthSnapshot;
           if (route.providerName === "google-antigravity" && !antigravityAuthRotationAttempted
             && err instanceof OAuthLoginRequiredError && failed
@@ -1353,9 +1383,17 @@ export async function prepareAdapterExchange(
             resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire, route.staticPolicy),
             config.cacheRetention,
           );
+          bindRouteReasoningReplayScope({
+            parsed,
+            providerName: route.providerName,
+            provider: route.provider,
+            adapterName: transportState.activeAdapter.name,
+            oauthCredentialSnapshot: transportState.replayOAuthCredentialSnapshot,
+          });
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, transportState.activeAdapter.name, logCtx.accountLogLabel);
           recordAttemptCredentialSource(logCtx.activeAttempt, route.providerName, route.provider, transportState.activeAdapter.name);
-         const result = await rebuildAndRefetch(upstreamResponse.status === 401 ? "oauth-401" : "anthropic-oauth-429");
+         const result = await rebuildAndRefetch(upstreamResponse.status === 401 ? "oauth-401"
+           : upstreamResponse.status === 403 ? "oauth-account-403" : "anthropic-oauth-429");
          if ("failed" in result) return result.failed;
          upstreamResponse = result;
           if (isNonReplayableResponse(upstreamResponse)) continue recovery;
@@ -1876,6 +1914,8 @@ export async function prepareAdapterExchange(
             authMode: route.provider.authMode,
             hasApiKey: Boolean(route.provider.apiKey?.trim()),
             upstreamRetryAfter,
+            upstreamErrorType: normalized.type,
+            upstreamErrorCode: normalized.code,
             // This recovery path is the HTTP Responses wire; custom runTurn transports
             // never reach enrichOpenCodeZenUpstreamMessage here.
             supportsHttpSameKeyRetry: true,
@@ -1901,6 +1941,7 @@ export async function prepareAdapterExchange(
     }
   }
 
+  bindAnthropicRejectionResponse(transportState.sameTargetRequest, upstreamResponse);
   cancelBodyOnAbort(upstreamResponse.body, upstream.signal);
 
   return {
@@ -1910,6 +1951,8 @@ export async function prepareAdapterExchange(
     stallTimeoutMs,
     localUpstream,
     upstreamResponse,
+    thinkingSignatureRecovery,
+    refetchThinkingSignature,
     rateLimitPolicy,
     get rateLimitRetries(): typeof rateLimitRetries {
       return rateLimitRetries;

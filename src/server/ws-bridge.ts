@@ -12,6 +12,7 @@ import { sseDataPayload as parseSseBlock } from "./sse-payload-rewrite";
 import { safeResponseHeaders } from "./safe-response-headers";
 import { snapshotClientIdentity, type ClientIdentitySnapshot } from "./transaction-client-capture";
 import type { AudioSocketTarget } from "./audio-dictation";
+import type { CodexWebSocketActivity } from "../codex/websocket-activity";
 
 export { safeResponseHeaders } from "./safe-response-headers";
 
@@ -50,6 +51,7 @@ export interface WsData {
   clientIdentitySnapshot?: ClientIdentitySnapshot;
   connectionId?: string;
   requestSequenceOnConnection?: number;
+  responsesActivity?: CodexWebSocketActivity;
   nativeControl?: NativeResponseControl;
   /** Content-free per-turn explanation; never a model capability assertion. */
   nativeSteeringUnavailable?: string;

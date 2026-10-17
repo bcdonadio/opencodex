@@ -10,6 +10,7 @@ import { ConfigMutationLockError, mutatePersistedConfig } from "../../config";
 import { reconcileMainCodexAccountRuntimeState } from "../account-lifecycle";
 import { isCodexAccountPaused, setCodexAccountPaused } from "../account-pause";
 import { codexAccountUsesCreditsAfterLimit } from "../account-credit-use";
+import { codexAccountUsesRemainingQuota } from "../account-use-remaining";
 import { getCodexAccountPriority } from "../account-priority";
 import { getCodexAccountAutoSwitchThresholdOverride } from "../account-auto-switch";
 import { clearThreadAccountMapForAccount, isCodexAccountPlanExcluded, reconcileCodexActiveAfterExclusion } from "../routing";
@@ -145,6 +146,7 @@ export function poolAccountDto(
     priority,
     autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(config, account.id),
     creditsAfterLimit: codexAccountUsesCreditsAfterLimit(config, account.id),
+    useRemainingQuota: codexAccountUsesRemainingQuota(config, account.id),
     quota: quota ? { ...quota } : null,
     ...codexCreditsDtoField(config, account.id, poolQuotaHistoryIdentity(account.id) ?? null),
     needsReauth: needsReauth || health.status === "reauth_required",
@@ -175,6 +177,7 @@ export interface CodexAuthAccountDto {
   autoSwitchThresholdOverride: number | null;
   /** False keeps the account out of selection while one of its usage windows is full. */
   creditsAfterLimit?: boolean;
+  useRemainingQuota?: boolean;
   quota: (StoredAccountQuota | (Omit<StoredAccountQuota, "updatedAt"> & { updatedAt: number })) | null;
   credits?: CodexCredits;
   needsReauth?: boolean;
@@ -411,6 +414,7 @@ export async function listCodexAuthAccountsSnapshot(
       priority: getCodexAccountPriority(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
       autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
       creditsAfterLimit: codexAccountUsesCreditsAfterLimit(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+      useRemainingQuota: codexAccountUsesRemainingQuota(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
       hasCredential: hasMainCredential,
       needsReauth: mainNeedsReauth,
       ...(mainReauthReason !== undefined ? { reauthReason: mainReauthReason } : {}),

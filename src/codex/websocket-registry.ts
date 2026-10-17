@@ -1,47 +1,50 @@
 import type { ServerWebSocket } from "bun";
 import type { WsData } from "../server/ws-bridge";
 import { createAdmissionGate, type AdmissionMetrics, type AdmissionReservation } from "../lib/admission";
+import { CodexWebSocketActivity } from "./websocket-activity";
 
 export const MAX_TRACKED_CODEX_WEBSOCKETS = 128;
 const websocketGate = createAdmissionGate("codex_websockets", MAX_TRACKED_CODEX_WEBSOCKETS);
+const admittedSockets = new Set<ServerWebSocket<WsData>>();
 
-// Bound idle sockets may outlive their threads because Codex caches the connection.
-// Reclaim one only under pressure; in-flight turns and native continuations retain ownership.
-const reservations = new Set<{
-  socket?: ServerWebSocket<WsData>;
-  release(): void;
-}>();
+function reclaimOldestIdleSocket(): void {
+  let oldest: ServerWebSocket<WsData> | undefined;
+  for (const ws of admittedSockets) {
+    const activity = ws.data.responsesActivity;
+    if (!activity?.idle || ws.data.nativeControl || ws.readyState !== 1 || ws.getBufferedAmount() !== 0) continue;
+    if (!oldest || activity.lastUsed < oldest.data.responsesActivity!.lastUsed) oldest = ws;
+  }
+  if (!oldest) return;
+  // Fence late frames before closing. Only the actual close callback releases admission.
+  oldest.data.responsesActivity!.closing = true;
+  try {
+    oldest.close(1001, "Idle Responses connection reclaimed");
+  } catch {
+    // A failed/delayed close never manufactures a free slot or retries another victim.
+    if (oldest.readyState === 1) oldest.data.responsesActivity!.closing = false;
+  }
+}
 
 export function tryReserveCodexWebSocket(): AdmissionReservation<ServerWebSocket<WsData>> | null {
-  if (websocketGate.metrics().active >= MAX_TRACKED_CODEX_WEBSOCKETS) {
-    for (const reservation of reservations) {
-      const ws = reservation.socket;
-      if (!ws || ws.data.cancel || ws.data.nativeControl) continue;
-      reservation.release();
-      unregisterCodexWebSocket(ws);
-      try { ws.close(1000, "idle connection reclaimed"); } catch { /* already closed */ }
-      break;
-    }
-  }
+  if (websocketGate.metrics().active >= MAX_TRACKED_CODEX_WEBSOCKETS) reclaimOldestIdleSocket();
   const gateLease = websocketGate.tryAcquire();
   if (!gateLease) return null;
+  let socket: ServerWebSocket<WsData> | undefined;
   let active = true;
-  const reservation = {
-    socket: undefined as ServerWebSocket<WsData> | undefined,
+  return {
+    bind(value) {
+      if (!active || socket) return;
+      socket = value;
+      socket.data.responsesActivity = new CodexWebSocketActivity();
+      admittedSockets.add(socket);
+    },
     release() {
       if (!active) return;
       active = false;
-      reservations.delete(reservation);
-      reservation.socket = undefined;
+      if (socket) admittedSockets.delete(socket);
+      socket = undefined;
       gateLease.release();
     },
-  };
-  reservations.add(reservation);
-  return {
-    bind(value) {
-      if (active) reservation.socket = value;
-    },
-    release: reservation.release,
   };
 }
 

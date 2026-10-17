@@ -44,6 +44,7 @@ import { codexAuthContextLogLabel } from "../../codex/account-label";
 import { forceRefreshMainAccountToken } from "../../codex/main-account";
 import { rebindPoolCreditPolicy } from "../../codex/pool-credit-policy";
 import { safeCallerSessionId } from "../caller-session-identity";
+import { copyResponsesClientMetadata } from "../../adapters/openai-responses/transport";
 
 /** Capture caller-owned credential facts once, before combo/WS request reconstruction. */
 export function captureResponsesIngressCredentialOwnership(
@@ -364,6 +365,11 @@ export async function resolveResponsesCodexAuth(
         headers.delete("authorization");
         headers.delete("chatgpt-account-id");
       }
+    }
+    // Codex auth materialization keeps only its credential allowlist. A compact-v1 handoff
+    // must also retain the permitted client fingerprint for its routed summarizer send.
+    if (options.compactionRecoveryKind === "compaction-v1") {
+      copyResponsesClientMetadata(headers, authInputHeaders, route.provider);
     }
     return {
       ok: true,

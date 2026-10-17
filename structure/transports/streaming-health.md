@@ -2,35 +2,27 @@
 
 Management provider-validation calls use the [initialization-independent relative send-path validation](../config.md#provider-relative-send-paths) before persistence.
 
-Native and translated delivery now have separate owners in the
-[core module ownership](responses.md#core-module-ownership). This surface retains its existing behavior.
+Native and translated delivery now have separate owners in the [core module ownership](responses.md#core-module-ownership). This surface retains its existing behavior.
 
-The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
-is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged.
+The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages) is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged.
 
-Codex WebSocket quota-family normalization remains generic; retired-model evidence is filtered
-by the [OpenAI quota owner](../providers/openai-tiers.md#public-provider-contract), not by
-removing support for non-default WebSocket quota families.
+Codex WebSocket quota-family normalization remains generic; retired-model evidence is filtered by the [OpenAI quota owner](../providers/openai-tiers.md#public-provider-contract), not by removing support for non-default WebSocket quota families.
 
-Key-auth hosted-search continuations validate account selection after pacing and report a failed
-terminal on drift; see [continuation binding contract](../providers-and-adapters.md#hosted-search-continuation-binding).
+Key-auth hosted-search continuations validate account selection after pacing and report a failed terminal on drift; see [continuation binding contract](../providers-and-adapters.md#hosted-search-continuation-binding).
 
 Shared parsing and streaming follow the [request-copy](byte-accounting.md#request-copy-accounting) and [stream-buffer accounting](byte-accounting.md#stream-buffer-accounting) contracts. Response-attached WebSocket telemetry follows the [stage record identity contract](responses-wire-shapes.md#passthrough-sse-stream-shapes-314).
 
-HTTP error responses reframed by `src/server/ws-bridge.ts` pass their serialized
-error envelope through the request-log payload observer before delivery, preserving
-the upstream message in WebSocket diagnostics. Observer failures cannot interrupt delivery.
+HTTP error responses reframed by `src/server/ws-bridge.ts` pass their serialized error envelope through the request-log payload observer before delivery, preserving the upstream message in WebSocket diagnostics. Observer failures cannot interrupt delivery.
+
+Responses WebSocket terminal frames normalize known `incomplete_details.reason` aliases under the [incomplete reason contract](responses-wire-shapes.md#adapter-incomplete-reasons), including native control chains.
 
 ## Heartbeat and stall deadline
 
 RunTurn search interception forwards adapter heartbeats immediately and emits progress for buffered semantic events. Its bridge uses the search plan's stall deadline so a bounded sidecar search fits the watchdog budget.
 
-Native Chat uses the same resolved `stallTimeoutSec` with a pending-upstream-read allowance that
-pauses under downstream backpressure. Its Chat error and cancellation contract is documented in
-[native Chat completion lifecycle](../data-planes/inbound-compat.md#native-chat-completion-lifecycle).
+Native Chat uses the same resolved `stallTimeoutSec` with a pending-upstream-read allowance that pauses under downstream backpressure. Its Chat error and cancellation contract is documented in [native Chat completion lifecycle](../data-planes/inbound-compat.md#native-chat-completion-lifecycle).
 
-The HTTP/SSE bridge emits an SSE comment-line keep-alive (`: opencodex heartbeat`) during upstream
-silence to re-arm Codex's idle timer (Codex's default `stream_idle_timeout` is 300 s and ANY SSE
+The HTTP/SSE bridge emits an SSE comment-line keep-alive (`: opencodex heartbeat`) during upstream silence to re-arm Codex's idle timer (Codex's default `stream_idle_timeout` is 300 s and ANY SSE
 bytes re-arm it). A comment line is discarded by every eventsource parser without producing an event,
 so strict Responses decoders never see an unknown variant. Those bridge-enqueued keepalive frames do
 NOT count as activity for the bridge's own watchdog: a bounded stall deadline closes the stream with
@@ -262,6 +254,38 @@ egress. HTTP/SSE fallback retains Bun fetch's own proxy rules, which do not cons
 
 The endpoint handles `response.create`, ignores `response.processed`, supports warmup
 `generate: false`, and feeds the same request pipeline as HTTP/SSE.
+
+Incoming Responses connections share a 128-socket admission limit. Only when a new upgrade
+finds that limit full, the handler reclaims the least recently used eligible idle connection.
+Message handling and turn completion refresh a monotonic use order; connection age alone
+does not choose the victim. Eligibility requires an open socket, no active turn, no pending
+client tool or approval result, no retained native steering/injection owner, and no buffered
+outbound bytes. A superseded turn remains active until its own cleanup finishes.
+
+Tool and approval identities are tracked across output items and terminal snapshots. Function argument
+and custom-tool input completion also establish waits, correlated through `response.output_item.added`,
+even if EOF precedes the completed item or terminal. An added item with unfinished arguments alone
+establishes no wait. Only matching client or upstream results retire waits, suppressing completion echoes.
+Tracking retains bounded identity hashes; overflow or ambiguous completion identities protect the
+connection until close. A terminal does not make a connection idle while its client tool runs.
+
+The tracker reuses the final route's provider-executed tool classification, including declarations
+injected into the outbound request. `src/server/responses/response-tool-ownership.ts` carries that
+classification with the selected Response through body wrappers; failed combo attempts cannot
+authorize the winning response's calls. Hosted xAI search therefore creates no client-result wait.
+Each admitted ordinary turn starts a fresh returned-result deduplication scope after settling prior
+results, even if its upstream omits `response.created`. Native control keeps same-response echo
+suppression. `tests/responses/ws-capacity-tool-ownership.test.ts` covers these ownership boundaries.
+
+The victim is marked closing before sending close code 1001 with reason
+`Idle Responses connection reclaimed`. Only its ordinary close callback releases the
+admission lease. After requesting closure, the current upgrade immediately attempts reservation once.
+If every socket is protected, the close fails, or the callback has not yet released the lease,
+that upgrade receives the existing HTTP 503 `Codex WebSockets capacity reached` response.
+A later upgrade can acquire the released slot; admission never exceeds the limit. Reclamation
+does not delete saved continuation state; a client can reconnect through the existing upgrade
+and replay path. This policy adds no idle timer or configuration and does not change the
+separate Live/Realtime sockets or upstream connection reuse. Client disconnect releases socket admission independently of upstream cleanup: the eager relay may continue its existing bounded post-cancel drain for up to 15 seconds to observe a real terminal while a replacement socket already completes new work.
 
 Registry-declared per-model compatibility hints (`modelResponsesUpstreamStreaming`) may ask the
 upstream Responses endpoint for bounded JSON on ANY client transport — WebSocket or ordinary

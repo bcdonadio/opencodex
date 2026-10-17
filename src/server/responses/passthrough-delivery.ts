@@ -59,6 +59,7 @@ import {
   hasResponsesSnapshotRepair,
   createResponsesSnapshotBlockRewrite,
 } from "../responses-snapshot-repair";
+import { rewriteResponsesIncompleteReasonJson } from "../../responses/incomplete-reason";
 import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from "../responses-model-rewrite";
 import { createImageGenCallRestoreRewrite, restoreImageGenCallsInJson } from "../responses-image-gen-repair";
 import {
@@ -776,6 +777,7 @@ export async function deliverPassthroughResponse(
         : undefined;
       // Compose opt-in payload rewrites into one parse/stringify pass (image-gen restore first).
       const payloadRewrites = [
+        rewriteResponsesIncompleteReasonJson,
         createImageGenCallRestoreRewrite(imageGenCallAliases),
         // #3217: a call whose namespace repeats its own name is unroutable in codex-rs.
         createSelfNamedToolCallNamespaceScrubRewrite(selfNamedNamespaceScrubAuthorization),
@@ -1349,7 +1351,7 @@ export async function deliverPassthroughResponse(
         const modelRewritten = parsed._responseModelId !== undefined && parsed._responseModelId !== parsed.modelId
           ? rewriteResponsesModelJson(repaired, parsed._responseModelId)
           : repaired;
-        return modelRewritten;
+        return rewriteResponsesIncompleteReasonJson(modelRewritten);
       })();
       if (plaintextV2RestoreFailed) {
         return formatErrorResponse(502, "upstream_error", PLAINTEXT_V2_AGENT_MESSAGE_RESTORE_OVERFLOW_MESSAGE);

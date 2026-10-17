@@ -2,12 +2,9 @@
 
 Native steering follows [the shared WebSocket contract](../transports/streaming-health.md#experimental-native-mid-turn-steering); this surface's defaults remain unchanged.
 
-The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages)
-is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged. Cursor's localized native-shell names follow the [routing-commentary guard contract](cursor.md#cursor-native-exec).
+The configuration-only [plaintext V2 contract](../subagents.md#plaintext-v2-agent-messages) is scoped to canonical ChatGPT Responses forwarding; other source-area behavior described here is unchanged. Cursor's localized native-shell names follow the [routing-commentary guard contract](cursor.md#cursor-native-exec).
 
-Native Codex Spark-specific request exceptions are absent. General Lite and namespace repair
-remain shared [Responses compatibility](../transports/responses.md#responses-httpsse), including
-other providers whose models happen to share a name fragment.
+Native Codex Spark-specific request exceptions are absent. General Lite and namespace repair remain shared [Responses compatibility](../transports/responses.md#responses-httpsse), including other providers whose models happen to share a name fragment.
 
 That shared boundary also removes ChatGPT-only top-level `access_programs` from noncanonical
 Responses requests and preserves it for canonical ChatGPT forwarding.
@@ -271,7 +268,7 @@ converted. A retained previous-response ID does not override an explicit custom-
 > Decision record: [ADR-0052](../decisions/ADR-0052-reasoning-and-tool-result-compatibility.md)
 
 ## Declared hosted-tool denials
-
+The explicitly selected Codex Responses Lite ordinary unreferenced history projection follows [hosted-search continuation binding](../providers-and-adapters.md#hosted-search-continuation-binding): it changes historical cells, not hosted tool declarations or action capability.
 A gateway that speaks the Responses API does not necessarily accept everything OpenAI accepts.
 `unsupportedHostedTools` is how such a destination says so: it names the hosted tool declarations
 this provider rejects, and `stripUnsupportedHostedTools` in
@@ -488,9 +485,9 @@ grouping evidence: `devlog/_fin/260709_native_response_pattern/`.
 Provider policy `hideRawReasoning` hides only this raw channel (summaries keep streaming); it controls
 display, not confidentiality ([Responses wire shapes](../transports/responses-wire-shapes.md)).
 
-For models that require a reasoning placeholder, a preserved thinking-only assistant turn with no
-plaintext receives that placeholder even when it has no tool call. Otherwise the Chat serializer
-drops the turn and strict DeepSeek continuations can reject the following request (#5421).
+For models requiring a reasoning placeholder, a preserved thinking-only assistant receives it even
+without tools, keeping strict DeepSeek continuations valid (#5421). Chat replay policy in
+`src/adapters/openai-chat/reasoning-replay.ts` honors explicit lists and otherwise recognizes DeepSeek Flash/Pro tokens across versions and gateways; [native continuation](../data-planes/inbound-compat.md#native-chat-thinking-continuation) shares this policy and fills configured placeholders on plain assistant history when DeepSeek tools require them.
 
 The process-local raw-reasoning fallback is fail-closed unless a request has an explicit client
 thread plus an exact provider destination, wire adapter, final model, and physical credential
