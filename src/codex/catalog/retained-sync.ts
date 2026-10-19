@@ -61,7 +61,7 @@ import { isMultiAgentV2Enabled } from "../features";
 import { clampCatalogModelsToCodexSupport } from "./effort";
 import { suppressedSyntheticMaxCatalogSlugs } from "./model-hints";
 import { filterCatalogVisibleModels, gatherRoutedModels, type CatalogGatherProviderModelOutcome } from "./provider-fetch";
-import { dedupeCatalogEntriesBySlug, enforceCatalogSlugUniqueness, exactComboCatalogSlugs, type ComboCatalogOmission } from "./aggregation";
+import { comboCatalogDescriptions, dedupeCatalogEntriesBySlug, enforceCatalogSlugUniqueness, exactComboCatalogSlugs, type ComboCatalogOmission } from "./aggregation";
 import {
   withCatalogWriteSerialization,
   type CatalogWritePermit,
@@ -531,6 +531,7 @@ function writeRetainedCatalogSync({
     multiAgentV2Enabled,
     keepNativeChatGptOnV1: config.keepNativeChatGptOnV1 === true,
     exactComboSlugs,
+    comboDescriptions: comboCatalogDescriptions(config),
     hasPhysicalComboProvider,
     includeNativeOpenAi,
     accountBoundEntries,

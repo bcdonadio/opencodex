@@ -143,6 +143,7 @@ export function poolAccountDto(
     isMain: false,
     entitlements: hasCredential ? cachedCodexAccountEntitlements(account.id) : [],
     paused,
+    ...(config.codexAccountPauseState?.[account.id]?.details ? { pauseDetails: config.codexAccountPauseState[account.id]!.details } : {}),
     priority,
     autoSwitchThresholdOverride: getCodexAccountAutoSwitchThresholdOverride(config, account.id),
     creditsAfterLimit: codexAccountUsesCreditsAfterLimit(config, account.id),
@@ -171,6 +172,7 @@ export interface CodexAuthAccountDto {
   /** Current authenticated roster grants for display on this account's card. */
   entitlements?: CodexAccountDisplayEntitlement[];
   paused: boolean;
+  pauseDetails?: import("../../types/account-auto-pause").AccountPauseDetails;
   /** Selection order; higher is used earlier. Always present, 0 when unset. */
   priority: number;
   /** Null inherits the global usage-switch threshold; 0 disables it for this account. */
@@ -409,6 +411,7 @@ export async function listCodexAuthAccountsSnapshot(
       entitlements: mainRosterReadable && mainSnapshotLive && hasMainCredential
         ? cachedCodexAccountEntitlements(MAIN_CODEX_ACCOUNT_ID) : [],
       paused: isCodexAccountPaused(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),
+      ...(runtimeConfig.codexAccountPauseState?.[MAIN_CODEX_ACCOUNT_ID]?.details ? { pauseDetails: runtimeConfig.codexAccountPauseState[MAIN_CODEX_ACCOUNT_ID]!.details } : {}),
       mainAccountHardLock: { ...getMainAccountHardLockStatus(runtimeConfig),
         externalUsage: getMainAccountExternalUsageWarning(getObservedMainQuotaIdentityKey()) },
       priority: getCodexAccountPriority(runtimeConfig, MAIN_CODEX_ACCOUNT_ID),

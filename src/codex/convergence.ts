@@ -53,7 +53,7 @@ import {
   orderForSubagents,
   } from "./catalog/sync";
   import { multiAgentV2EnabledFromConfigText } from "./features";
-  import { enforceCatalogSlugUniqueness, exactComboCatalogSlugs } from "./catalog/aggregation";
+  import { comboCatalogDescriptions, enforceCatalogSlugUniqueness, exactComboCatalogSlugs } from "./catalog/aggregation";
   import {
   isNativeAliasCatalogEntry,
   accountBoundNativeOpenAiSlugs,
@@ -393,6 +393,7 @@ function prepareCatalog(
     multiAgentV2Enabled,
     keepNativeChatGptOnV1: config.keepNativeChatGptOnV1 === true,
     exactComboSlugs,
+    comboDescriptions: comboCatalogDescriptions(config),
     hasPhysicalComboProvider,
     includeNativeOpenAi,
     accountBoundEntries,

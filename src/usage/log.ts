@@ -616,6 +616,7 @@ function normalizeUsageValue(usage: OcxUsage | undefined): OcxUsage | undefined 
     ...(typeof usage.cachedInputTokens === "number" ? { cachedInputTokens: usage.cachedInputTokens } : {}),
     ...(typeof usage.cacheReadInputTokens === "number" ? { cacheReadInputTokens: usage.cacheReadInputTokens } : {}),
     ...(typeof usage.cacheCreationInputTokens === "number" ? { cacheCreationInputTokens: usage.cacheCreationInputTokens } : {}),
+    ...(typeof usage.cacheCreation1hInputTokens === "number" ? { cacheCreation1hInputTokens: usage.cacheCreation1hInputTokens } : {}),
     ...(typeof usage.reasoningOutputTokens === "number" ? { reasoningOutputTokens: usage.reasoningOutputTokens } : {}),
     ...(isNonNegativeFiniteNumber(usage.providerCredits) ? { providerCredits: usage.providerCredits } : {}),
     ...(usage.estimated ? { estimated: true } : {}),
@@ -660,6 +661,7 @@ function normalizeAttemptUsage(raw: unknown): OcxUsage | null {
     "cachedInputTokens",
     "cacheReadInputTokens",
     "cacheCreationInputTokens",
+    "cacheCreation1hInputTokens",
     "reasoningOutputTokens",
     "providerCredits",
   ] as const) {

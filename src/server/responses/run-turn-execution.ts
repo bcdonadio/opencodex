@@ -54,6 +54,7 @@ import { emptyToolCatalogRefusal, guardEmptyToolCatalogEvents, guardEmptyToolCat
 // LOCAL PATCH (runturn-websearch)
 import { planWebSearch } from "../../web-search";
 import { runTurnWebSearchInitialParsed, runTurnWebSearchLoop } from "../../web-search/run-turn-loop";
+import { stripReplayedSearchPairs } from "../../web-search/sidecar-search-replay";
 import { WEB_SEARCH_TOOL_NAME } from "../../web-search/synthetic-tool";
 import { orderDevinMessagesOutput } from "../../claude/devin-output-order";
 import { unboundPoolSpendRefusalMessage } from "../workflow-refusal";
@@ -218,6 +219,7 @@ export async function executeResponsesRunTurn(
     releaseSearchProbeLease();
     throw error;
   }
+  if (!wsPlan) stripReplayedSearchPairs(parsed);
 
     const runTurnAbort = new AbortController();
     const cleanupRequestAbort = linkAbortSignal(runTurnAbort, req.signal);
