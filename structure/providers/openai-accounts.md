@@ -1,25 +1,19 @@
 # OpenAI Account Identity And Pool Operations
-
 How OpenAI accounts are migrated, identified, and rotated once the account modes in
 [OpenAI provider account modes](openai-tiers.md) are configured: wire identity, store concurrency,
 pool plan exclusions and ordering, quota observations, and account-bound thread and file
 retention.
-
 ## Migration and restore
-
 Current configs use `openaiProviderTierVersion: 2`. Startup projects shipped v1 Direct/Multi
 configs into one canonical `providers.openai` row, absorbs the legacy account-selection intent into
 `codexAccountMode`, removes legacy public provider rows, and maps a legacy default to `openai`.
 A marker-1 config containing neither Codex-forward row preserves that absence.
-
 Known `openai-multi/<model>` selected ids are rewritten to bare ids in disabled/subagent/injection,
 shadow, sidecar, Claude model/tier, and model-map destination fields. Rewritten arrays are
 deduplicated in stable order; unrelated providers, API-key ids, and unknown passthrough fields are
 not rewritten. Conflicting provider context caps keep the lower positive value with path-only
 warnings.
-
 Before the first v2 projection, opencodex creates a mode-0600, no-replace byte snapshot:
-
 ```sh
 cp ~/.opencodex/config.json.pre-openai-tiers-v2.bak ~/.opencodex/config.json
 ```
@@ -603,11 +597,4 @@ outside opencodex because a long-running request can also explain the rise.
 
 ## Permanent refusal auto-pause
 
-The opt-in `providers.openai.accountAutoPause` observer in
-`src/oauth/account-auto-pause.ts` uses the sent pool credential generation or main quota
-writer, not the active account at response time. It persists exclusions in
-`pausedCodexAccountIds` with revision/reason/time in `codexAccountPauseState`, clears
-affinities and reconciles selection. `src/codex/account-pause.ts` changes the revision
-on resume. The physical guard in `src/codex/auth-context.ts` also rejects newly paused
-queued sends. Confirmed permanent refusals preserve credentials instead of forcing token
-refresh; threshold-triggered retries retain fixed-selector, file and send-budget guards.
+The opt-in `providers.openai.accountAutoPause` observer in `src/oauth/account-auto-pause.ts` uses the sent pool credential generation or main quota writer, not the active account at response time. It persists exclusions in `pausedCodexAccountIds` with revision/reason/time in `codexAccountPauseState`, clears affinities and reconciles selection. `src/codex/account-pause.ts` changes the revision on resume. The physical guard in `src/codex/auth-context.ts` also rejects newly paused queued sends. Confirmed permanent refusals preserve credentials instead of forcing token refresh; threshold-triggered retries retain fixed-selector, file and send-budget guards.
