@@ -57,6 +57,7 @@ import { rememberResponseState } from "../../responses/state";
 import { trackStreamLifetime } from "../lifecycle";
 import { isAntigravityRawValidationRefusal } from "./antigravity-validation-refusal";
 import { createSidecarSendBudget } from "./sidecar-send-budget";
+import { anthropicFastRefused } from "./core-opaque-recovery";
 
 /** One responsibility of the Responses request pipeline; state owners are explicit. */
 export async function executeResponsesSidecars(
@@ -224,6 +225,7 @@ export async function executeResponsesSidecars(
     || (logCtx.activeAttempt?.deliverySummary?.semanticBytes ?? 0) > 0
     || (logCtx.activeAttempt?.deliverySummary?.sideEffectEvents ?? 0) > 0;
   const noteSidecarOutput = () => { sidecarOutputStarted = true; options.onFirstOutput?.(); };
+  let fastDowngradeAttempted = false;
   // A single request may rotate once for a verification refusal. Keep this separate from the
   // broader OAuth failover count: a sidecar turn can also spend that count on rate-limit recovery.
   let antigravityValidationRotationAttempted = false;
@@ -668,6 +670,23 @@ export async function executeResponsesSidecars(
       })(input, init)) as typeof globalThis.fetch;
     const loopResponse = await runWithWebSearch({
       parsed, adapter: transportState.adapter,
+      prepareFastRetry: async (response, request, adapter, attempt) => {
+        if (options.abortSignal?.aborted || sidecarHasCommittedOutput() || isNonReplayableResponse(response)
+          || !await anthropicFastRefused(response, request, adapter.name, fastDowngradeAttempted,
+            options.abortSignal ?? new AbortController().signal)) return false;
+        const hop = reserveCredentialHop("repair", sendBudgetState.adapterDispatchBudget?.lastTargetKey
+          ?? `${route.providerName}|${request.url}|${route.modelId}`);
+        if (!hop.allowed) return false;
+        fastDowngradeAttempted = true;
+        for (const current of [parsed, attempt]) {
+          current.options.tierDecision = { kind: "drop" };
+          current.options.serviceTier = undefined;
+          if (current.options.tierObservation)
+            current.options.tierObservation = { ...current.options.tierObservation, upstreamDeclinedFast: true };
+        }
+        sidecarBudget.ownCredentialHop(hop.permit, true);
+        return true;
+      },
       ...(transportState.adapter.name === "anthropic" ? { thinkingRecovery } : {}),
       clientToolCatalogRestriction: route.provider.authMode === "forward" ? undefined : requestState.clientToolCatalogRestriction,
       onIterationEnd: sidecarBudget.releaseUnsentHop,

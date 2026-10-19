@@ -8,6 +8,8 @@ live adapter budget instead. Initial headers are acquired before Response return
 remain with ingress cleanup. RunTurn search retains its ordinary producer owner; standalone search
 and direct callers keep their existing behavior.
 
+Anthropic Fast refusals in the routed search loop follow the [Fast downgrade recovery contract](../transports/responses-failover.md#anthropic-fast-downgrade-recovery), including requests that enable search but never call it.
+
 Final client tool output after hosted search follows the [explicit empty client-catalog boundary](../transports/responses-wire-shapes.md#declared-tool-membership-by-inbound-wire), before client delivery or continuation state. Internal search execution retains its existing behavior.
 
 ## Serving the relay without ChatGPT auth

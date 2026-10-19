@@ -355,6 +355,9 @@ export interface WebSearchLoopDeps {
   onRotatedUsage?: (usage: OcxUsage) => boolean;
   /** Observe the exact adapter request selected for each routed-model iteration. */
   onRequestBuilt?: (request: AdapterRequest) => void;
+  /** Reserve a same-account standard-speed resend before generic 429 handling. */
+  prepareFastRetry?: (response: Response, request: AdapterRequest, adapter: ProviderAdapter,
+    parsed: OcxParsedRequest) => Promise<boolean>;
   /** Request-scoped executor retains the core's selection binding across loop retries. */
   thinkingRecovery?: ReturnType<typeof createAnthropicThinkingRecovery>;
   fetchForRequest?: (request: AdapterRequest, parsed: OcxParsedRequest, adapter: ProviderAdapter, recovery?: AttemptRecoveryKind) => typeof globalThis.fetch;
@@ -649,6 +652,12 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         }
       };
       let prepared = await fetchOnce(adapter);
+      if (cachedRequest && await deps.prepareFastRetry?.(prepared.response, cachedRequest, adapter, iterParsed)) {
+        try { void prepared.response.body?.cancel().catch(() => {}); } catch { /* closed */ }
+        cachedRequest = undefined;
+        cachedAdapter = undefined;
+        prepared = await fetchOnce(adapter, "anthropic-fast-downgrade");
+      }
       // Same-target 429 wait-and-retry (opt-in `retryOn429`) BEFORE key rotation: a primary-key
       // rate-limit blip replays on the SAME key; rotation only runs after attempts exhaust.
       while (

@@ -251,3 +251,53 @@ for (const second of ["success", "rate", "billing"] as const) test(`key pool fas
   expect(sends[0]!.body.speed).toBe("fast");
   for (const send of sends.slice(1)) expect(send.body.speed).toBeUndefined();
 });
+
+
+test("Codex Fast with web search falls back before account recovery", async () => {
+  const configured = config();
+  delete configured.fastMode;
+  configured.webSearchSidecar = { backend: "exa", exaApiKey: "synthetic-exa-key" };
+  const sends = fakeUpstream(index => index === 1 ? refusal(CREDITS) : new Response([
+    { type: "message_start", message: { id: "msg-ok", type: "message", role: "assistant", model: "claude-opus-5-5", content: [], usage: { input_tokens: 1, output_tokens: 0 } } },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1, speed: "standard" } },
+    { type: "message_stop" },
+  ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } }));
+  const logCtx: RequestLogContext = { model: "", provider: "" };
+  const response = await handleResponses(new Request("http://localhost/v1/responses", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "anthropic-apikey/claude-opus-5-5", service_tier: "priority",
+      input: "hi", stream: true, tools: [{ type: "web_search" }] }),
+  }), configured, logCtx);
+  const body = await response.text();
+  expect(body).toContain("response.completed");
+  expect(sends.map(send => send.body.speed)).toEqual(["fast", undefined]);
+  expect(logCtx.activeAttempt?.recoveryKinds).toEqual(["anthropic-fast-downgrade"]);
+  expect(logCtx.activeAttempt?.sendCount).toBe(2);
+  expect(logCtx.executionBudget?.used).toBe(2);
+  expect(sends[1]?.headers.get("x-api-key")).toBe(sends[0]?.headers.get("x-api-key"));
+  expect(logCtx.activeAttempt?.tierOutcome).toMatchObject({ fastOutcome: "downgraded", fastDowngradeReason: "response-declined" });
+});
+
+
+test.each(["generic", "standard", "repeated", "exhausted"] as const)("web-search Fast recovery preserves %s refusal boundaries", async scenario => {
+  const configured = config(scenario !== "standard");
+  configured.webSearchSidecar = { backend: "exa", exaApiKey: "synthetic-exa-key" };
+  const sends = fakeUpstream(() => refusal(scenario === "generic" ? GENERIC : CREDITS));
+  const logCtx: RequestLogContext = { model: "", provider: "" };
+  const sendBudget = createRequestExecutionBudget({ maxTotalModelSends: scenario === "exhausted" ? 1 : 4,
+    baseSendAllowance: scenario === "exhausted" ? 1 : 4, finalRecoveryAllowance: 0,
+    maxAlternateTargetSends: 0, maxTargetTransitions: 0 });
+  const response = await handleResponses(new Request("http://localhost/v1/responses", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "anthropic-apikey/claude-opus-5-5", service_tier: "priority",
+      input: "hi", stream: true, tools: [{ type: "web_search" }] }),
+  }), configured, logCtx, { sendBudget });
+  expect(await response.text()).toContain(scenario === "generic" ? GENERIC.error.message : CREDITS.error.message);
+  expect(sends.map(send => send.body.speed)).toEqual(scenario === "repeated" ? ["fast", undefined]
+    : [scenario === "standard" ? undefined : "fast"]);
+  expect(sendBudget.used).toBe(sends.length);
+  expect(logCtx.activeAttempt?.recoveryKinds ?? []).toEqual(scenario === "repeated" ? ["anthropic-fast-downgrade"] : []);
+});

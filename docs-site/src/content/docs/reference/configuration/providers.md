@@ -792,8 +792,9 @@ Anthropic's `usage.speed` echo determines the outcome: `fast` confirms Fast, `st
 downgrade, and a missing echo is unconfirmed. Only confirmed Fast usage receives the 2x list-price
 estimate (Opus 5.5 $8 input / $40 output; Opus 5 and 4.8 $10 input / $50 output per million tokens).
 If the first fast send is rejected because usage credits are required, an organization disabled Fast,
-the model rejects `speed`, or the fast pool is empty, the main adapter dispatch can make one budgeted
-standard-speed resend. Generic rate limits and capacity errors keep their usual handling. Subsequent
+the model rejects `speed`, or the fast pool is empty, the main adapter dispatch or web-search bridge
+can make one budgeted standard-speed resend before visible output or side effects. Enabling Codex
+web search uses this bridge even if the model never calls the search tool. Generic rate limits and capacity errors keep their usual handling. Subsequent
 builds of that request stay at standard speed; a new turn may encounter the refusal again.
 
 Subscription Fast on Pro/Max needs usage credits; Team/Enterprise organizations also need admin
