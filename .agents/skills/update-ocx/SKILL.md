@@ -5,8 +5,8 @@ description: Use when the local OpenCodex checkout and its global-node-tools ins
 
 # Update OCX
 
-Refresh the current OpenCodex branch from `upstream/main`, build a local npm
-tarball without linking it, publish it through `global-node-tools`, repair the
+Refresh `custom` in `donadiosolutions/opencodex` from `upstream/main`, build a
+local npm tarball without linking it, publish it through `global-node-tools`, repair the
 supervised proxy, verify the effective immutable release, then commit and push.
 
 ## CONNECTION-SEVERING TRAP — NEVER SPLIT THE HANDOFF
@@ -64,9 +64,11 @@ path before dispatching the whole line in one terminal/tool call.
 1. Read the repository instructions and use `lcm-memory`. Identify the primary
    worktree with `git worktree list --porcelain`; when operating in another
    local worktree, read `<primary-worktree>/AGENTS.local.md` if it exists.
-2. Require a named current branch. Refuse detached HEAD and direct operation on
-   `main`, `dev`, or `preview` unless the user explicitly overrides that branch
-   boundary.
+2. Require the current branch to be `custom` and `origin` to target
+   `donadiosolutions/opencodex` for both fetch and push, unless the user
+   explicitly selects another destination. Refuse detached HEAD and direct
+   operation on `main`, `dev`, or `preview` unless the user explicitly overrides
+   that branch boundary. Keep `upstream` pointed at `lidge-jun/opencodex`.
 3. By default, require an empty index and no tracked modifications. Record and
    preserve unrelated untracked files.
 4. The clean-tracked-worktree rule is a safety default, not an invariant. A
@@ -270,11 +272,12 @@ After, and only after, live verification succeeds:
    repository changes; never manufacture an empty commit.
 3. Verify signatures, DCO trailers, `git diff --check`, upstream ancestry, and
    the user-selected worktree-state contract.
-4. Push the current branch to `origin` with `git push --no-verify`, never with
+4. Push `custom` to `origin` with `git push --no-verify origin custom`, never with
    force. `--no-verify` bypasses only the deliberately waived local pre-push
    hook; it does not weaken remote/ref verification or permit a force push.
-5. Query `refs/heads/<current-branch>` with `git ls-remote` and require its SHA
-   to equal local `HEAD`.
+5. Query `refs/heads/custom` on `origin` with `git ls-remote` and require its SHA
+   to equal local `HEAD`. If the user explicitly selected another destination,
+   use that branch and remote in both the push and verification.
 
 Do not commit or push when installation or live verification failed. A direct
 user instruction may override Git handling for that invocation; apply it only

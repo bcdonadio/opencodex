@@ -1,4 +1,4 @@
 interface:
   display_name: "Update OCX"
   short_description: "Update OCX without dropping Codex"
-  default_prompt: "Use $update-ocx to merge upstream, rebuild and install the managed OCX tarball, and refresh the live service without dropping this Codex session."
+  default_prompt: "Use $update-ocx to update custom in donadiosolutions/opencodex from upstream/main, rebuild and install the managed OCX tarball, refresh the live service without dropping this Codex session, then commit and push to origin/custom."
