@@ -12,6 +12,7 @@ import {
   type CodexAuthPolicyConfig,
 } from "../codex/auth-context";
 import { recordCodexUpstreamOutcome, type CodexUpstreamOutcome } from "../codex/routing";
+import { codexFailureWindowOutcomeMeta } from "../codex/routing/failure-window";
 import { inspectChatGptDomainClaim } from "../oauth/chatgpt";
 import {
   ForwardAdmissionCredentialError,
@@ -213,6 +214,7 @@ export async function resolveFirstUsableOpenAiSidecar(
         releaseCodexAuthContextProbeLease(authContext);
         throw new CodexPoolAuthenticationError("Selected Codex account is unavailable");
       }
+      const windowMeta = codexFailureWindowOutcomeMeta(authContext);
       return {
         ...candidate,
         authContext,
@@ -228,6 +230,7 @@ export async function resolveFirstUsableOpenAiSidecar(
             probeLeaseId: authContext.probeLeaseId,
             probeQuotaScope: authContext.probeQuotaScope,
             writerGeneration: authContext.writerGeneration,
+            ...windowMeta,
             // 401/403 here is evidence about this exact stored credential; without the generation a
             // replacement inherits the quarantine (#2892 gap 4).
             ...(authContext.kind === "pool" ? { credentialGeneration: authContext.generation } : {}),
@@ -275,6 +278,7 @@ export async function resolveFirstUsableOpenAiSidecar(
       releaseCodexAuthContextProbeLease(authContext);
       continue;
     }
+    const windowMeta = codexFailureWindowOutcomeMeta(authContext);
     return {
       ...candidate,
       authContext,
@@ -293,6 +297,7 @@ export async function resolveFirstUsableOpenAiSidecar(
               probeLeaseId: authContext.probeLeaseId,
               probeQuotaScope: authContext.probeQuotaScope,
               writerGeneration: authContext.writerGeneration,
+              ...windowMeta,
               // Same fence as the exact-account recorder above (#2892 gap 4).
               ...(authContext.kind === "pool" ? { credentialGeneration: authContext.generation } : {}),
             },

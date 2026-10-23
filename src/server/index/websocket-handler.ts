@@ -2,6 +2,7 @@ import { nativeSteeringUnavailableReason, nativeResponseControlMode, type Native
 import { NativeInjectionChannel } from "../responses/native-injection";
 import { NativeSteeringChannel, NativeSteeringError } from "../responses/native-steering";
 import { createNativeSteeringLogObserver } from "../responses/native-steering-log";
+import { reasoningArchiveErrorResponse } from "../responses/reasoning-archive-error";
 import type { Server, ServerWebSocket } from "bun";
 import {
   LIVE_SIDEBAND_UPSTREAM_OPEN_TIMEOUT_MS,
@@ -401,7 +402,7 @@ export function createWebsocketHandler(
             if (!logged) finalizeLog(turnAbort.signal.aborted ? 499 : response.status);
           } catch (err) {
             if (!isCurrent()) return;
-            const failureStatus = err instanceof CodexAccountCooldownError ? 429 : 502;
+            let failureStatus = err instanceof CodexAccountCooldownError ? 429 : 502;
             try {
               if (err instanceof CodexAccountCooldownError) {
                 // Codex Desktop rides this WS transport, so it must carry the same
@@ -420,6 +421,16 @@ export function createWebsocketHandler(
                   type: "rate_limit_error",
                   message: cooldownErrorMessage(err, accountSelector),
                 }));
+                recordDownstreamTerminal(logCtx);
+                return;
+              }
+              // A local archive refusal happens before any send. Carry the same sanitized 503
+              // body and stable code as HTTP so no filesystem path reaches the client frame.
+              const archiveError = reasoningArchiveErrorResponse(err);
+              if (archiveError) {
+                failureStatus = archiveError.status;
+                const body = await archiveError.json() as { error: Record<string, unknown> };
+                sendJsonFrame(ws, buildWsErrorFrame(archiveError.status, body.error));
                 recordDownstreamTerminal(logCtx);
                 return;
               }

@@ -289,7 +289,7 @@ function terminalInputIndex(input: unknown[]): number {
     const type = input[itemIndex] && typeof input[itemIndex] === "object"
       ? (input[itemIndex] as { type?: unknown }).type
       : undefined;
-    if (type !== "compaction_trigger" && type !== "additional_tools") break;
+    if (type !== "compaction_trigger" && type !== "additional_tools" && type !== "configuration_update") break;
     itemIndex -= 1;
   }
   return itemIndex;

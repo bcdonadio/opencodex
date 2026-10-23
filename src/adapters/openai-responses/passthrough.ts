@@ -40,7 +40,7 @@ import {
   emittedFastWire,
 } from "../../providers/fastwire";
 import { dropResponsesReasoningInputItems, mapRoutedResponsesReasoningEffort, normalizeConfiguredReasoningSummaryDelivery, sanitizeReasoningInputContent, stripDisabledReasoningSummaries, stripDisabledVerbosity, stripNoneReasoningSummary, stripUnsupportedReasoningSummaryDelivery } from "./reasoning";
-import { scrubOcxCompactionItems, stripCanonicalOnlyToolFields, stripCanonicalOnlyTopLevelFields, stripChatGptAccessPrograms, stripInternalChatMessageMetadataPassthrough, stripInvalidItemIds, stripItemIdsWhenUnstored, stripProviderInputItemMetadata, stripRejectedSamplingParams } from "./request-strips";
+import { scrubOcxCompactionItems, stripCanonicalOnlyInputItems, stripCanonicalOnlyToolFields, stripCanonicalOnlyTopLevelFields, stripChatGptAccessPrograms, stripInternalChatMessageMetadataPassthrough, stripInvalidItemIds, stripItemIdsWhenUnstored, stripProviderInputItemMetadata, stripRejectedSamplingParams } from "./request-strips";
 import { notePlaintextReasoningDropped } from "./plaintext-reasoning-notice";
 import { stripCanonicalForwardPromptCacheOptions, stripDeprecatedPromptCacheRetention } from "./prompt-cache";
 import { isPlainObject } from "./internal";
@@ -55,6 +55,7 @@ import { observeOutbound } from "../../usage/cache-diagnostic";
 import { normalizeMuseToolChoice } from "./muse-tool-choice";
 import { declaresHostedWebSearch, projectHostedSearchHistory, renderCompactionSearchHistoryItems } from "./compaction-search-history";
 import { stripKimiEmptyAssistantMessages } from "./empty-assistant";
+import { normalizeOpenGatewayResponsesInput } from "./opengateway-input";
 
 /**
  * Identifies DeepSeek's strict Responses replay contract: tool-bearing continuations need
@@ -352,6 +353,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         if (!isOpenAiOperatedResponsesDestination(provider)) {
           if (parsed._compactionRequest !== true && isPlainObject(outBody)) outBody = frameCompactionHistory(outBody);
           outBody = stripCanonicalOnlyTopLevelFields(outBody);
+          outBody = stripCanonicalOnlyInputItems(outBody);
         }
         outBody = promoteClientLoadedTools(outBody);
       }
@@ -528,15 +530,17 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
           || !declaresHostedWebSearch(finalBody))) {
         finalBody = projectHostedSearchHistory(finalBody);
       }
+      finalBody = normalizeOpenGatewayResponsesInput(finalBody, url);
       observeOutbound(parsed._rawBody, finalBody, headers);
       if (!isCanonicalOpenAiForwardProvider(provider)) {
         validateFinalCustomToolCompatibility(finalBody, provider.supportsResponsesCustomTools);
       }
-      const body = JSON.stringify(applyGithubCopilotContextTier(finalBody, provider, parsed.modelId, incoming.providerName));
+      const wireBody = applyGithubCopilotContextTier(finalBody, provider, parsed.modelId, incoming.providerName);
+      const body = JSON.stringify(wireBody);
       // All wire rewrites have settled. Parsed intent may differ from this body,
       // and an absent emitted field must not acquire an inferred effective effort.
-      const wireEffort = isPlainObject(finalBody) && isPlainObject(finalBody.reasoning)
-        ? finalBody.reasoning.effort : undefined;
+      const wireEffort = isPlainObject(wireBody) && isPlainObject(wireBody.reasoning)
+        ? wireBody.reasoning.effort : undefined;
       const reasoningLog: AdapterRequest["reasoningLog"] = typeof wireEffort === "string" && wireEffort.length > 0
         ? { effectiveEffort: wireEffort, wireField: "reasoning.effort", wireValue: wireEffort }
         : undefined;
@@ -549,6 +553,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         method: "POST",
         headers,
         body,
+        ...(isPlainObject(wireBody) && typeof wireBody.model === "string" ? { outboundModelId: wireBody.model } : {}),
         releaseBodyObservation,
         ...(convertedRoutedCustomToolNames ? { convertedRoutedCustomToolNames } : {}),
         ...(routedCustomToolRepairNames ? { routedCustomToolRepairNames } : {}),

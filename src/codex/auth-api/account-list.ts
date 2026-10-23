@@ -1,7 +1,6 @@
 import { getMainAccountExternalUsageWarning, type MainAccountExternalUsageWarning } from "../main-account-external-usage";
 import { codexCreditsDtoField, hasCodexCreditsObservation, pruneCodexCredits } from "../credits";
 import type { CodexCredits } from "../credits";
-import { getMainChatgptAccountId } from "../auth-collision";
 import { codexAccountLogLabel } from "../account-label";
 import { poolQuotaHistoryIdentity, getCodexAccountCredential, getValidCodexToken, isCodexAccountGenerationLive, readCodexAccountRecord } from "../account-store";
 import { getAccountQuota, isCodexQuotaExhausted, setAccountQuotaFromParsed, withoutRetiredCodexQuota } from "../quota";
@@ -36,6 +35,7 @@ import type { PoolQuotaResult } from "./pool-quota-probe";
 import { getRuntimeConfig, configuredPoolAccount, mapWithConcurrency } from "./runtime-config";
 import { cachedCodexAccountEntitlements, type CodexAccountDisplayEntitlement } from "../model-entitlements";
 import { isPassiveRead } from "../../lib/passive-read";
+import { CODEX_MAIN_DUPLICATE_ACTION, configuredCodexMainDuplicate, getObservedMainCodexCollisionIdentity } from "../collision-identity";
 
 export function quotaForPlan<T extends Omit<StoredAccountQuota, "updatedAt"> | StoredAccountQuota | null>(
   quota: T,
@@ -134,6 +134,7 @@ export function poolAccountDto(
   // health projection. Emitting only the boolean is what left #4212's reporter guessing which
   // account took their model away and why, so name the cause they actually have to act on.
   const reauthReason: CodexAccountReauthReason | undefined = rawReauthReason ?? (health.status === "reauth_required" ? health.reason : undefined);
+  const duplicateMain = configuredCodexMainDuplicate(config, account.id);
   return {
     id: account.id,
     email: projectEmail(account.email, maskEmails) ?? account.email,
@@ -152,7 +153,10 @@ export function poolAccountDto(
     ...codexCreditsDtoField(config, account.id, poolQuotaHistoryIdentity(account.id) ?? null),
     needsReauth: needsReauth || health.status === "reauth_required",
     ...(reauthReason !== undefined ? { reauthReason } : {}),
-    ...(isCodexAccountPlanExcluded(config, account.id) ? {
+    ...(duplicateMain ? {
+      selectionExcludedReason: "duplicate_main" as const,
+      selectionExcludedAction: CODEX_MAIN_DUPLICATE_ACTION,
+    } : isCodexAccountPlanExcluded(config, account.id) ? {
       selectionExcludedReason: "plan_excluded" as const,
       selectionExcludedPlan: codexPlanValue(config.codexAccounts?.find(row => row.id === account.id)?.plan),
     } : {}),
@@ -188,8 +192,9 @@ export interface CodexAuthAccountDto {
    * needs the operator; `/api/oauth/accounts` already carries the same field name.
    */
   reauthReason?: CodexAccountReauthReason;
-  /** Automatic selection policy only; explicit routes retain their usual auth checks. */
-  selectionExcludedReason?: "plan_excluded";
+  /** Plan policy is automatic-only; duplicate-main exclusions also apply to explicit routes. */
+  selectionExcludedReason?: "plan_excluded" | "duplicate_main";
+  selectionExcludedAction?: string;
   selectionExcludedPlan?: string;
   hasCredential: boolean;
   health: OAuthAccountHealth;
@@ -424,7 +429,7 @@ export async function listCodexAuthAccountsSnapshot(
       quota: mainInfo.quota
         ? quotaForPlan(mainQuotaWithCarriedResetCredits(mainInfo.quota), mainInfo.plan)
         : null,
-      ...codexCreditsDtoField(runtimeConfig, MAIN_CODEX_ACCOUNT_ID, getMainChatgptAccountId()),
+      ...codexCreditsDtoField(runtimeConfig, MAIN_CODEX_ACCOUNT_ID, getObservedMainCodexCollisionIdentity()?.accountId ?? null),
       ...oauthAccountHealthFields("codex", MAIN_CODEX_ACCOUNT_ID, mainHealth),
     };
     return {

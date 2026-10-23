@@ -13,6 +13,7 @@ import { safeResponseHeaders } from "./safe-response-headers";
 import { snapshotClientIdentity, type ClientIdentitySnapshot } from "./transaction-client-capture";
 import type { AudioSocketTarget } from "./audio-dictation";
 import type { CodexWebSocketActivity } from "../codex/websocket-activity";
+import { AGENT_ASSERTION_HEADER } from "../lib/authorization-scheme";
 
 export { safeResponseHeaders } from "./safe-response-headers";
 
@@ -170,6 +171,10 @@ export function selectForwardHeaders(
   if (codexOverride) {
     selected.set("authorization", `Bearer ${codexOverride.accessToken}`);
     selected.set("chatgpt-account-id", codexOverride.chatgptAccountId);
+  } else {
+    // Kept for the WS turn pipeline, which drops it again everywhere except first-party Direct.
+    const assertion = headers.get(AGENT_ASSERTION_HEADER);
+    if (assertion) selected.set(AGENT_ASSERTION_HEADER, assertion);
   }
   return selected;
 }

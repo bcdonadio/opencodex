@@ -112,6 +112,7 @@ import type {
 import {
   codexRouteCredentialDomainHeaders,
   codexRouteCredentialOwnership,
+  mainHardLockFallbackCallerCheck,
   resolveResponsesCodexAuth,
   withClaudeNativeSession,
 } from "./core-auth";
@@ -174,6 +175,7 @@ import {
 import { acquireUpstreamHostAdmission } from "../../codex/upstream-host-health";
 import { applyCompactionRoutingOverride, compactionRoutingKeepsProviderIdentity } from "./compaction-routing";
 import { applyMainHardLockFallbackOverride } from "./main-hard-lock-routing";
+import { FallbackRefusedError } from "../../routing/fallback-policy";
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import {
   conversationStateBindingFromAuth,
@@ -388,7 +390,17 @@ export async function prepareResponsesRequest(
   // must run before comboIdFromRawBody reads `model`.
   if (!concreteSelection && !options.compactionRoutingOverride && !isCompactionTrigger && !options.internalDecisionCall
     && !shadowCallIntercepted && !shadowCallMatches && !memoryModelApplies && !threadSpawn && inboundWire === "responses") {
-    options.mainHardLockFallbackOverride = applyMainHardLockFallbackOverride(body, config);
+    try {
+      options.mainHardLockFallbackOverride = await applyMainHardLockFallbackOverride(
+        body, config, undefined, mainHardLockFallbackCallerCheck(req, config, options), options.admission,
+      );
+    } catch (error) {
+      if (options.abortSignal?.aborted || req.signal.aborted) return clientCancelledResponse();
+      if (error instanceof FallbackRefusedError) return error.response;
+      const mapped = mapCodexAuthContextErrorToResponse(error, { now: Date.now() });
+      if (mapped) return mapped;
+      throw error;
+    }
   }
   const comboId = !concreteSelection ? comboIdFromRawBody(body, config) : null;
   // A decision model may be a plain model or a non-JEV combo. A JEV combo here would recurse
@@ -1034,7 +1046,9 @@ export async function prepareResponsesRequest(
       subagentFallbackModelEligibleAccountIdsForModel,
       fallbackChain,
       candidateRoute => canPassThroughEncryptedV2AgentTask(candidateRoute, inboundWire),
+      options.admission,
     );
+    if (fallback?.refusal) return fallback.refusal;
     if (fallback) {
       (logCtx as unknown as Record<string, unknown>).subagentModelFallbackFrom = fallback.from;
       (logCtx as unknown as Record<string, unknown>).subagentModelFallbackTo = fallback.to;
@@ -1383,11 +1397,15 @@ export async function prepareResponsesRequest(
                 recoverySelectionOptions,
                 subagentFallbackAccountPreview,
                 subagentFallbackModelEligibleAccountIdsForModel,
+                undefined,
+                undefined,
+                options.admission,
               );
             } finally {
               recoverySelectionAdmission?.release();
             }
           })();
+          if (fallback?.refusal) return fallback.refusal;
           if (fallback) {
             (logCtx as unknown as Record<string, unknown>).subagentModelFallbackFrom = fallback.from;
             (logCtx as unknown as Record<string, unknown>).subagentModelFallbackTo = fallback.to;
